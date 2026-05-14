@@ -21,8 +21,14 @@ jobs:
         with:
           version: latest
 
+      - name: Link Supabase project
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+        run: |
+          supabase link --project-ref vanzrpqmkmqgsbjdnfvj --password "${{ secrets.SUPABASE_DB_PASSWORD }}"
+
       - name: Deploy migrations
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
         run: |
-          supabase db push --project-id vanzrpqmkmqgsbjdnfvj --password "${{ secrets.SUPABASE_DB_PASSWORD }}"
+          supabase db push --password "${{ secrets.SUPABASE_DB_PASSWORD }}"
