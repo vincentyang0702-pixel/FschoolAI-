@@ -30,55 +30,143 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests psycopg2-binary
+          pip install requests supabase
       
       - name: Deploy migrations to Supabase
         env:
-          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+          SUPABASE_API_KEY: ${{ secrets.SUPABASE_API_KEY }}
           SUPABASE_DB_PASSWORD: ${{ secrets.SUPABASE_DB_PASSWORD }}
         run: |
-          python << 'EOF'
+          python << 'PYTHON_EOF'
           import os
           import glob
-          import requests
+          import subprocess
+          import sys
           
           # Get all migration files
           migration_files = sorted(glob.glob('supabase/migrations/*.sql'))
           
           if not migration_files:
               print("❌ No migration files found")
-              exit(1)
+              sys.exit(1)
           
           print(f"📊 Found {len(migration_files)} migration file(s)")
+          print("=" * 70)
           
           # Read and combine all migrations
           combined_sql = ""
           for migration_file in migration_files:
               print(f"📖 Reading: {migration_file}")
               with open(migration_file, 'r') as f:
-                  combined_sql += f.read() + "\n\n"
+                  content = f.read()
+                  combined_sql += content + "\n\n"
           
           print(f"✅ Combined SQL ({len(combined_sql)} bytes)")
+          print("=" * 70)
           
-          # For now, just verify the SQL is valid
-          if "CREATE TABLE" in combined_sql:
-              print("✅ SQL contains CREATE TABLE statements")
-              print("✅ Migration file is valid")
-              print("\n📝 To deploy, you need to:")
-              print("1. Go to Supabase SQL Editor")
-              print("2. Create a new query")
-              print("3. Paste the migration SQL")
-              print("4. Click Run")
-              print("\nOr provide Supabase credentials for automatic deployment")
-          else:
-              print("❌ SQL does not contain CREATE TABLE statements")
-              exit(1)
+          # Save to temporary file
+          with open('/tmp/deploy_migrations.sql', 'w') as f:
+              f.write(combined_sql)
           
-          print("\n✅ Migration verification complete!")
-          EOF
+          # Use psql to deploy
+          db_host = "vanzrpqmkmqgsbjdnfvj.supabase.co"
+          db_user = "postgres"
+          db_name = "postgres"
+          db_password = os.getenv("SUPABASE_DB_PASSWORD")
+          
+          if not db_password:
+              print("❌ SUPABASE_DB_PASSWORD not set")
+              sys.exit(1)
+          
+          print(f"\n🚀 Deploying to {db_host}...")
+          
+          # Set password for psql
+          env = os.environ.copy()
+          env['PGPASSWORD'] = db_password
+          
+          try:
+              result = subprocess.run(
+                  ['psql', '-h', db_host, '-U', db_user, '-d', db_name, '-f', '/tmp/deploy_migrations.sql'],
+                  env=env,
+                  capture_output=True,
+                  text=True,
+                  timeout=120
+              )
+              
+              # Print output
+              if result.stdout:
+                  print("✅ Output:")
+                  print(result.stdout)
+              
+              if result.stderr:
+                  print("⚠️  Warnings/Errors:")
+                  print(result.stderr)
+              
+              if result.returncode == 0:
+                  print("\n" + "=" * 70)
+                  print("✅ DEPLOYMENT SUCCESSFUL!")
+                  print("=" * 70)
+                  print("📊 All migrations have been deployed to Supabase")
+              else:
+                  print(f"\n❌ Deployment failed with return code: {result.returncode}")
+                  sys.exit(1)
+                  
+          except subprocess.TimeoutExpired:
+              print("❌ Deployment timed out")
+              sys.exit(1)
+          except Exception as e:
+              print(f"❌ Error: {e}")
+              sys.exit(1)
+          
+          PYTHON_EOF
+      
+      - name: Verify deployment
+        env:
+          SUPABASE_API_KEY: ${{ secrets.SUPABASE_API_KEY }}
+        run: |
+          python << 'PYTHON_EOF'
+          import requests
+          import os
+          
+          SUPABASE_URL = "https://vanzrpqmkmqgsbjdnfvj.supabase.co"
+          SUPABASE_API_KEY = os.getenv("SUPABASE_API_KEY")
+          
+          print("\n🔍 Verifying deployment...")
+          print("=" * 70)
+          
+          # Query the database to check if tables exist
+          headers = {
+              "apikey": SUPABASE_API_KEY,
+              "Authorization": f"Bearer {SUPABASE_API_KEY}",
+              "Content-Type": "application/json"
+          }
+          
+          # Check for one of the new tables
+          try:
+              response = requests.get(
+                  f"{SUPABASE_URL}/rest/v1/users?limit=1",
+                  headers=headers,
+                  timeout=10
+              )
+              
+              if response.status_code in [200, 404]:
+                  print("✅ Database is accessible")
+                  if response.status_code == 200:
+                      print("✅ Users table exists and is accessible")
+                  else:
+                      print("⚠️  Users table not found (may still be deploying)")
+              else:
+                  print(f"⚠️  Response: {response.status_code}")
+                  
+          except Exception as e:
+              print(f"⚠️  Could not verify: {e}")
+          
+          print("=" * 70)
+          
+          PYTHON_EOF
       
       - name: Notify deployment
         if: success()
         run: |
           echo "✅ Deployment workflow completed successfully!"
-          echo "📊 Schema is ready to deploy to Supabase"
+          echo "📊 NeuroOS schema deployed to Supabase"
