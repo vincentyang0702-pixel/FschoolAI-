@@ -1,5 +1,6 @@
-# CTO Setup Guide - NeuroAGI Backend
+# CTO Setup Guide - FschoolAI Backend
 
+**Owned by FschoolAI Inc.**
 **Complete handoff documentation for immediate takeover.**
 
 ---
@@ -380,7 +381,8 @@ npm install
 
 ---
 
-**Backend Status: ✅ Production Ready**
+**Owner:** FschoolAI Inc.
+**Backend Status:** ✅ Production Ready
 **Last Updated:** May 21, 2026
 **Version:** 1.0.0
 

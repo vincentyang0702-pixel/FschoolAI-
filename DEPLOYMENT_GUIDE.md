@@ -1,5 +1,6 @@
-# NeuroAGI Backend Deployment Guide
+# FschoolAI Backend Deployment Guide
 
+**Owned by FschoolAI Inc.**
 **For CTO Handoff** - Complete production-ready backend system.
 
 ## System Overview
@@ -383,6 +384,7 @@ ORDER BY created_at DESC;
 
 ---
 
-**Backend Status: ✅ Production Ready**
+**Owner:** FschoolAI Inc.
+**Backend Status:** ✅ Production Ready
 **Last Updated:** May 21, 2026
 **Version:** 1.0.0

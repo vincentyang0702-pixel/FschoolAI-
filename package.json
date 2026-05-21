@@ -1,7 +1,7 @@
 {
-  "name": "neuroagi-fschoolai-backend",
+  "name": "fschoolai-backend",
   "version": "1.0.0",
-  "description": "NeuroAGI Backend - Proactive Cognitive AI Brain for FschoolAI",
+  "description": "FschoolAI Backend - Proactive Cognitive AI Brain for Education",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
@@ -23,8 +23,8 @@
     "education",
     "canvas-lms"
   ],
-  "author": "NeuroAGI Team",
-  "license": "MIT",
+  "author": "FschoolAI Inc.",
+  "license": "Proprietary",
   "dependencies": {
     "express": "^4.18.2",
     "cors": "^2.8.5",
