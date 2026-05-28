@@ -103,30 +103,33 @@ export default function Assignment() {
     setSelection({ text, start, end });
 
     const TOOLBAR_WIDTH = 320;
-    const vw  = window.innerWidth;
-    // visible height shrinks when keyboard opens
-    const vh  = window.visualViewport?.height ?? window.innerHeight;
+    const vw = window.innerWidth;
+    const vh = window.visualViewport?.height ?? window.innerHeight;
 
-    // getBoundingClientRect + position:fixed are both viewport-relative — no scroll offset needed
+    // Try DOM selection rect first (works on desktop/iOS)
     const sel = window.getSelection();
     if (sel && sel.rangeCount > 0) {
       const rect = sel.getRangeAt(0).getBoundingClientRect();
       if (rect.width > 0 || rect.height > 0) {
-        const left = Math.max(TOOLBAR_WIDTH / 2 + 8, Math.min(vw - TOOLBAR_WIDTH / 2 - 8, rect.left + rect.width / 2));
-        // prefer above the word; if too close to top flip below; always stay above keyboard
+        const left  = Math.max(TOOLBAR_WIDTH / 2 + 8, Math.min(vw - TOOLBAR_WIDTH / 2 - 8, rect.left + rect.width / 2));
         const above = rect.top - 52;
-        const below = rect.bottom + 8;
-        const top   = above >= 70 ? Math.min(above, vh - 60) : Math.min(below, vh - 60);
+        const top   = above >= 70 ? Math.min(above, vh - 60) : Math.min(rect.bottom + 8, vh - 60);
         setToolbarPos({ top, left });
         return;
       }
     }
 
-    // Fallback: just above the textarea, clamped to visible area
-    const rect  = ta.getBoundingClientRect();
-    const left  = Math.max(TOOLBAR_WIDTH / 2 + 8, Math.min(vw - TOOLBAR_WIDTH / 2 - 8, rect.left + rect.width / 2));
-    const above = rect.top - 52;
-    const top   = above >= 70 ? Math.min(above, vh - 60) : Math.min(rect.bottom + 8, vh - 60);
+    // Android fallback: estimate Y from line number inside textarea
+    const taRect   = ta.getBoundingClientRect();
+    const computed = window.getComputedStyle(ta);
+    const lineH    = parseFloat(computed.lineHeight) || 20;
+    const padTop   = parseFloat(computed.paddingTop)  || 0;
+    const midOffset = Math.floor((start + end) / 2);
+    const linesBefore = ta.value.slice(0, midOffset).split('\n').length - 1;
+    const estimatedY  = taRect.top + padTop + linesBefore * lineH - ta.scrollTop + lineH / 2;
+    const clampedY    = Math.max(0, Math.min(estimatedY, vh));
+    const top  = clampedY - 52 >= 70 ? clampedY - 52 : Math.min(clampedY + lineH + 8, vh - 60);
+    const left = Math.max(TOOLBAR_WIDTH / 2 + 8, Math.min(vw - TOOLBAR_WIDTH / 2 - 8, taRect.left + taRect.width / 2));
     setToolbarPos({ top, left });
   }, []);
 
