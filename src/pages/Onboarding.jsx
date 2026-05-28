@@ -89,10 +89,11 @@ function statusBg(s) {
 }
 
 function statusLabel(s) {
-  if (s === "supported") return "Supported";
-  if (s === "needsApplication") return "Apply first";
-  if (s === "comingSoon") return "Coming soon";
-  return "Custom";
+  if (s === "supported")         return "Supported";
+  if (s === "needsApplication")  return "Apply first";
+  if (s === "comingSoon")        return "Coming soon";
+  if (s === "needsVerification") return "Unverified";
+  return "";
 }
 
 function safeHostname(url) {
@@ -518,7 +519,7 @@ export default function Onboarding({ email, preferredName: initName, onComplete 
                             {s.name}
                           </div>
                           <div style={{ fontSize: "11px", color: statusColor(s.status) }}>
-                            {statusLabel(s.status)}{s.city ? ` · ${s.city}` : ""}{s.country ? `, ${s.country}` : ""}
+                            {[statusLabel(s.status), s.city, s.country].filter(Boolean).join(" · ")}
                           </div>
                         </button>
                       ))}
