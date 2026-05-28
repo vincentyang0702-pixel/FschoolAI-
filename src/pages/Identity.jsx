@@ -96,6 +96,11 @@ export default function Identity() {
               {currentName || "Your Name"}
             </h1>
           )}
+          {(userData?.school || userData?.school_city || userData?.school_country) && (
+            <p style={{ fontSize: "13px", color: "var(--text-secondary)", marginTop: "4px" }}>
+              {[userData.school, userData.school_city, userData.school_country].filter(Boolean).join(" · ")}
+            </p>
+          )}
         </div>
         <button
           onClick={handleSignOut}

@@ -59,17 +59,6 @@ export function AppProvider({ children }) {
         .maybeSingle();
 
       if (user) {
-        // Backfill location for existing accounts that predate the signup fields
-        const patch = {};
-        if (!user.school)    patch.school    = "University of Toronto";
-        if (!user.city)      patch.city      = "Toronto";
-        if (!user.country)   patch.country   = "Canada";
-        if (!user.continent) patch.continent = "North America";
-        if (Object.keys(patch).length) {
-          await supabase.from("users").update(patch).eq("id", userId);
-          Object.assign(user, patch);
-        }
-
         setUserData(user);
         if (user.canvas_token)    setCanvasToken(user.canvas_token);
         if (user.canvas_base_url) setCanvasBaseUrl(user.canvas_base_url);
@@ -121,13 +110,16 @@ export function AppProvider({ children }) {
     setAssignments(prev => [...prev, ...newAssignments]);
   }, []);
 
-  /** Upsert a single field on the users table and update local state. */
-  const updateUserField = useCallback(async (field, value) => {
+  /** Upsert one field (field, value) or multiple fields (object) on the users table. */
+  const updateUserField = useCallback(async (fieldOrPatch, value) => {
+    const patch = typeof fieldOrPatch === "object"
+      ? fieldOrPatch
+      : { [fieldOrPatch]: value };
     await supabase.from("users").upsert(
-      { id: userId, [field]: value },
+      { id: userId, ...patch },
       { onConflict: "id" }
     );
-    setUserData(prev => ({ ...(prev ?? { id: userId }), [field]: value }));
+    setUserData(prev => ({ ...(prev ?? { id: userId }), ...patch }));
   }, [userId]);
 
   return (

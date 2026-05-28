@@ -1,96 +1,28 @@
 import { useState, useEffect, useRef } from "react";
+import { supabase } from "../supabase";
 
-/* ─── School database ──────────────────────────────────────────────────────── */
+/* ─── Supabase school search ───────────────────────────────────────────────── */
 
-const VERIFIED_SCHOOL_DB = [
-  { name: "University of British Columbia", country: "Canada", status: "supported", loginUrl: "https://canvas.ubc.ca", tokenFlow: "selfServe", aliases: ["UBC"], domain: "ubc.ca" },
-  { name: "Simon Fraser University", country: "Canada", status: "supported", loginUrl: "https://canvas.sfu.ca", tokenFlow: "selfServe", aliases: ["SFU"], domain: "sfu.ca" },
-  { name: "University of Toronto", country: "Canada", status: "needsApplication", loginUrl: "https://q.utoronto.ca", tokenFlow: "needsApplication", aliases: ["UofT", "U of T", "UToronto"], domain: "utoronto.ca" },
-  { name: "University of Sydney", country: "Australia", status: "needsApplication", loginUrl: "https://canvas.sydney.edu.au", tokenFlow: "needsApplication", aliases: ["USYD", "USyd"], domain: "sydney.edu.au" },
-  { name: "University of Technology Sydney", country: "Australia", status: "supported", loginUrl: "https://canvas.uts.edu.au", tokenFlow: "selfServe", aliases: ["UTS"], domain: "uts.edu.au" },
-  { name: "Texas A&M University", country: "USA", status: "comingSoon", loginUrl: "", tokenFlow: "restricted", aliases: ["TAMU", "Texas A&M"], domain: "tamu.edu" },
-  { name: "Cornell University", country: "USA", status: "comingSoon", loginUrl: "", tokenFlow: "restricted", aliases: ["Cornell"], domain: "cornell.edu" },
-  { name: "University of Melbourne", country: "Australia", status: "comingSoon", loginUrl: "", tokenFlow: "restricted", aliases: ["UniMelb", "Melbourne Uni"], domain: "unimelb.edu.au" },
-  { name: "Australian National University", country: "Australia", status: "supported", loginUrl: "https://canvas.anu.edu.au", tokenFlow: "selfServe", aliases: ["ANU"], domain: "anu.edu.au" },
-  { name: "University of Newcastle", country: "Australia", status: "supported", loginUrl: "https://canvas.newcastle.edu.au", tokenFlow: "selfServe", aliases: ["UON", "Newcastle Uni"], domain: "newcastle.edu.au" },
-  { name: "University of Texas at Austin", country: "USA", status: "supported", loginUrl: "https://canvas.utexas.edu", tokenFlow: "selfServe", aliases: ["UT Austin", "UTX", "UT"], domain: "utexas.edu" },
-  { name: "Rutgers University", country: "USA", status: "supported", loginUrl: "https://canvas.rutgers.edu", tokenFlow: "selfServe", aliases: ["Rutgers"], domain: "rutgers.edu" },
-  { name: "University of Illinois Urbana-Champaign", country: "USA", status: "supported", loginUrl: "https://canvas.illinois.edu", tokenFlow: "selfServe", aliases: ["UIUC", "Illinois", "U of I"], domain: "illinois.edu" },
-  { name: "University of Illinois Chicago", country: "USA", status: "supported", loginUrl: "https://uic.instructure.com", tokenFlow: "selfServe", aliases: ["UIC"], domain: "uic.edu" },
-  { name: "Temple University", country: "USA", status: "supported", loginUrl: "https://templeu.instructure.com", tokenFlow: "selfServe", aliases: ["Temple"], domain: "temple.edu" },
-  { name: "Ohio University", country: "USA", status: "supported", loginUrl: "https://canvas.ohio.edu", tokenFlow: "selfServe", aliases: ["OU", "Ohio U"], domain: "ohio.edu" },
-  { name: "University of Oxford", country: "UK", status: "supported", loginUrl: "https://canvas.ox.ac.uk", tokenFlow: "selfServe", aliases: ["Oxford"], domain: "ox.ac.uk" },
-  { name: "University of Liverpool", country: "UK", status: "supported", loginUrl: "https://canvas.liverpool.ac.uk", tokenFlow: "selfServe", aliases: ["Liverpool"], domain: "liverpool.ac.uk" },
-  { name: "City University of Hong Kong", country: "Hong Kong", status: "supported", loginUrl: "https://canvas.cityu.edu.hk", tokenFlow: "selfServe", aliases: ["CityU", "CityUHK"], domain: "cityu.edu.hk" },
-  { name: "University of the Witwatersrand", country: "South Africa", status: "supported", loginUrl: "https://ulwazi.wits.ac.za", tokenFlow: "selfServe", aliases: ["Wits", "Wits University"], domain: "wits.ac.za" },
-];
-
-/* ─── Search helpers ───────────────────────────────────────────────────────── */
-
-function normalizeQuery(text) {
-  return text.toLowerCase().replace(/[^a-z0-9\s]/g, "").trim();
-}
-
-function getSearchTerms(school) {
-  const terms = [
-    school.name.toLowerCase(),
-    ...(school.aliases || []).map(a => a.toLowerCase()),
-  ];
-  const base = school.name.replace(/^university of /i, "").replace(/^the /i, "").toLowerCase();
-  if (!terms.includes(base)) terms.push(base);
-  const initials = school.name
-    .split(/\s+/)
-    .filter(w => /[A-Za-z]/.test(w[0] || ""))
-    .map(w => w[0])
-    .join("")
-    .toLowerCase();
-  if (initials.length > 1 && !terms.includes(initials)) terms.push(initials);
-  return terms;
-}
-
-function schoolMatches(school, query) {
-  return getSearchTerms(school).some(t => t.includes(query));
-}
-
-const BLOCKED_KEYWORDS = new Set([
-  "canvas", "lms", "moodle", "d2l", "portal", "learn",
-  "acorn", "brightspace", "courses", "q",
-]);
-
-const DOMAIN_MAP = Object.fromEntries(
-  VERIFIED_SCHOOL_DB.filter(s => s.domain).map(s => [s.domain, s])
-);
-
-function inferNameFromHost(host) {
-  const main = host.replace(/^(canvas|learn|portal|courses|my)\./i, "").split(".")[0];
-  return main.charAt(0).toUpperCase() + main.slice(1);
-}
-
-function inferFromHostname(text) {
-  try {
-    const raw = text.includes("://") ? text : "https://" + text;
-    const hostname = new URL(raw).hostname.replace(/^www\./, "");
-    for (const [domain, school] of Object.entries(DOMAIN_MAP)) {
-      if (hostname === domain || hostname.endsWith("." + domain)) return school;
-    }
-    return { name: inferNameFromHost(hostname), isCustom: true, status: "needsVerification" };
-  } catch {
-    return null;
-  }
-}
-
-function searchSchools(query) {
-  const norm = normalizeQuery(query);
-  if (!norm || BLOCKED_KEYWORDS.has(norm)) return [];
-  let results = VERIFIED_SCHOOL_DB.filter(s => schoolMatches(s, norm));
-  if (results.length === 0) {
-    const inferred = inferFromHostname(query);
-    if (inferred) results = [inferred];
-  }
-  if (results.length === 0) {
-    results = [{ name: query, isCustom: true, status: "needsVerification" }];
-  }
-  return results.slice(0, 8);
+async function searchSchools(query) {
+  const trimmed = query.trim();
+  if (!trimmed || trimmed.length < 2) return [];
+  const { data, error } = await supabase
+    .from("schools")
+    .select("name, city, country, continent, status, login_url, token_flow, domain")
+    .ilike("name", `%${trimmed}%`)
+    .limit(8);
+  if (error || !data) return [];
+  return data.map(s => ({
+    name:        s.name,
+    city:        s.city        || "",
+    country:     s.country     || "",
+    continent:   s.continent   || "",
+    status:      s.status      || "needsVerification",
+    loginUrl:    s.login_url   || "",
+    tokenFlow:   s.token_flow  || "",
+    domain:      s.domain      || "",
+    isCustom:    false,
+  }));
 }
 
 /* ─── Canvas fetch ─────────────────────────────────────────────────────────── */
@@ -178,6 +110,9 @@ function defaultDraft(email, initName) {
     schoolStatus: "",
     schoolLoginUrl: "",
     schoolTokenFlow: "",
+    schoolCity: "",
+    schoolCountry: "",
+    schoolContinent: "",
     manualCanvasUrl: "",
     token: "",
     isCustomSchool: false,
@@ -245,6 +180,8 @@ export default function Onboarding({ email, preferredName: initName, onComplete 
     toastTimer.current = setTimeout(() => setToast(""), 3000);
   }
 
+  const [schoolLoading, setSchoolLoading] = useState(false);
+
   /* ── School search ──────────────────────────────────────────────────────── */
   function handleSchoolQuery(q) {
     setDraft(d => ({
@@ -254,13 +191,20 @@ export default function Onboarding({ email, preferredName: initName, onComplete 
       schoolStatus: "",
       schoolLoginUrl: "",
       schoolTokenFlow: "",
+      schoolCity: "",
+      schoolCountry: "",
+      schoolContinent: "",
       isCustomSchool: false,
     }));
     setShowDropdown(true);
     clearTimeout(searchTimer.current);
-    searchTimer.current = setTimeout(() => {
-      setSchoolResults(q.trim() ? searchSchools(q) : []);
-    }, 150);
+    if (!q.trim()) { setSchoolResults([]); return; }
+    setSchoolLoading(true);
+    searchTimer.current = setTimeout(async () => {
+      const results = await searchSchools(q);
+      setSchoolResults(results);
+      setSchoolLoading(false);
+    }, 250);
   }
 
   function selectSchool(school) {
@@ -271,6 +215,9 @@ export default function Onboarding({ email, preferredName: initName, onComplete 
       schoolStatus:      school.status || "needsVerification",
       schoolLoginUrl:    school.loginUrl || "",
       schoolTokenFlow:   school.tokenFlow || "",
+      schoolCity:        school.city || "",
+      schoolCountry:     school.country || "",
+      schoolContinent:   school.continent || "",
       isCustomSchool:    !!school.isCustom,
     }));
     setShowDropdown(false);
@@ -355,6 +302,9 @@ export default function Onboarding({ email, preferredName: initName, onComplete 
     try {
       localStorage.setItem("sa_onboarding_draft", JSON.stringify({ ...draft, onboardingComplete: true }));
       if (draft.schoolName) localStorage.setItem("sa_school_name", draft.schoolName);
+      if (draft.schoolCity)      localStorage.setItem("sa_school_city",      draft.schoolCity);
+      if (draft.schoolCountry)   localStorage.setItem("sa_school_country",   draft.schoolCountry);
+      if (draft.schoolContinent) localStorage.setItem("sa_school_continent", draft.schoolContinent);
       if (base && token) {
         localStorage.setItem("sa_token", token);
         localStorage.setItem("sa_base", base);
@@ -364,6 +314,9 @@ export default function Onboarding({ email, preferredName: initName, onComplete 
     onComplete({
       preferredName: draft.preferredName,
       schoolName:    draft.schoolName,
+      schoolCity:    draft.schoolCity,
+      schoolCountry: draft.schoolCountry,
+      schoolContinent: draft.schoolContinent,
       token,
       baseUrl:       base,
       goals:         draft.goals,
@@ -523,7 +476,21 @@ export default function Onboarding({ email, preferredName: initName, onComplete 
                       border: `1px solid ${draft.schoolName ? "rgba(255,255,255,0.2)" : "rgba(255,255,255,0.1)"}`,
                     }}
                   />
-                  {showDropdown && schoolResults.length > 0 && (
+                  {showDropdown && schoolLoading && (
+                    <div style={{
+                      position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0,
+                      background: "rgba(16,16,18,0.98)",
+                      border: "1px solid rgba(255,255,255,0.1)",
+                      borderRadius: "14px",
+                      padding: "14px 18px",
+                      color: "rgba(255,255,255,0.3)",
+                      fontSize: "13px",
+                      zIndex: 200,
+                    }}>
+                      Searching...
+                    </div>
+                  )}
+                  {showDropdown && !schoolLoading && schoolResults.length > 0 && (
                     <div style={{
                       position: "absolute", top: "calc(100% + 6px)", left: 0, right: 0,
                       background: "rgba(16,16,18,0.98)",
@@ -551,7 +518,7 @@ export default function Onboarding({ email, preferredName: initName, onComplete 
                             {s.name}
                           </div>
                           <div style={{ fontSize: "11px", color: statusColor(s.status) }}>
-                            {statusLabel(s.status)}{s.country ? ` · ${s.country}` : ""}
+                            {statusLabel(s.status)}{s.city ? ` · ${s.city}` : ""}{s.country ? `, ${s.country}` : ""}
                           </div>
                         </button>
                       ))}

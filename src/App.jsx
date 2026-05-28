@@ -107,11 +107,18 @@ export default function App() {
     setShowOnboarding(true);
   }, [userId]);
 
-  const handleOnboardingComplete = useCallback(async ({ preferredName, schoolName, token, baseUrl }) => {
+  const handleOnboardingComplete = useCallback(async ({
+    preferredName, schoolName, schoolCity, schoolCountry, schoolContinent, token, baseUrl,
+  }) => {
     if (preferredName) localStorage.setItem("fschool_name", preferredName);
-    if (schoolName) {
-      try { await updateUserField("school", schoolName); } catch {}
-    }
+    try {
+      const patch = {};
+      if (schoolName)      patch.school = schoolName;
+      if (schoolCity)      patch.school_city = schoolCity;
+      if (schoolCountry)   patch.school_country = schoolCountry;
+      if (schoolContinent) patch.school_continent = schoolContinent;
+      if (Object.keys(patch).length) await updateUserField(patch);
+    } catch {}
     if (token && baseUrl) {
       try { await saveCanvasCredentials(token, baseUrl); } catch {}
     }
