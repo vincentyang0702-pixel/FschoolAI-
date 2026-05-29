@@ -3,7 +3,7 @@
 
 import { useState } from "react";
 import { useApp } from "../context/AppContext";
-import ManualUploadSheet from "./ManualUploadSheet";
+import ManualUploadSheet from "../components/ManualUploadSheet";
 
 /* ─── helpers ─────────────────────────────────────────────── */
 
