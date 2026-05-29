@@ -43,6 +43,25 @@ function StudySession({ cards, onExit }) {
   const isDragMode   = useRef(false);
   const judgeLock    = useRef(false);
 
+  // Keyboard controls: Space = flip, ArrowRight = got it, ArrowLeft = missed
+  useEffect(() => {
+    function handleKey(e) {
+      if (isDone) return;
+      if (e.key === " " || e.code === "Space") {
+        e.preventDefault();
+        if (!flipped && !judgeLock.current) setFlipped(true);
+      } else if (e.key === "ArrowRight") {
+        e.preventDefault();
+        if (flipped) judge(true);
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        if (flipped) judge(false);
+      }
+    }
+    window.addEventListener("keydown", handleKey);
+    return () => window.removeEventListener("keydown", handleKey);
+  }, [flipped, isDone, judge]);
+
   const isDone = idx >= cards.length;
   const card   = cards[idx];
 
@@ -277,7 +296,7 @@ function StudySession({ cards, onExit }) {
                     {card.question}
                   </p>
                   <p style={{ color: "rgba(255,255,255,0.2)", fontSize: "12px", marginTop: "22px" }}>
-                    Tap to reveal answer
+                    Tap or press Space to reveal
                   </p>
                 </div>
 
@@ -395,6 +414,69 @@ function FlipCard({ card }) {
       </p>
     </div>
   );
+}
+
+// ── Lightweight markdown renderer (handles headings, bold, bullets) ──────────
+function MarkdownGuide({ text }) {
+  const lines = text.split("\n");
+  const elements = [];
+  let i = 0;
+
+  function renderInline(str) {
+    // Bold: **text**
+    const parts = str.split(/(\*\*[^*]+\*\*)/g);
+    return parts.map((part, idx) => {
+      if (part.startsWith("**") && part.endsWith("**")) {
+        return <strong key={idx} style={{ color: "var(--text-primary)", fontWeight: "600" }}>{part.slice(2, -2)}</strong>;
+      }
+      return part;
+    });
+  }
+
+  while (i < lines.length) {
+    const line = lines[i];
+    const trimmed = line.trim();
+
+    if (!trimmed) { elements.push(<div key={i} style={{ height: "8px" }} />); i++; continue; }
+
+    if (trimmed.startsWith("### ")) {
+      elements.push(
+        <p key={i} style={{ color: "var(--text-primary)", fontSize: "13px", fontWeight: "700", letterSpacing: "1.5px", textTransform: "uppercase", marginTop: "20px", marginBottom: "8px", opacity: 0.6 }}>
+          {trimmed.slice(4)}
+        </p>
+      );
+    } else if (trimmed.startsWith("## ")) {
+      elements.push(
+        <p key={i} style={{ color: "var(--text-primary)", fontSize: "15px", fontWeight: "700", marginTop: "22px", marginBottom: "8px" }}>
+          {trimmed.slice(3)}
+        </p>
+      );
+    } else if (trimmed.startsWith("# ")) {
+      elements.push(
+        <p key={i} style={{ color: "var(--text-primary)", fontSize: "17px", fontWeight: "700", marginTop: "24px", marginBottom: "10px" }}>
+          {trimmed.slice(2)}
+        </p>
+      );
+    } else if (trimmed.startsWith("- ") || trimmed.startsWith("• ")) {
+      elements.push(
+        <div key={i} style={{ display: "flex", gap: "10px", marginBottom: "6px", alignItems: "flex-start" }}>
+          <span style={{ color: "var(--text-dim)", fontSize: "13px", marginTop: "1px", flexShrink: 0 }}>·</span>
+          <p style={{ color: "var(--text-secondary)", fontSize: "14px", lineHeight: "1.7", margin: 0 }}>
+            {renderInline(trimmed.slice(2))}
+          </p>
+        </div>
+      );
+    } else {
+      elements.push(
+        <p key={i} style={{ color: "var(--text-secondary)", fontSize: "14px", lineHeight: "1.75", marginBottom: "6px" }}>
+          {renderInline(trimmed)}
+        </p>
+      );
+    }
+    i++;
+  }
+
+  return <div>{elements}</div>;
 }
 
 // ── Main Study component ──────────────────────────────────────────────────────
@@ -565,10 +647,9 @@ export default function Study() {
       {guide && (
         <div style={{
           background: "var(--color-surface)", border: "1px solid var(--color-border)",
-          borderRadius: "var(--radius-card)", padding: "20px",
-          color: "var(--text-primary)", fontSize: "14px", lineHeight: "1.8", whiteSpace: "pre-wrap",
+          borderRadius: "var(--radius-card)", padding: "20px 22px",
         }}>
-          {guide}
+          <MarkdownGuide text={guide} />
         </div>
       )}
     </div>

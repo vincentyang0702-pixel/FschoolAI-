@@ -199,7 +199,7 @@ function CourseCard({ course, assignments, modules, assignmentGroups }) {
           )}
         </div>
 
-        <div style={{ display: "flex", gap: "8px", flexShrink: 0, marginLeft: "12px", alignItems: "center", flexDirection: "column", alignItems: "flex-end" }}>
+        <div style={{ display: "flex", gap: "8px", flexShrink: 0, marginLeft: "12px", flexDirection: "column", alignItems: "flex-end" }}>
           {score != null && (
             <span style={{ fontSize: "16px", fontWeight: "700", color: scoreColor(score) }}>
               {Math.round(score)}%
