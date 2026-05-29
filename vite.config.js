@@ -113,7 +113,33 @@ const groqProxyPlugin = {
   },
 };
 
+// iTunes proxy plugin — forwards /itunes-search to itunes.apple.com from dev server.
+// iTunes doesn't send CORS headers in local dev, so this proxies it transparently.
+// In production (Vercel), ShareCard.jsx hits itunes.apple.com directly — it works fine there.
+const itunesProxyPlugin = {
+  name: "itunes-proxy",
+  configureServer(server) {
+    server.middlewares.use("/itunes-search", async (req, res) => {
+      const { search } = new URL(req.url, "http://localhost");
+      const target = `https://itunes.apple.com/search${search}`;
+
+      try {
+        const upstream = await fetch(target);
+        const body = await upstream.text();
+        res.statusCode = upstream.status;
+        res.setHeader("Content-Type", "application/json");
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.end(body);
+      } catch (err) {
+        res.statusCode = 502;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+  },
+};
+
 export default defineConfig({
-  plugins: [react(), canvasProxyPlugin, groqProxyPlugin],
+  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, itunesProxyPlugin],
   server:  { port: 5173 },
 });
