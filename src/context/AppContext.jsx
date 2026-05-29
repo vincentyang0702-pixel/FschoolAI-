@@ -28,6 +28,8 @@ export function AppProvider({ children }) {
   const [modules, setModules]                     = useState([]);
   const [assignmentGroups, setAssignmentGroups]   = useState([]);
   const [discussionTopics, setDiscussionTopics]   = useState([]);
+  const [flashcardMap, setFlashcardMap]           = useState({}); // course_id → { cards, generatedAt }
+  const [syllabus, setSyllabus]                   = useState([]);
   // idle | syncing | synced | error | cors-error
   const [syncStatus, setSyncStatus]           = useState("idle");
 
@@ -48,6 +50,8 @@ export function AppProvider({ children }) {
     if (result.modules?.length)          setModules(result.modules);
     if (result.assignmentGroups?.length) setAssignmentGroups(result.assignmentGroups);
     if (result.discussionTopics?.length) setDiscussionTopics(result.discussionTopics);
+    if (result.syllabus?.length)         setSyllabus(result.syllabus);
+    if (result.flashcardMap)             setFlashcardMap(result.flashcardMap);
   }
 
   // Load user + cached Canvas data from Supabase on mount
@@ -231,6 +235,8 @@ export function AppProvider({ children }) {
       updateUserField,
       addManualCourse,
       forceSync,
+      flashcardMap,
+      syllabus,
       pendingNav,
       setPendingNav,
       studyConfig,

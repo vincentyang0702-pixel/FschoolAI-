@@ -514,7 +514,7 @@ function MarkdownGuide({ text }) {
 
 // ── Main Study component ──────────────────────────────────────────────────────
 export default function Study() {
-  const { courses: liveCourses, studyConfig, setStudyConfig, updateUserField, userData } = useApp();
+  const { courses: liveCourses, flashcardMap, studyConfig, setStudyConfig, updateUserField, userData } = useApp();
 
 
   // Use live Canvas courses only
@@ -574,10 +574,26 @@ export default function Study() {
     }
   }, [liveCourses, configTick]);
 
+  // Find the DB course id for the currently selected course label
+  function getCourseDbId() {
+    const selectedCourse = liveCourses.find(c => `${c.courseCode} — ${c.name}` === course);
+    return selectedCourse?.dbId ?? null;
+  }
+
   const generate = async () => {
     setLoading(true);
     setFlashcards([]);
     setGuide("");
+
+    // For flashcards: check cache first
+    if (mode === "flashcards") {
+      const dbId = getCourseDbId();
+      if (dbId && flashcardMap[dbId]?.cards?.length > 0) {
+        setFlashcards(flashcardMap[dbId].cards);
+        setLoading(false);
+        return;
+      }
+    }
 
     const prompt =
       mode === "flashcards"
@@ -671,7 +687,11 @@ export default function Study() {
           marginBottom: "24px", transition: "background var(--dur-base) var(--ease-apple)",
         }}
       >
-        {loading ? "Generating…" : mode === "guide" ? "Generate Study Guide" : "Generate Flashcards"}
+        {loading ? "Generating…" : mode === "guide" ? "Generate Study Guide" : (() => {
+          const dbId = liveCourses.find(c => `${c.courseCode} — ${c.name}` === course)?.dbId;
+          const hasCached = dbId && flashcardMap[dbId]?.cards?.length > 0;
+          return hasCached ? "Load Flashcards ✦" : "Generate Flashcards";
+        })()}
       </button>
 
       {flashcards.length > 0 && (
