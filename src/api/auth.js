@@ -19,7 +19,7 @@ export async function signUp(userId, { name, email, password }) {
     .eq('email', email.toLowerCase().trim())
     .maybeSingle();
 
-  if (existing) throw new Error('An account with this email already exists.');
+  if (existing) throw new Error('Email already in use.');
 
   const { error } = await supabase.from('users').upsert(
     {
