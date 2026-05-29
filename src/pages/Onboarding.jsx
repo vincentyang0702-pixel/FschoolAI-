@@ -6,13 +6,32 @@ import { supabase } from "../supabase";
 async function searchSchools(query) {
   const trimmed = query.trim();
   if (!trimmed || trimmed.length < 2) return [];
-  const { data, error } = await supabase
-    .from("schools")
-    .select("name, city, country, continent, status, login_url, token_flow, domain")
-    .ilike("name", `%${trimmed}%`)
-    .limit(8);
-  if (error || !data) return [];
-  return data.map(s => ({
+
+  const COLS = "name, city, country, continent, status, login_url, token_flow, domain";
+
+  // Run three queries in parallel: match on name, city, or country
+  const [byName, byCity, byCountry] = await Promise.all([
+    supabase.from("schools").select(COLS).ilike("name",    `%${trimmed}%`).limit(8),
+    supabase.from("schools").select(COLS).ilike("city",    `%${trimmed}%`).limit(6),
+    supabase.from("schools").select(COLS).ilike("country", `%${trimmed}%`).limit(6),
+  ]);
+
+  // Merge and deduplicate by name — name-matches appear first
+  const seen = new Set();
+  const merged = [];
+  for (const row of [
+    ...(byName.data    || []),
+    ...(byCity.data    || []),
+    ...(byCountry.data || []),
+  ]) {
+    const key = row.name?.toLowerCase();
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      merged.push(row);
+    }
+  }
+
+  return merged.slice(0, 8).map(s => ({
     name:        s.name,
     city:        s.city        || "",
     country:     s.country     || "",
