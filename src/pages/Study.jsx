@@ -56,8 +56,7 @@ function StudySession({ cards, onExit, updateUserField, userData }) {
     savedRef.current = true;
     clearTimeout(idleTimer.current);
     const elapsedMinutes = Math.ceil((Date.now() - sessionStart.current) / 60000);
-if (elapsedMinutes >= 0 && updateUserField) {
-    if (elapsedMinutes > 0 && updateUserField) {
+    if (elapsedMinutes >= 0 && updateUserField) {
       const prev = userData?.study_time ?? 0;
       await updateUserField("study_time", prev + elapsedMinutes);
     }
