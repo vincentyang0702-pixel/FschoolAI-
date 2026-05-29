@@ -338,16 +338,23 @@ export async function syncCanvasData(userId, canvasToken, canvasBaseUrl) {
  * FIX: manual courses have no canvas_course_id — use DB id as fallback.
  */
 export async function loadCanvasData(userId) {
-  const [cResult, aResult, annResult, modResult, agResult, dtResult, sylResult, fcResult] = await Promise.all([
+  const [cResult, aResult, blobResult, fcResult] = await Promise.all([
     supabase.from('courses').select('*').eq('user_id', userId),
     supabase.from('assignments').select('*, courses(id, canvas_course_id, course_code, name)').eq('user_id', userId),
-    supabase.from('canvas_data').select('payload').eq('user_id', userId).eq('data_type', 'announcements').maybeSingle(),
-    supabase.from('canvas_data').select('payload').eq('user_id', userId).eq('data_type', 'modules').maybeSingle(),
-    supabase.from('canvas_data').select('payload').eq('user_id', userId).eq('data_type', 'assignment_groups').maybeSingle(),
-    supabase.from('canvas_data').select('payload').eq('user_id', userId).eq('data_type', 'discussion_topics').maybeSingle(),
-    supabase.from('canvas_data').select('payload').eq('user_id', userId).eq('data_type', 'syllabus').maybeSingle(),
+    // Single query for all blob types — avoids 5 separate requests and 400s on missing rows
+    supabase.from('canvas_data').select('data_type, payload').eq('user_id', userId),
     supabase.from('flashcards').select('course_id, cards, generated_at').eq('user_id', userId),
   ]);
+
+  // Build a lookup map from the single blob query
+  const blobMap = {};
+  (blobResult.data || []).forEach(row => { blobMap[row.data_type] = row.payload; });
+
+  const annResult = { data: { payload: blobMap['announcements']    ?? [] } };
+  const modResult = { data: { payload: blobMap['modules']          ?? [] } };
+  const agResult  = { data: { payload: blobMap['assignment_groups']?? [] } };
+  const dtResult  = { data: { payload: blobMap['discussion_topics']?? [] } };
+  const sylResult = { data: { payload: blobMap['syllabus']          ?? [] } };
 
   const courses = (cResult.data || []).map(c => ({
     // Canvas courses: expose canvas_course_id as the id (used for assignment matching)
