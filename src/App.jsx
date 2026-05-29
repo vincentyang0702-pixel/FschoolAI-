@@ -112,12 +112,13 @@ export default function App() {
   }) => {
     if (preferredName) localStorage.setItem("fschool_name", preferredName);
     try {
-      const patch = {};
+      const patch = { id: userId };
+      if (preferredName)   patch.name = preferredName;
       if (schoolName)      patch.school = schoolName;
       if (schoolCity)      patch.school_city = schoolCity;
       if (schoolCountry)   patch.school_country = schoolCountry;
       if (schoolContinent) patch.school_continent = schoolContinent;
-      if (Object.keys(patch).length) await updateUserField(patch);
+      await updateUserField(patch);
     } catch {}
     if (token && baseUrl) {
       try { await saveCanvasCredentials(token, baseUrl); } catch {}
@@ -125,7 +126,7 @@ export default function App() {
     localStorage.setItem(LOGGED_IN_KEY, "1");
     setShowOnboarding(false);
     setIsLoggedIn(true);
-  }, [updateUserField, saveCanvasCredentials]);
+  }, [userId, updateUserField, saveCanvasCredentials]);
 
   if (showOnboarding) {
     return (
