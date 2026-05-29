@@ -1,8 +1,7 @@
 // ManualUploadSheet.jsx — Manual course/assignment upload via AI parsing (Groq).
 // Triggered by the dashed "+" card at the bottom of the Canvas course list.
 // Steps: 0=input  1=parsing  2=review  3=saved
-// FIX: PDF text extraction via pdfjs-dist before sending to Groq.
-// FIX: manual courses now persist across logout (canvasSync loadCanvasData fixed).
+// FEAT: multi-file upload — attach multiple PDFs/images, all merged before Groq parse.
 
 import { useState, useRef } from "react";
 import { groq } from "../api/groq";
@@ -13,23 +12,17 @@ import { useApp } from "../context/AppContext";
 
 async function extractPdfText(file) {
   try {
-    // Dynamically import pdfjs-dist to keep bundle lean
     const pdfjsLib = await import("pdfjs-dist");
-    // Use the CDN worker to avoid bundling the worker
     pdfjsLib.GlobalWorkerOptions.workerSrc =
       `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
-
     const arrayBuffer = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-
     let fullText = "";
-    // Extract text from up to 20 pages (enough for any syllabus)
     const maxPages = Math.min(pdf.numPages, 20);
     for (let i = 1; i <= maxPages; i++) {
       const page = await pdf.getPage(i);
       const content = await page.getTextContent();
-      const pageText = content.items.map(item => item.str).join(" ");
-      fullText += pageText + "\n";
+      fullText += content.items.map(item => item.str).join(" ") + "\n";
     }
     return fullText.trim();
   } catch (err) {
@@ -103,48 +96,111 @@ function Btn({ primary, children, ...props }) {
   );
 }
 
+/* ─── FileChip — individual file pill with remove button ────── */
+
+function FileChip({ file, onRemove, status }) {
+  const isPdf = file.type === "application/pdf";
+  const isImg = file.type.startsWith("image/");
+  const icon  = isPdf ? "📄" : isImg ? "🖼️" : "📎";
+  const statusColor =
+    status === "done"    ? "rgba(100,220,130,0.7)" :
+    status === "failed"  ? "rgba(255,196,0,0.7)"   :
+    status === "reading" ? "rgba(255,204,0,0.6)"   :
+    "rgba(255,255,255,0.35)";
+
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", gap: "6px",
+      background: "rgba(255,255,255,0.06)",
+      border: "1px solid rgba(255,255,255,0.1)",
+      borderRadius: "8px", padding: "6px 10px",
+      maxWidth: "100%",
+    }}>
+      <span style={{ fontSize: "13px" }}>{icon}</span>
+      <span style={{
+        color: statusColor, fontSize: "12px", fontWeight: "500",
+        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+        maxWidth: "180px",
+      }}>
+        {file.name}
+      </span>
+      {status === "reading" && (
+        <span style={{ color: "rgba(255,204,0,0.6)", fontSize: "10px" }}>reading…</span>
+      )}
+      <button
+        onClick={() => onRemove(file.name)}
+        style={{
+          marginLeft: "2px", background: "none", border: "none",
+          color: "rgba(255,255,255,0.3)", fontSize: "13px",
+          cursor: "pointer", lineHeight: 1, padding: "0 2px",
+          flexShrink: 0,
+        }}
+      >✕</button>
+    </div>
+  );
+}
+
 /* ─── ManualUploadSheet ─────────────────────────────────────── */
 
 export default function ManualUploadSheet({ onClose, onSave }) {
   const { userId } = useApp();
-  const [step, setStep]         = useState(0);
-  const [text, setText]         = useState("");
-  const [file, setFile]         = useState(null);
-  const [parsed, setParsed]     = useState(null);
-  const [error, setError]       = useState("");
-  const [pdfStatus, setPdfStatus] = useState(""); // "" | "reading" | "done" | "failed"
-  const fileRef                 = useRef();
+  const [step, setStep]       = useState(0);
+  const [text, setText]       = useState("");
+  const [files, setFiles]     = useState([]); // array of File objects
+  const [fileStatuses, setFileStatuses] = useState({}); // name → "reading"|"done"|"failed"
+  const [parsed, setParsed]   = useState(null);
+  const [error, setError]     = useState("");
+  const [parseStatus, setParseStatus] = useState(""); // "" | "reading" | "parsing"
+  const fileRef               = useRef();
 
-  /* ── file select handler ── */
+  /* ── add files (dedupe by name) ── */
   function handleFileSelect(e) {
-    const f = e.target.files[0] ?? null;
-    setFile(f);
-    setPdfStatus("");
+    const selected = Array.from(e.target.files);
+    setFiles(prev => {
+      const existingNames = new Set(prev.map(f => f.name));
+      return [...prev, ...selected.filter(f => !existingNames.has(f.name))];
+    });
+    // reset input so same file can be re-added after removal
+    e.target.value = "";
   }
+
+  function removeFile(name) {
+    setFiles(prev => prev.filter(f => f.name !== name));
+    setFileStatuses(prev => { const n = { ...prev }; delete n[name]; return n; });
+  }
+
+  const canParse = text.trim().length > 0 || files.length > 0;
 
   /* ── parse ── */
   async function handleParse() {
-    if (!text.trim() && !file) return;
+    if (!canParse) return;
     setStep(1);
     setError("");
 
     let prompt = text.trim();
+    const newStatuses = {};
 
-    if (file) {
+    // Process all files sequentially
+    for (const file of files) {
       if (file.type === "application/pdf") {
-        // FIX: actually extract text from PDF
-        setPdfStatus("reading");
+        newStatuses[file.name] = "reading";
+        setFileStatuses({ ...newStatuses });
+        setParseStatus("reading");
+
         const extracted = await extractPdfText(file);
         if (extracted && extracted.length > 50) {
-          prompt = extracted + (prompt ? `\n\n${prompt}` : "");
-          setPdfStatus("done");
+          newStatuses[file.name] = "done";
+          prompt += `\n\n--- File: ${file.name} ---\n${extracted}`;
         } else {
-          // Extraction failed or empty — fall back to filename hint
-          setPdfStatus("failed");
-          prompt = `[PDF: ${file.name} — could not extract text automatically]\n\n${prompt}`;
+          newStatuses[file.name] = "failed";
+          prompt += `\n\n[PDF: ${file.name} — could not extract text automatically]`;
         }
+        setFileStatuses({ ...newStatuses });
+
       } else if (file.type.startsWith("image/")) {
-        // Upload image to Supabase Storage and append URL
+        newStatuses[file.name] = "reading";
+        setFileStatuses({ ...newStatuses });
+
         try {
           const path = `manual/${userId}/${Date.now()}_${file.name}`;
           const { error: upErr } = await supabase.storage
@@ -154,11 +210,21 @@ export default function ManualUploadSheet({ onClose, onSave }) {
             const { data: { publicUrl } } = supabase.storage
               .from("uploads")
               .getPublicUrl(path);
-            prompt = `[Image: ${file.name} — ${publicUrl}]\n\n${prompt}`;
+            prompt += `\n\n[Image: ${file.name} — ${publicUrl}]`;
+            newStatuses[file.name] = "done";
+          } else {
+            newStatuses[file.name] = "failed";
+            prompt += `\n\n[Image: ${file.name} — upload failed]`;
           }
-        } catch (_) { /* non-fatal */ }
+        } catch {
+          newStatuses[file.name] = "failed";
+          prompt += `\n\n[File: ${file.name}]`;
+        }
+        setFileStatuses({ ...newStatuses });
+
       } else {
-        prompt = `[File: ${file.name}]\n\n${prompt}`;
+        prompt += `\n\n[File: ${file.name}]`;
+        newStatuses[file.name] = "done";
       }
     }
 
@@ -167,6 +233,8 @@ export default function ManualUploadSheet({ onClose, onSave }) {
       setStep(0);
       return;
     }
+
+    setParseStatus("parsing");
 
     try {
       const raw = await groq(
@@ -181,10 +249,11 @@ export default function ManualUploadSheet({ onClose, onSave }) {
         assignments: Array.isArray(data.assignments) ? data.assignments : [],
       });
       setStep(2);
-    } catch (e) {
+    } catch {
       setError("Parsing failed — try adding more descriptive text.");
       setStep(0);
     }
+    setParseStatus("");
   }
 
   /* ── save ── */
@@ -193,7 +262,7 @@ export default function ManualUploadSheet({ onClose, onSave }) {
     const course = {
       id:          courseId,
       name:        parsed.courseName,
-      course_code: parsed.courseCode || parsed.courseName,
+      courseCode:  parsed.courseCode || parsed.courseName,
       manual:      true,
     };
     const assignments = parsed.assignments.map(a => ({
@@ -213,6 +282,8 @@ export default function ManualUploadSheet({ onClose, onSave }) {
     if (e.target === e.currentTarget) onClose();
   }
 
+  const anyFailed = Object.values(fileStatuses).some(s => s === "failed");
+
   return (
     <div style={S.overlay} onClick={onBackdrop}>
       <div style={S.sheet}>
@@ -225,23 +296,44 @@ export default function ManualUploadSheet({ onClose, onSave }) {
               Add Course Manually
             </p>
             <p style={{ color: "var(--text-dim)", fontSize: "13px", lineHeight: "1.6", marginBottom: "16px" }}>
-              Paste a syllabus or attach a PDF — AI will extract the course details and deadlines.
+              Paste a syllabus or attach files — AI will extract course details and deadlines.
             </p>
 
             <textarea
               value={text}
               onChange={e => setText(e.target.value)}
               placeholder="Paste syllabus, assignment sheet, or any course text here…"
-              rows={7}
+              rows={5}
               style={{ ...S.input, resize: "vertical" }}
               onFocus={focusBorder}
               onBlur={blurBorder}
             />
 
-            {/* file attach */}
-            <div style={{ marginTop: "10px", display: "flex", alignItems: "center", gap: "8px" }}>
+            {/* file attach area */}
+            <div style={{ marginTop: "10px" }}>
+              {/* file chips */}
+              {files.length > 0 && (
+                <div style={{
+                  display: "flex", flexWrap: "wrap", gap: "6px",
+                  marginBottom: "8px",
+                }}>
+                  {files.map(f => (
+                    <FileChip
+                      key={f.name}
+                      file={f}
+                      onRemove={removeFile}
+                      status={fileStatuses[f.name] ?? ""}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {/* add more files button */}
               <input
-                ref={fileRef} type="file" accept=".pdf,image/*"
+                ref={fileRef}
+                type="file"
+                accept=".pdf,image/*"
+                multiple
                 style={{ display: "none" }}
                 onChange={handleFileSelect}
               />
@@ -253,28 +345,19 @@ export default function ManualUploadSheet({ onClose, onSave }) {
                   borderRadius: "8px", padding: "8px 13px",
                   color: "var(--text-dim)", fontSize: "12px",
                   cursor: "pointer", fontFamily: "inherit",
+                  display: "flex", alignItems: "center", gap: "6px",
                 }}
               >
-                {file
-                  ? `📎 ${file.name}`
-                  : "+ Attach PDF or image"}
+                <span style={{ fontSize: "14px" }}>+</span>
+                {files.length === 0 ? "Attach PDFs or images" : "Add more files"}
               </button>
-              {file && (
-                <button
-                  onClick={() => { setFile(null); setPdfStatus(""); }}
-                  style={{ background: "none", border: "none", color: "var(--text-dim)", fontSize: "12px", cursor: "pointer" }}
-                >
-                  ✕
-                </button>
+
+              {files.some(f => f.type === "application/pdf") && (
+                <p style={{ color: "rgba(255,255,255,0.3)", fontSize: "11px", marginTop: "6px", paddingLeft: "2px" }}>
+                  📄 PDF text will be extracted automatically before parsing
+                </p>
               )}
             </div>
-
-            {/* PDF status hint */}
-            {file?.type === "application/pdf" && (
-              <p style={{ color: "rgba(255,255,255,0.3)", fontSize: "11px", marginTop: "6px", paddingLeft: "2px" }}>
-                📄 PDF text will be extracted automatically before parsing
-              </p>
-            )}
 
             {error && (
               <p style={{ color: "rgba(255,100,90,0.85)", fontSize: "12px", marginTop: "12px" }}>{error}</p>
@@ -282,7 +365,7 @@ export default function ManualUploadSheet({ onClose, onSave }) {
 
             <div style={S.row}>
               <Btn onClick={onClose}>Cancel</Btn>
-              <Btn primary disabled={!text.trim() && !file} onClick={handleParse}>
+              <Btn primary disabled={!canParse} onClick={handleParse}>
                 Parse with AI →
               </Btn>
             </div>
@@ -294,13 +377,26 @@ export default function ManualUploadSheet({ onClose, onSave }) {
           <div style={{ textAlign: "center", padding: "40px 0" }}>
             <p style={{ fontSize: "26px", marginBottom: "14px", opacity: 0.9 }}>✦</p>
             <p style={{ color: "var(--text-primary)", fontSize: "15px", fontWeight: "600", marginBottom: "6px" }}>
-              {pdfStatus === "reading" ? "Reading PDF…" : "Parsing…"}
+              {parseStatus === "reading" ? "Reading files…" : "Parsing…"}
             </p>
-            <p style={{ color: "var(--text-dim)", fontSize: "13px" }}>
-              {pdfStatus === "reading"
-                ? "Extracting text from your PDF"
+            <p style={{ color: "var(--text-dim)", fontSize: "13px", marginBottom: "20px" }}>
+              {parseStatus === "reading"
+                ? `Extracting text from ${files.filter(f => f.type === "application/pdf").length} PDF${files.filter(f => f.type === "application/pdf").length !== 1 ? "s" : ""}`
                 : "Extracting course and assignment data"}
             </p>
+            {/* per-file progress */}
+            {files.length > 1 && (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: "6px", justifyContent: "center" }}>
+                {files.map(f => (
+                  <FileChip
+                    key={f.name}
+                    file={f}
+                    onRemove={() => {}}
+                    status={fileStatuses[f.name] ?? ""}
+                  />
+                ))}
+              </div>
+            )}
           </div>
         )}
 
@@ -311,9 +407,9 @@ export default function ManualUploadSheet({ onClose, onSave }) {
               Review Extracted Data
             </p>
 
-            {pdfStatus === "failed" && (
+            {anyFailed && (
               <p style={{ color: "rgba(255,196,0,0.8)", fontSize: "12px", marginBottom: "12px" }}>
-                ⚠️ Couldn't extract PDF text automatically — results may be limited. Try pasting the text manually.
+                ⚠️ Some files couldn't be read automatically — results may be incomplete.
               </p>
             )}
 
