@@ -10,7 +10,7 @@ import NeuralRing      from "./components/NeuralRing";
 import Landing         from "./pages/Landing";
 import Onboarding      from "./pages/Onboarding";
 import { useApp }      from "./context/AppContext";
-import { signUp, signIn } from "./api/auth";
+import { supabase } from "./api/supabase";
 
 import Work            from "./pages/Work";
 import Canvas          from "./pages/Canvas";
@@ -79,7 +79,10 @@ export default function App() {
     if (creds.mode === "login") {
       // Verify credentials, restore the user's UUID, then reload so AppContext
       // re-initialises with the correct UUID and loads their Supabase data.
-      const user = await signIn(creds.email, creds.password); // throws on bad creds
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
+      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+      const { data: user, error } = await supabase.from("users").select("id, name, school").eq("email", creds.email.toLowerCase().trim()).eq("password_hash", password_hash).maybeSingle();
+      if (error || !user) throw new Error("Incorrect email or password.");
       localStorage.setItem("fschool_uid", user.id);
       localStorage.setItem(LOGGED_IN_KEY, "1");
       if (user.name) localStorage.setItem("fschool_name", user.name);
@@ -90,15 +93,16 @@ export default function App() {
     // Write name to localStorage immediately so greeting is correct right away
     localStorage.setItem("fschool_name", creds.name);
 
-    // signup — create user row (best-effort; app works without Supabase too)
+    // signup — create user row directly via supabase
     try {
-      await signUp(userId, {
-        name:     creds.name,
-        email:    creds.email,
-        password: creds.password,
-      });
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
+      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+      const { data: existing } = await supabase.from("users").select("id").eq("email", creds.email.toLowerCase().trim()).maybeSingle();
+      if (!existing) {
+        await supabase.from("users").upsert({ id: userId, name: creds.name, email: creds.email.toLowerCase().trim(), password_hash }, { onConflict: "id" });
+      }
     } catch (err) {
-      console.warn("Supabase signup failed (tables may not exist yet):", err.message);
+      console.warn("Supabase signup failed:", err.message);
     }
 
     // Show onboarding wizard instead of dropping straight into the app
