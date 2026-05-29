@@ -3,7 +3,7 @@
 // Shows empty state when Canvas is not connected.
 // Draft supports text-selection toolbar (Shorten / Expand / Change Direction / Suggest / Copy).
 
-import { useState, useRef, useCallback, useMemo, useEffect } from "react";
+import { useState, useRef, useCallback, useMemo, useEffect, createPortal } from "react";
 import { groq } from "../api/groq";
 import { buildStudentContext } from "../data/mockData";
 import { useApp } from "../context/AppContext";
@@ -119,59 +119,60 @@ export default function Assignment() {
     if (!text) return;
     setSelection({ text, start, end });
 
-    // Mirror-div technique: browsers don't expose pixel coords for textarea
-    // selections via window.getSelection(), so we clone the textarea's styles
-    // into a hidden div, insert a marker span at the midpoint of the selection,
-    // and read that span's bounding rect to get the exact screen position.
+    // Approach: place a hidden mirror div INSIDE the page flow (not off-screen)
+    // so getBoundingClientRect() gives real viewport coords on all browsers incl. Android.
     const computed = window.getComputedStyle(ta);
-    const mirror = document.createElement("div");
+    const lineH    = parseFloat(computed.lineHeight) || 20;
+    const TOOLBAR_W = 320;
+    const TOOLBAR_H = 44;
+    const vw = window.innerWidth;
+    const vh = window.visualViewport?.height ?? window.innerHeight;
 
-    // Copy every layout-affecting style from the textarea
+    // Build mirror with same layout as textarea, hidden via opacity+pointer-events
+    const mirror = document.createElement("div");
     const copyProps = [
-      "boxSizing","width","height","paddingTop","paddingRight","paddingBottom","paddingLeft",
+      "boxSizing","width","paddingTop","paddingRight","paddingBottom","paddingLeft",
       "borderTopWidth","borderRightWidth","borderBottomWidth","borderLeftWidth",
       "fontFamily","fontSize","fontWeight","fontStyle","letterSpacing","lineHeight",
       "textTransform","wordBreak","overflowWrap","whiteSpace","tabSize",
     ];
     copyProps.forEach(p => { mirror.style[p] = computed[p]; });
-    mirror.style.position   = "absolute";
-    mirror.style.top        = "0";
-    mirror.style.left       = "-9999px";
-    mirror.style.visibility = "hidden";
-    mirror.style.overflow   = "hidden";
+    // Position mirror exactly over the textarea so coords are viewport-accurate
+    const taRect = ta.getBoundingClientRect();
+    mirror.style.position       = "fixed";
+    mirror.style.top            = taRect.top + "px";
+    mirror.style.left           = taRect.left + "px";
+    mirror.style.height         = taRect.height + "px";
+    mirror.style.overflow       = "hidden";
+    mirror.style.opacity        = "0";
+    mirror.style.pointerEvents  = "none";
+    mirror.style.userSelect     = "none";
+    mirror.style.zIndex         = "-1";
+    mirror.style.whiteSpace     = "pre-wrap";
 
-    // Replicate the text up to the midpoint of the selection, then add a marker
+    // Scroll the mirror to match textarea scroll position
     const mid = Math.floor((start + end) / 2);
     const before = document.createTextNode(ta.value.slice(0, mid));
     const marker = document.createElement("span");
-    marker.textContent = ta.value.slice(mid, mid + 1) || "|";
+    marker.textContent = ta.value.slice(mid, mid + 1) || "\u200b";
+    const after = document.createTextNode(ta.value.slice(mid + 1));
     mirror.appendChild(before);
     mirror.appendChild(marker);
+    mirror.appendChild(after);
     document.body.appendChild(mirror);
+    mirror.scrollTop = ta.scrollTop;
 
-    const taRect     = ta.getBoundingClientRect();
     const markerRect = marker.getBoundingClientRect();
-    // mirror is at left:-9999px so we need its rect relative to the textarea
-    const mirrorRect = mirror.getBoundingClientRect();
-    const relX = markerRect.left - mirrorRect.left;
-    const relY = markerRect.top  - mirrorRect.top;
-
     document.body.removeChild(mirror);
 
-    // Now position relative to the textarea's viewport position,
-    // then subtract how far the user has scrolled inside the textarea
-    const TOOLBAR_WIDTH = 320;
-    const TOOLBAR_H     = 44;
-    const vw = window.innerWidth;
-    const vh = window.visualViewport?.height ?? window.innerHeight;
+    // markerRect is now in real viewport coords
+    const rawX = markerRect.left + markerRect.width / 2;
+    const rawY = markerRect.top;
 
-    const rawX = taRect.left + relX - ta.scrollLeft;
-    const rawY = taRect.top  + relY - ta.scrollTop;
-
-    const left  = Math.max(TOOLBAR_WIDTH / 2 + 8, Math.min(vw - TOOLBAR_WIDTH / 2 - 8, rawX));
+    const left  = Math.max(TOOLBAR_W / 2 + 8, Math.min(vw - TOOLBAR_W / 2 - 8, rawX));
     const above = rawY - TOOLBAR_H - 8;
-    const below = rawY + parseFloat(computed.lineHeight || "20") + 8;
-    const top   = above >= 8 ? Math.min(above, vh - TOOLBAR_H - 8) : Math.min(below, vh - TOOLBAR_H - 8);
+    const below = rawY + lineH + 8;
+    const top   = above >= 8 ? above : Math.min(below, vh - TOOLBAR_H - 8);
 
     setToolbarPos({ top, left });
   }, []);
@@ -256,8 +257,8 @@ export default function Assignment() {
 
         {draft && (
           <>
-            {toolbarPos && selection && (
-              <div style={{ position: "fixed", top: toolbarPos.top, left: toolbarPos.left, transform: "translateX(-50%)", background: "rgba(24,24,24,0.96)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", border: "1px solid var(--color-border-strong)", borderRadius: "var(--radius-btn)", zIndex: 200, overflow: "hidden", boxShadow: "0 4px 24px rgba(0,0,0,0.5)" }}>
+            {toolbarPos && selection && createPortal(
+              <div style={{ position: "fixed", top: toolbarPos.top, left: toolbarPos.left, transform: "translateX(-50%)", background: "rgba(24,24,24,0.96)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", border: "1px solid var(--color-border-strong)", borderRadius: "var(--radius-btn)", zIndex: 99999, overflow: "hidden", boxShadow: "0 4px 24px rgba(0,0,0,0.5)" }}>
                 {!suggestMode ? (
                   <div style={{ display: "flex" }}>
                     {TOOLBAR_ACTIONS.map((action, idx) => (
@@ -273,7 +274,8 @@ export default function Assignment() {
                     <button onClick={() => setSuggestMode(false)} style={{ background: "none", border: "none", color: "var(--text-secondary)", fontSize: "16px", cursor: "pointer", padding: "0 4px" }}>×</button>
                   </div>
                 )}
-              </div>
+              </div>,
+              document.body
             )}
 
             <textarea
