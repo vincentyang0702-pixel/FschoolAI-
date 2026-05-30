@@ -291,6 +291,8 @@ export default function NeuralRing() {
       const raw = await groq([...messages, userMsg], buildChatSystem(courseOptions, userData, assignments));
 
       const { cmd, text: displayText } = parseNav(raw);
+      // Nuclear fallback: strip ALL xml-like tags regardless of regex result
+      const cleanText = displayText.replace(/<[^>]+>/g, "").trim();
 
       if (cmd?.page) {
         if (cmd.course || cmd.mode) {
@@ -299,7 +301,7 @@ export default function NeuralRing() {
         setTimeout(() => setPendingNav({ page: cmd.page }), 600);
       }
 
-      setMessages(m => [...m, { role: "assistant", content: displayText }]);
+      setMessages(m => [...m, { role: "assistant", content: cleanText }]);
     } catch {
       setMessages(m => [...m, { role: "assistant", content: "Couldn't connect. Check your Groq API key in src/api/groq.js." }]);
     }
