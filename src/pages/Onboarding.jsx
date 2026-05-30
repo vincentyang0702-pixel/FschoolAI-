@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { supabase } from "../supabase";
+import { supabase } from "../api/supabase";
 
 /* ─── Supabase school search ───────────────────────────────────────────────── */
 
