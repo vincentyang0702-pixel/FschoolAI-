@@ -33,6 +33,51 @@ const PAGES = {
 // Persist login across sessions
 const LOGGED_IN_KEY = "fschool_logged_in";
 
+// Inject app-shell styles into <head> once — theme-reactive via CSS vars.
+// Using a <style> tag instead of inline styles so the browser always resolves
+// the CURRENT value of each var (inline styles snapshot the value at render time).
+const SHELL_STYLES = `
+  .app-shell {
+    background:  var(--color-bg);
+    font-family: var(--font-sans);
+    color:       var(--text-primary);
+    min-height:  100dvh;
+    position:    relative;
+    overflow-x:  clip;
+    transition:  background 0.4s var(--ease-apple), color 0.4s var(--ease-apple);
+  }
+  .app-page-transition {
+    min-height: 100dvh;
+    transition: opacity 0.18s var(--ease-apple), transform 0.18s var(--ease-apple);
+  }
+  .app-header {
+    display:         flex;
+    align-items:     center;
+    justify-content: space-between;
+    padding:         52px 22px 0;
+    transition:      color 0.4s var(--ease-apple);
+  }
+  .app-page-label {
+    font-size:      11px;
+    color:          var(--text-dim);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    font-weight:    500;
+    transition:     color 0.4s var(--ease-apple);
+  }
+  .app-main {
+    padding: 20px 22px 100px;
+  }
+`;
+
+// Inject once on module load
+if (!document.getElementById("app-shell-styles")) {
+  const tag = document.createElement("style");
+  tag.id = "app-shell-styles";
+  tag.textContent = SHELL_STYLES;
+  document.head.appendChild(tag);
+}
+
 export default function App() {
   const { userId, saveCanvasCredentials, updateUserField, pendingNav, setPendingNav } = useApp();
 
@@ -40,8 +85,8 @@ export default function App() {
   const [isLoggedIn, setIsLoggedIn] = useState(
     () => Boolean(localStorage.getItem(LOGGED_IN_KEY))
   );
-  const [showOnboarding,    setShowOnboarding]    = useState(false);
-  const [onboardingEmail,   setOnboardingEmail]   = useState("");
+  const [showOnboarding,     setShowOnboarding]    = useState(false);
+  const [onboardingEmail,    setOnboardingEmail]   = useState("");
   const [onboardingInitName, setOnboardingInitName] = useState("");
   const [currentPage, setCurrentPage] = useState("work");
   const [visible,     setVisible]     = useState(true);
@@ -81,7 +126,12 @@ export default function App() {
       // re-initialises with the correct UUID and loads their Supabase data.
       const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
       const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-      const { data: user, error } = await supabase.from("users").select("id, name, school").eq("email", creds.email.toLowerCase().trim()).eq("password_hash", password_hash).maybeSingle();
+      const { data: user, error } = await supabase
+        .from("users")
+        .select("id, name, school")
+        .eq("email", creds.email.toLowerCase().trim())
+        .eq("password_hash", password_hash)
+        .maybeSingle();
       if (error || !user) throw new Error("Incorrect email or password.");
       localStorage.setItem("fschool_uid", user.id);
       localStorage.setItem(LOGGED_IN_KEY, "1");
@@ -97,9 +147,18 @@ export default function App() {
     try {
       const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
       const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-      const { data: existing } = await supabase.from("users").select("id").eq("email", creds.email.toLowerCase().trim()).maybeSingle();
+      const { data: existing } = await supabase
+        .from("users")
+        .select("id")
+        .eq("email", creds.email.toLowerCase().trim())
+        .maybeSingle();
       if (!existing) {
-        await supabase.from("users").upsert({ id: userId, name: creds.name, email: creds.email.toLowerCase().trim(), password_hash }, { onConflict: "id" });
+        await supabase
+          .from("users")
+          .upsert(
+            { id: userId, name: creds.name, email: creds.email.toLowerCase().trim(), password_hash },
+            { onConflict: "id" }
+          );
       }
     } catch (err) {
       console.warn("Supabase signup failed:", err.message);
@@ -150,47 +209,25 @@ export default function App() {
 
   return (
     <div
+      className="app-shell"
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
-      style={{
-        background:  "var(--color-bg)",
-        minHeight:   "100dvh",
-        position:    "relative",
-        overflowX:   "clip",
-        fontFamily:  "var(--font-sans)",
-      }}
     >
       <div
+        className="app-page-transition"
         style={{
-          opacity:    visible ? 1 : 0,
-          transform:  visible ? "scale(1)" : "scale(0.98)",
-          transition: "opacity 0.18s var(--ease-apple), transform 0.18s var(--ease-apple)",
-          minHeight:  "100dvh",
+          opacity:   visible ? 1 : 0,
+          transform: visible ? "scale(1)" : "scale(0.98)",
         }}
       >
-        <header
-          style={{
-            display:         "flex",
-            alignItems:      "center",
-            justifyContent:  "space-between",
-            padding:         "52px 22px 0",
-          }}
-        >
-          <span
-            style={{
-              fontSize:      "11px",
-              color:         "var(--text-dim)",
-              letterSpacing: "2px",
-              textTransform: "uppercase",
-              fontWeight:    "500",
-            }}
-          >
+        <header className="app-header">
+          <span className="app-page-label">
             {LABEL[currentPage]}
           </span>
           <PageDots currentPage={currentPage} />
         </header>
 
-        <main style={{ padding: "20px 22px 100px" }}>
+        <main className="app-main">
           {PageComponent && <PageComponent />}
         </main>
       </div>
