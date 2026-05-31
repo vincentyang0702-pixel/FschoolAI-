@@ -8,17 +8,15 @@
 //  • Chat can be closed by swiping down on the drag handle or tapping the backdrop.
 //  • Renders via createPortal into document.body to escape any ancestor overflow/stacking context.
 //  • Ring name label below the sphere is editable and saved to Supabase users.ring_name.
+//  • Voice mode: mute toggle in header. When unmuted, AI replies are spoken via ElevenLabs TTS.
 
 import { useRef, useEffect, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { groq } from "../api/groq";
 import { useApp } from "../context/AppContext";
 import { supabase } from "../api/supabase";
-import { isThemeRequest, generateAndApplyTheme, resetTheme } from "../utils/themeEngine";
 
-// Matches <nav>...</nav> — also catches malformed <n nav>, < nav>, etc.
-const NAV_REGEX = /<\s*n?\s*nav[^>]*>([\s\S]*?)<\/\s*n?\s*nav\s*>/i;
-// Strips any leftover nav-like tag fragment from display text (catches partial matches)
+const NAV_REGEX      = /<\s*n?\s*nav[^>]*>([\s\S]*?)<\/\s*n?\s*nav\s*>/i;
 const NAV_STRIP_REGEX = /<\s*n?\s*nav[\s\S]*$/i;
 
 /** Log chat message to Supabase chat_logs (non-blocking) */
@@ -42,13 +40,11 @@ function getUrgentAssignments(assignments) {
   });
 }
 
-// Build system prompt with full user context — course names, GPA, streak, upcoming dues
 function buildChatSystem(courseOptions, userData, assignments) {
   const courseList = courseOptions.length
     ? courseOptions.join("\n- ")
     : "No courses loaded yet";
 
-  // Top 5 upcoming assignments
   const now = Date.now();
   const upcoming = (assignments || [])
     .filter(a => a.dueAt && new Date(a.dueAt).getTime() > now)
@@ -58,11 +54,11 @@ function buildChatSystem(courseOptions, userData, assignments) {
     .join("\n");
 
   const userContext = userData ? [
-    userData.name     ? `Student name: ${userData.name}` : null,
-    userData.gpa      ? `GPA: ${userData.gpa}` : null,
-    userData.streak   ? `Study streak: ${userData.streak} days` : null,
+    userData.name       ? `Student name: ${userData.name}` : null,
+    userData.gpa        ? `GPA: ${userData.gpa}` : null,
+    userData.streak     ? `Study streak: ${userData.streak} days` : null,
     userData.study_time ? `Total study time: ${userData.study_time} mins` : null,
-    userData.school   ? `School: ${userData.school}` : null,
+    userData.school     ? `School: ${userData.school}` : null,
   ].filter(Boolean).join("\n") : "";
 
   return `You are a concise academic AI assistant. Answer in 1-3 sentences. Use the student's real data below to give specific, helpful answers.
@@ -82,8 +78,6 @@ NAVIGATION: When the user wants to go somewhere or study a course, append this E
 <nav>{"page":"pagename","course":"EXACT course string","mode":"flashcards or guide"}</nav>
 Omit "course"/"mode" when not relevant. Only use <nav> for clear navigation intent.
 
-THEME: If the user asks to change the theme, colors, vibe, or appearance, acknowledge it naturally in 1 sentence (e.g. "Done! Mango sunset activated." or "Switched to ocean vibes!"). Do NOT describe what you changed — the app handles that automatically.
-
 RULES:
 - Never dump the full course list. If asked, summarize (e.g. "You have 6 courses including Physics and Media Studies")
 - Use the student's real GPA/streak/assignments when answering
@@ -91,17 +85,14 @@ RULES:
 }
 
 function parseNav(raw) {
-  // Primary: proper or malformed <nav> tags
   const tagMatch = raw.match(NAV_REGEX);
   if (tagMatch) {
     try {
       const cmd  = JSON.parse(tagMatch[1].trim());
-      // Strip the entire nav tag + anything after it from display text
       const text = raw.replace(NAV_REGEX, "").replace(NAV_STRIP_REGEX, "").trim();
       return { cmd, text };
     } catch {}
   }
-  // Fallback: bare JSON object ending the response that contains "page"
   const bareMatch = raw.match(/(\{[^{}]*"page"\s*:[^{}]*\})\s*$/);
   if (bareMatch) {
     try {
@@ -109,14 +100,33 @@ function parseNav(raw) {
       if (cmd.page) return { cmd, text: raw.slice(0, raw.lastIndexOf(bareMatch[1])).replace(NAV_STRIP_REGEX, "").trim() };
     } catch {}
   }
-  // Last resort: strip any nav-like tag fragment that leaked through
   return { cmd: null, text: raw.replace(NAV_STRIP_REGEX, "").trim() };
 }
 
+// ── ElevenLabs TTS ─────────────────────────────────────────────────────────
+async function speakText(text) {
+  const res = await fetch("/api/tts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ text }),
+  });
+  if (!res.ok) throw new Error(`TTS ${res.status}`);
+  const { audio, mimeType } = await res.json();
+  if (!audio) throw new Error("No audio returned");
+  const bytes   = Uint8Array.from(atob(audio), c => c.charCodeAt(0));
+  const blob    = new Blob([bytes], { type: mimeType || "audio/mpeg" });
+  const url     = URL.createObjectURL(blob);
+  const audioEl = new Audio(url);
+  return new Promise((resolve, reject) => {
+    audioEl.onended = () => { URL.revokeObjectURL(url); resolve(); };
+    audioEl.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+    audioEl.play().catch(reject);
+  });
+}
 
-const SIZE   = 68;
-const RADIUS = 24;
-const N      = 28;
+const SIZE           = 68;
+const RADIUS         = 24;
+const N              = 28;
 const EDGE_THRESHOLD = 0.72;
 
 function fibonacciSphere(n) {
@@ -148,10 +158,26 @@ function clamp(pos) {
   };
 }
 
+const MuteIcon = ({ muted }) => muted ? (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="1" y1="1" x2="23" y2="23"/>
+    <path d="M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6"/>
+    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/>
+    <line x1="12" y1="19" x2="12" y2="23"/>
+    <line x1="8" y1="23" x2="16" y2="23"/>
+  </svg>
+) : (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+    <line x1="12" y1="19" x2="12" y2="23"/>
+    <line x1="8" y1="23" x2="16" y2="23"/>
+  </svg>
+);
+
 export default function NeuralRing() {
   const { userData, updateUserField, courses, assignments, setPendingNav, setStudyConfig, userId } = useApp();
 
-  // Build course option strings once, matching the format Study.jsx uses
   const courseOptions = courses.length
     ? courses.map(c => `${c.courseCode} — ${c.name}`)
     : [];
@@ -167,22 +193,21 @@ export default function NeuralRing() {
 
   const [chatOpen, setChatOpen] = useState(false);
 
-  // Ring name — loaded from Supabase via userData
   const [ringName,       setRingName]       = useState("");
   const [editingName,    setEditingName]    = useState(false);
   const [ringNameInput,  setRingNameInput]  = useState("");
   const ringNameInputRef                    = useRef(null);
 
-  // Chat state
   const [messages, setMessages] = useState([]);
-  const [input, setInput]       = useState("");
-  const [loading, setLoading]   = useState(false);
+  const [input,    setInput]    = useState("");
+  const [loading,  setLoading]  = useState(false);
   const messagesEndRef          = useRef(null);
 
-  // Theme — shows subtle indicator while generating
-  const [themePending, setThemePending] = useState(false);
+  const [muted,    setMuted]    = useState(() => {
+    try { return localStorage.getItem("fschool_muted") === "1"; } catch { return false; }
+  });
+  const [speaking, setSpeaking] = useState(false);
 
-  // Sheet swipe-to-close
   const sheetStartY             = useRef(null);
   const [sheetDragY, setSheetDragY] = useState(0);
 
@@ -192,7 +217,15 @@ export default function NeuralRing() {
     setRingNameInput(name);
   }, [userData?.ring_name]);
 
-  // ── Inject pulse keyframe once ───────────────────────────────────────────────
+  const toggleMute = useCallback(() => {
+    setMuted(m => {
+      const next = !m;
+      try { localStorage.setItem("fschool_muted", next ? "1" : "0"); } catch {}
+      return next;
+    });
+  }, []);
+
+  // ── Inject keyframes once ──────────────────────────────────────────────────
   useEffect(() => {
     if (document.querySelector("[data-neuralring-style]")) return;
     const style = document.createElement("style");
@@ -203,36 +236,17 @@ export default function NeuralRing() {
         50%       { box-shadow: 0 0 0 9px rgba(255,255,255,0.03), 0 0 0 1px rgba(255,255,255,0.12), 0 6px 28px rgba(0,0,0,0.5); }
       }
       .nr-idle { animation: neuralPulse 4s ease-in-out infinite; }
-      @keyframes themeFlash {
-        0%   { opacity: 0; transform: translateX(-50%) scale(0.95); }
-        15%  { opacity: 1; transform: translateX(-50%) scale(1); }
-        85%  { opacity: 1; transform: translateX(-50%) scale(1); }
-        100% { opacity: 0; transform: translateX(-50%) scale(0.95); }
+      @keyframes neuralSpeak {
+        0%, 100% { box-shadow: 0 0 0 0 rgba(255,255,255,0.14), 0 0 0 1px rgba(255,255,255,0.18), 0 6px 28px rgba(0,0,0,0.5); }
+        50%       { box-shadow: 0 0 0 14px rgba(255,255,255,0.05), 0 0 0 1px rgba(255,255,255,0.22), 0 6px 28px rgba(0,0,0,0.5); }
       }
-      .theme-toast {
-        animation: themeFlash 2.4s ease forwards;
-        position: fixed;
-        bottom: 96px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: rgba(255,255,255,0.12);
-        backdrop-filter: blur(16px);
-        -webkit-backdrop-filter: blur(16px);
-        border: 1px solid rgba(255,255,255,0.18);
-        border-radius: 20px;
-        padding: 8px 18px;
-        font-size: 13px;
-        color: rgba(255,255,255,0.85);
-        pointer-events: none;
-        z-index: 99999;
-        white-space: nowrap;
-      }
+      .nr-speaking { animation: neuralSpeak 0.8s ease-in-out infinite; }
     `;
     document.head.appendChild(style);
     return () => style.remove();
   }, []);
 
-  // ── Canvas animation ─────────────────────────────────────────────────────────
+  // ── Canvas animation ────────────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -282,10 +296,9 @@ export default function NeuralRing() {
     await updateUserField("ring_name", trimmed);
   }, [ringNameInput, updateUserField]);
 
-  // ── Drag handlers ────────────────────────────────────────────────────────────
+  // ── Drag handlers ───────────────────────────────────────────────────────────
   const handlePointerDown = useCallback((e) => {
-    e.preventDefault();
-    e.stopPropagation();
+    e.preventDefault(); e.stopPropagation();
     document.body.dataset.ringDrag = "1";
     dragStartRef.current  = { px: pos.left, py: pos.top, mx: e.clientX, my: e.clientY };
     hasDraggedRef.current = false;
@@ -313,7 +326,7 @@ export default function NeuralRing() {
     }
   }, [isDragging]);
 
-  // ── Sheet swipe-to-close ─────────────────────────────────────────────────────
+  // ── Sheet swipe-to-close ────────────────────────────────────────────────────
   const handleSheetHandleTouchStart = useCallback((e) => {
     sheetStartY.current = e.touches[0].clientY;
     setSheetDragY(0);
@@ -351,18 +364,22 @@ export default function NeuralRing() {
     prevChatOpen.current = chatOpen;
   }, [chatOpen, assignments]);
 
-  // ── Theme toast helper ───────────────────────────────────────────────────────
-  const showThemeToast = useCallback((text) => {
-    const existing = document.querySelector(".theme-toast");
-    if (existing) existing.remove();
-    const toast = document.createElement("div");
-    toast.className = "theme-toast";
-    toast.textContent = text;
-    document.body.appendChild(toast);
-    setTimeout(() => toast.remove(), 2600);
-  }, []);
+  // ── Speak helper — fires TTS if not muted, fails silently ──────────────────
+  const speak = useCallback(async (text) => {
+    if (muted) return;
+    const plain = text.replace(/<[^>]+>/g, "").trim();
+    if (!plain) return;
+    try {
+      setSpeaking(true);
+      await speakText(plain);
+    } catch (err) {
+      console.warn("TTS failed, staying text-only:", err.message);
+    } finally {
+      setSpeaking(false);
+    }
+  }, [muted]);
 
-  // ── Chat ─────────────────────────────────────────────────────────────────────
+  // ── Chat ────────────────────────────────────────────────────────────────────
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
     const userMsg = { role: "user", content: input.trim() };
@@ -370,37 +387,6 @@ export default function NeuralRing() {
     setInput("");
     setLoading(true);
     logChat(userId, "user", userMsg.content, null);
-
-    // Theme detection — fires in parallel, does not block the chat response
-    const isTheme = isThemeRequest(userMsg.content);
-    const isRevert = /revert|reset|original|default|undo|go back/i.test(userMsg.content);
-
-    if (isRevert && isTheme) {
-      resetTheme();
-      setMessages(m => [...m, { role: "assistant", content: "Reverted to default theme." }]);
-      logChat(userId, "assistant", "Reverted to default theme.", null);
-      setLoading(false);
-      return;
-    }
-
-    if (isTheme) {
-      setThemePending(true);
-      showThemeToast("Generating your theme...");
-      generateAndApplyTheme(userMsg.content, userId, supabase)
-        .then(theme => {
-          const reply = theme.ai_reply || `${theme.theme_name} activated.`;
-          showThemeToast(reply);
-          // Inject AI reply into chat instead of calling groq again
-          setMessages(m => [...m, { role: "assistant", content: reply }]);
-          logChat(userId, "assistant", reply, null);
-        })
-        .catch(() => {
-          showThemeToast("Couldn't generate theme — try again");
-          setMessages(m => [...m, { role: "assistant", content: "Couldn't generate that theme, try describing it differently." }]);
-        })
-        .finally(() => { setThemePending(false); setLoading(false); });
-      return; // skip normal groq call — theme response IS the reply
-    }
 
     try {
       const raw = await groq([...messages, userMsg], buildChatSystem(courseOptions, userData, assignments));
@@ -412,36 +398,30 @@ export default function NeuralRing() {
       }
       setMessages(m => [...m, { role: "assistant", content: cleanText }]);
       logChat(userId, "assistant", cleanText, null);
+      speak(cleanText);
     } catch {
       setMessages(m => [...m, { role: "assistant", content: "Couldn't connect. Check your Groq API key." }]);
     }
     setLoading(false);
   };
 
-  // ── Render ───────────────────────────────────────────────────────────────────
+  // ── Render ──────────────────────────────────────────────────────────────────
   return createPortal(
     <>
-      {/* Floating ring + name label */}
+      {/* Floating ring */}
       <div
         style={{
-          position: "fixed",
-          top: pos.top,
-          left: pos.left,
+          position: "fixed", top: pos.top, left: pos.left,
           opacity: chatOpen ? 0 : (isDragging ? 1 : 0.82),
           pointerEvents: chatOpen ? "none" : "auto",
           transition: isDragging
             ? "opacity 0.15s"
             : "top 0.22s var(--ease-apple), left 0.22s var(--ease-apple), opacity 0.2s",
-          zIndex: 9999,
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          gap: "5px",
+          zIndex: 9999, display: "flex", flexDirection: "column", alignItems: "center", gap: "5px",
         }}
       >
-        {/* Sphere */}
         <div
-          className={isDragging ? undefined : "nr-idle"}
+          className={speaking ? "nr-speaking" : (isDragging ? undefined : "nr-idle")}
           onPointerDown={handlePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={handlePointerUp}
@@ -455,7 +435,6 @@ export default function NeuralRing() {
         >
           <canvas ref={canvasRef} width={SIZE} height={SIZE} style={{ display: "block", borderRadius: "50%" }} />
         </div>
-
       </div>
 
       {/* Chat sheet */}
@@ -466,21 +445,27 @@ export default function NeuralRing() {
             onTouchStart={e => e.stopPropagation()}
             onTouchEnd={e => e.stopPropagation()}
             style={{
-            position: "fixed", bottom: 0, left: 0, right: 0,
-            height: "72vh", maxHeight: "680px",
-            background: "rgba(16,16,16,0.96)",
-            backdropFilter: "blur(32px)", WebkitBackdropFilter: "blur(32px)",
-            borderRadius: "22px 22px 0 0",
-            border: "1px solid rgba(255,255,255,0.09)", borderBottom: "none",
-            display: "flex", flexDirection: "column",
-            fontFamily: "var(--font-sans)",
-            boxShadow: "0 -12px 48px rgba(0,0,0,0.6)",
-            zIndex: 9998,
-            transform: `translateY(${sheetDragY}px)`,
-            transition: sheetDragY > 0 ? "none" : "transform 0.28s var(--ease-apple)",
-          }}>
+              position: "fixed", bottom: 0, left: 0, right: 0,
+              height: "72vh", maxHeight: "680px",
+              background: "rgba(16,16,16,0.96)",
+              backdropFilter: "blur(32px)", WebkitBackdropFilter: "blur(32px)",
+              borderRadius: "22px 22px 0 0",
+              border: "1px solid rgba(255,255,255,0.09)", borderBottom: "none",
+              display: "flex", flexDirection: "column",
+              fontFamily: "var(--font-sans)",
+              boxShadow: "0 -12px 48px rgba(0,0,0,0.6)",
+              zIndex: 9998,
+              transform: `translateY(${sheetDragY}px)`,
+              transition: sheetDragY > 0 ? "none" : "transform 0.28s var(--ease-apple)",
+            }}
+          >
             {/* Drag handle */}
-            <div onTouchStart={handleSheetHandleTouchStart} onTouchMove={handleSheetHandleTouchMove} onTouchEnd={handleSheetHandleTouchEnd} style={{ display: "flex", justifyContent: "center", padding: "14px 0 6px", flexShrink: 0, cursor: "grab", touchAction: "none" }}>
+            <div
+              onTouchStart={handleSheetHandleTouchStart}
+              onTouchMove={handleSheetHandleTouchMove}
+              onTouchEnd={handleSheetHandleTouchEnd}
+              style={{ display: "flex", justifyContent: "center", padding: "14px 0 6px", flexShrink: 0, cursor: "grab", touchAction: "none" }}
+            >
               <div style={{ width: 40, height: 4, borderRadius: 2, background: "rgba(255,255,255,0.18)" }} />
             </div>
 
@@ -497,17 +482,10 @@ export default function NeuralRing() {
                       onBlur={commitRingName}
                       onKeyDown={e => e.key === "Enter" && commitRingName()}
                       style={{
-                        background: "rgba(255,255,255,0.07)",
-                        border: "1px solid rgba(255,255,255,0.18)",
-                        borderRadius: "6px",
-                        padding: "3px 9px",
-                        color: "var(--text-primary)",
-                        fontSize: "17px",
-                        fontWeight: "600",
-                        letterSpacing: "-0.2px",
-                        outline: "none",
-                        fontFamily: "inherit",
-                        width: "160px",
+                        background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.18)",
+                        borderRadius: "6px", padding: "3px 9px", color: "var(--text-primary)",
+                        fontSize: "17px", fontWeight: "600", letterSpacing: "-0.2px",
+                        outline: "none", fontFamily: "inherit", width: "160px",
                       }}
                     />
                   ) : (
@@ -520,9 +498,25 @@ export default function NeuralRing() {
                     </p>
                   )}
                   <p style={{ color: "rgba(255,255,255,0.3)", fontSize: "11px", marginTop: "1px", letterSpacing: "0.4px" }}>
-                    Academic AI · Always on{themePending ? " · Applying theme…" : ""}
+                    Academic AI · Always on{speaking ? " · Speaking…" : ""}
                   </p>
                 </div>
+
+                {/* Mute toggle */}
+                <button
+                  onClick={toggleMute}
+                  title={muted ? "Voice off — tap to enable" : "Voice on — tap to mute"}
+                  style={{
+                    background: muted ? "rgba(255,255,255,0.06)" : "rgba(255,255,255,0.12)",
+                    border: `1px solid ${muted ? "rgba(255,255,255,0.08)" : "rgba(255,255,255,0.2)"}`,
+                    borderRadius: "8px", padding: "6px 8px",
+                    color: muted ? "rgba(255,255,255,0.3)" : "rgba(255,255,255,0.8)",
+                    cursor: "pointer", display: "flex", alignItems: "center",
+                    justifyContent: "center", flexShrink: 0, transition: "all 0.15s ease",
+                  }}
+                >
+                  <MuteIcon muted={muted} />
+                </button>
               </div>
             </div>
 
@@ -532,13 +526,13 @@ export default function NeuralRing() {
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginTop: "40px", gap: "12px" }}>
                   <div style={{ width: 52, height: 52, borderRadius: "50%", background: "radial-gradient(circle at 35% 35%, rgba(255,255,255,0.14), rgba(255,255,255,0.03))", border: "1px solid rgba(255,255,255,0.10)" }} />
                   <p style={{ color: "rgba(255,255,255,0.22)", fontSize: "14px", textAlign: "center", lineHeight: "1.8" }}>
-                    Ask about assignments, grades,<br />or change the whole app vibe.
+                    Ask about assignments, grades,<br />or navigate anywhere in the app.
                   </p>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: "7px", justifyContent: "center", marginTop: "4px" }}>
-                    {["make it gold and black luxury", "rainy tokyo night", "blood red aggressive", "revert to original"].map(prompt => (
+                    {["What's due soon?", "Take me to study", "How's my GPA?", "Open toolkit"].map(prompt => (
                       <button
                         key={prompt}
-                        onClick={() => { setInput(prompt); }}
+                        onClick={() => setInput(prompt)}
                         style={{
                           fontSize: "11px", padding: "5px 11px", borderRadius: "20px",
                           background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
@@ -552,14 +546,25 @@ export default function NeuralRing() {
                 </div>
               ) : (
                 messages.map((m, i) => (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "84%", background: m.role === "user" ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.05)", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", padding: "10px 14px", color: "var(--text-primary)", fontSize: "14px", lineHeight: "1.6", border: "1px solid rgba(255,255,255,0.07)" }}>
+                  <div
+                    key={i}
+                    style={{
+                      alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                      maxWidth: "84%",
+                      background: m.role === "user" ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.05)",
+                      borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+                      padding: "10px 14px", color: "var(--text-primary)",
+                      fontSize: "14px", lineHeight: "1.6",
+                      border: "1px solid rgba(255,255,255,0.07)",
+                    }}
+                  >
                     {m.content}
                   </div>
                 ))
               )}
               {loading && (
                 <div style={{ alignSelf: "flex-start", color: "rgba(255,255,255,0.3)", fontSize: "13px", padding: "6px 4px" }}>
-                  {themePending ? "Generating theme…" : "Thinking…"}
+                  Thinking…
                 </div>
               )}
               <div ref={messagesEndRef} />
@@ -571,15 +576,27 @@ export default function NeuralRing() {
                 value={input}
                 onChange={e => setInput(e.target.value)}
                 onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } }}
-                placeholder="Change vibe, ask about assignments…"
-                style={{ flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)", borderRadius: "var(--radius-btn)", padding: "11px 14px", color: "var(--text-primary)", fontSize: "14px", outline: "none", fontFamily: "inherit", transition: "border-color var(--dur-base) var(--ease-apple)" }}
+                placeholder="Ask about assignments, navigate…"
+                style={{
+                  flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
+                  borderRadius: "var(--radius-btn)", padding: "11px 14px", color: "var(--text-primary)",
+                  fontSize: "14px", outline: "none", fontFamily: "inherit",
+                  transition: "border-color var(--dur-base) var(--ease-apple)",
+                }}
                 onFocus={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.22)")}
                 onBlur={e  => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)")}
               />
               <button
                 onClick={sendMessage}
                 disabled={!input.trim() || loading}
-                style={{ background: !input.trim() || loading ? "rgba(255,255,255,0.18)" : "var(--color-accent)", color: "#111", border: "none", borderRadius: "var(--radius-btn)", padding: "11px 18px", fontSize: "14px", fontWeight: "600", cursor: !input.trim() || loading ? "not-allowed" : "pointer", fontFamily: "inherit", flexShrink: 0, transition: "background var(--dur-base) var(--ease-apple)" }}
+                style={{
+                  background: !input.trim() || loading ? "rgba(255,255,255,0.18)" : "var(--color-accent)",
+                  color: "#111", border: "none", borderRadius: "var(--radius-btn)",
+                  padding: "11px 18px", fontSize: "14px", fontWeight: "600",
+                  cursor: !input.trim() || loading ? "not-allowed" : "pointer",
+                  fontFamily: "inherit", flexShrink: 0,
+                  transition: "background var(--dur-base) var(--ease-apple)",
+                }}
               >
                 Send
               </button>
