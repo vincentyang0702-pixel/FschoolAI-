@@ -16,6 +16,27 @@ import { groq } from "../api/groq";
 import { useApp } from "../context/AppContext";
 import { supabase } from "../api/supabase";
 
+// ── Claude proxy helper (tutor brain — better quality than Groq for conversation) ──
+async function claudeTutor(messages, system) {
+  const res = await fetch("/api/claude", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages, system, max_tokens: 400 }),
+  });
+  if (!res.ok) throw new Error(`Claude proxy ${res.status}`);
+  const { content } = await res.json();
+  return content ?? "";
+}
+
+// ── Fire-and-forget impression writer — never awaited in critical path ──
+function writeImpression(userId, userMessage, tutorResponse) {
+  fetch("/api/tutor-impression", {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ userId, userMessage, tutorResponse }),
+  }).catch(() => {}); // silent — never block UI
+}
+
 const NAV_REGEX      = /<\s*n?\s*nav[^>]*>([\s\S]*?)<\/\s*n?\s*nav\s*>/i;
 const NAV_STRIP_REGEX = /<\s*n?\s*nav[\s\S]*$/i;
 
@@ -40,7 +61,7 @@ function getUrgentAssignments(assignments) {
   });
 }
 
-function buildChatSystem(courseOptions, userData, assignments) {
+function buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession) {
   const courseList = courseOptions.length
     ? courseOptions.join("\n- ")
     : "No courses loaded yet";
@@ -61,7 +82,35 @@ function buildChatSystem(courseOptions, userData, assignments) {
     userData.school     ? `School: ${userData.school}` : null,
   ].filter(Boolean).join("\n") : "";
 
-  return `You are a concise academic AI assistant. Answer in 1-3 sentences. Use the student's real data below to give specific, helpful answers.
+  // Flashcard topics per course (just question subjects, not full cards)
+  const flashcardContext = Object.entries(flashcardMap || {})
+    .map(([, data]) => {
+      if (!data?.cards?.length) return null;
+      const topics = data.cards.slice(0, 4).map(c => c.question).join(" | ");
+      return `• ${topics}`;
+    })
+    .filter(Boolean)
+    .slice(0, 3)
+    .join("\n");
+
+  // Syllabus topics (first 5 items)
+  const syllabusContext = (syllabus || [])
+    .slice(0, 5)
+    .map(s => `• ${s.title ?? s.name ?? JSON.stringify(s)}`)
+    .join("\n");
+
+  // Impressions from previous sessions
+  const impressionContext = (impressions || [])
+    .slice(0, 5)
+    .map(i => `• ${i.impression}`)
+    .join("\n");
+
+  // Last session continuity
+  const lastSessionLine = lastSession
+    ? `Last session: ${lastSession}`
+    : "";
+
+  return `You are a sharp, direct academic AI tutor. You know this student — their patterns, their work habits, their actual courses. Answer in 1-3 sentences unless the student asks for more detail.
 
 STUDENT DATA:
 ${userContext || "No user data yet"}
@@ -69,8 +118,16 @@ ${userContext || "No user data yet"}
 UPCOMING ASSIGNMENTS:
 ${upcoming || "None"}
 
-COURSES (internal reference — never list these back verbatim):
+COURSES (internal reference — never list back verbatim):
 - ${courseList}
+
+${flashcardContext ? `WHAT THEY'VE BEEN STUDYING (flashcard topics):\n${flashcardContext}` : ""}
+
+${syllabusContext ? `SYLLABUS TOPICS:\n${syllabusContext}` : ""}
+
+${impressionContext ? `WHAT YOU KNOW ABOUT THIS STUDENT (your observations from past sessions):\n${impressionContext}` : ""}
+
+${lastSessionLine ? `CONTINUITY:\n${lastSessionLine}` : ""}
 
 PAGES: work, canvas, assignment, study, identity, leaderboard, toolkit
 
@@ -81,6 +138,7 @@ Omit "course"/"mode" when not relevant. Only use <nav> for clear navigation inte
 RULES:
 - Never dump the full course list. If asked, summarize (e.g. "You have 6 courses including Physics and Media Studies")
 - Use the student's real GPA/streak/assignments when answering
+- If you have past observations about this student, let them subtly inform how you respond
 - Be direct and specific, not generic`;
 }
 
@@ -233,11 +291,15 @@ const VoiceToggle = ({ muted, onClick, speaking }) => (
 );
 
 export default function NeuralRing() {
-  const { userData, updateUserField, courses, assignments, setPendingNav, setStudyConfig, userId } = useApp();
+  const { userData, updateUserField, courses, assignments, setPendingNav, setStudyConfig, userId, flashcardMap, syllabus } = useApp();
 
   const courseOptions = courses.length
     ? courses.map(c => `${c.courseCode} — ${c.name}`)
     : [];
+
+  // ── Tutor impressions — loaded once on mount, updated after each exchange ──
+  const [impressions,  setImpressions]  = useState([]);
+  const [lastSession,  setLastSession]  = useState(null);
 
   const canvasRef = useRef(null);
   const rafRef    = useRef(null);
@@ -275,6 +337,39 @@ export default function NeuralRing() {
     setRingName(name);
     setRingNameInput(name);
   }, [userData?.ring_name]);
+
+  // ── Load impressions + last session from Supabase on mount ──────────────────
+  useEffect(() => {
+    if (!userId) return;
+    async function loadMemory() {
+      try {
+        // Load last 10 impressions
+        const { data: impData } = await supabase
+          .from("tutor_impressions")
+          .select("impression, created_at")
+          .eq("user_id", userId)
+          .order("created_at", { ascending: false })
+          .limit(10);
+        if (impData?.length) setImpressions(impData);
+
+        // Load last session summary from chat_logs (last assistant message from a different day)
+        const { data: logData } = await supabase
+          .from("chat_logs")
+          .select("content, created_at")
+          .eq("user_id", userId)
+          .eq("role", "assistant")
+          .order("created_at", { ascending: false })
+          .limit(1);
+        if (logData?.[0]) {
+          const daysAgo = Math.round((Date.now() - new Date(logData[0].created_at)) / 86400000);
+          if (daysAgo >= 1) {
+            setLastSession(`${daysAgo === 1 ? "yesterday" : `${daysAgo} days ago`} — "${logData[0].content.slice(0, 80)}..."`);
+          }
+        }
+      } catch { /* non-fatal */ }
+    }
+    loadMemory();
+  }, [userId]);
 
   const toggleMute = useCallback(() => {
     setMuted(m => {
@@ -485,7 +580,17 @@ export default function NeuralRing() {
     setLoading(true);
     logChat(userId, "user", userMsg.content, null);
     try {
-      const raw = await groq([...messages, userMsg], buildChatSystem(courseOptions, userData, assignments));
+      const system = buildChatSystem(
+        courseOptions, userData, assignments,
+        flashcardMap, syllabus, impressions, lastSession
+      );
+      // Use Claude for tutor brain quality; fall back to Groq if Claude key missing
+      let raw;
+      try {
+        raw = await claudeTutor([...messages, userMsg], system);
+      } catch {
+        raw = await groq([...messages, userMsg], system);
+      }
       const { cmd, text: displayText } = parseNav(raw);
       const cleanText = displayText.replace(/<[^>]+>/g, "").trim();
       if (cmd?.page) {
@@ -493,10 +598,14 @@ export default function NeuralRing() {
         setTimeout(() => setPendingNav({ page: cmd.page }), 600);
       }
       logChat(userId, "assistant", cleanText, null);
+
+      // Fire-and-forget impression — never blocks response
+      writeImpression(userId, userMsg.content, cleanText);
+
       setLoading(false);
       await speakAndType(cleanText);
     } catch {
-      setMessages(m => [...m, { role: "assistant", content: "Couldn't connect. Check your Groq API key." }]);
+      setMessages(m => [...m, { role: "assistant", content: "Couldn't connect. Check your API keys." }]);
       setLoading(false);
     }
   };
