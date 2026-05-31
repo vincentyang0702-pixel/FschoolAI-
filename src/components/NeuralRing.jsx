@@ -104,6 +104,15 @@ function parseNav(raw) {
 }
 
 // ── ElevenLabs TTS ─────────────────────────────────────────────────────────
+// AudioContext bypasses iOS Safari autoplay restrictions.
+// Must be created/resumed synchronously inside a user gesture.
+let _audioCtx = null;
+function getAudioContext() {
+  if (!_audioCtx) _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (_audioCtx.state === "suspended") _audioCtx.resume();
+  return _audioCtx;
+}
+
 async function speakText(text) {
   const res = await fetch("/api/tts", {
     method: "POST",
@@ -113,14 +122,17 @@ async function speakText(text) {
   if (!res.ok) throw new Error(`TTS ${res.status}`);
   const { audio, mimeType } = await res.json();
   if (!audio) throw new Error("No audio returned");
-  const bytes   = Uint8Array.from(atob(audio), c => c.charCodeAt(0));
-  const blob    = new Blob([bytes], { type: mimeType || "audio/mpeg" });
-  const url     = URL.createObjectURL(blob);
-  const audioEl = new Audio(url);
-  return new Promise((resolve, reject) => {
-    audioEl.onended = () => { URL.revokeObjectURL(url); resolve(); };
-    audioEl.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
-    audioEl.play().catch(reject);
+  const binaryStr = atob(audio);
+  const bytes = new Uint8Array(binaryStr.length);
+  for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
+  const ctx = getAudioContext();
+  const audioBuffer = await ctx.decodeAudioData(bytes.buffer);
+  return new Promise((resolve) => {
+    const source = ctx.createBufferSource();
+    source.buffer = audioBuffer;
+    source.connect(ctx.destination);
+    source.onended = resolve;
+    source.start(0);
   });
 }
 
@@ -244,11 +256,11 @@ export default function NeuralRing() {
   const [loading,  setLoading]  = useState(false);
   const messagesEndRef          = useRef(null);
 
-  const [muted,    setMuted]    = useState(() => {
+  const [muted,        setMuted]        = useState(() => {
     try { return localStorage.getItem("fschool_muted") === "1"; } catch { return false; }
   });
   const [speaking,     setSpeaking]     = useState(false);
-  const [streamingMsg, setStreamingMsg] = useState(""); // typewriter in-progress text
+  const [streamingMsg, setStreamingMsg] = useState("");
   const typeTimerRef = useRef(null);
 
   const sheetStartY             = useRef(null);
@@ -408,7 +420,7 @@ export default function NeuralRing() {
     prevChatOpen.current = chatOpen;
   }, [chatOpen, assignments]);
 
-    // ── Typewriter — types text at charsPerSec, returns promise (──────────────────────────────
+  // ── Typewriter ──────────────────────────────────────────────────────────────────────────
   const typewrite = useCallback((text, charsPerSec = 38) => {
     return new Promise((resolve) => {
       if (typeTimerRef.current) clearInterval(typeTimerRef.current);
@@ -429,15 +441,11 @@ export default function NeuralRing() {
     });
   }, []);
 
-  // ── Speak + typewriter in sync ───────────────────────────────────────────────────
-  // ElevenLabs turbo ~150 chars/sec. Typewriter speed matches so text finishes with voice.
+  // ── Speak + type in sync ───────────────────────────────────────────────────────────────
   const speakAndType = useCallback(async (text) => {
     const plain = text.replace(/<[^>]+>/g, "").trim();
     if (!plain) return;
-    if (muted) {
-      await typewrite(plain, 40);
-      return;
-    }
+    if (muted) { await typewrite(plain, 40); return; }
     const estimatedSecs = Math.max(1.2, plain.length / 150);
     const charsPerSec   = Math.round(plain.length / estimatedSecs);
     try {
@@ -456,7 +464,7 @@ export default function NeuralRing() {
   // ── Chat ──────────────────────────────────────────────────────────────────────────
   const sendMessage = async () => {
     if (!input.trim() || loading) return;
-    getAudioContext(); // unlock AudioContext on iOS inside user gesture
+    getAudioContext(); // unlock AudioContext on iOS synchronously inside user gesture
     const userMsg = { role: "user", content: input.trim() };
     setMessages(m => [...m, userMsg]);
     setInput("");
@@ -623,7 +631,7 @@ export default function NeuralRing() {
                   </div>
                 ))
               )}
-              {loading && (
+              {loading && !streamingMsg && (
                 <div style={{ alignSelf: "flex-start", color: "rgba(255,255,255,0.3)", fontSize: "13px", padding: "6px 4px" }}>
                   Thinking…
                 </div>
