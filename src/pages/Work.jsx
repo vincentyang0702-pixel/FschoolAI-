@@ -151,7 +151,7 @@ export default function Work() {
         {syncStatus === "syncing"
           ? "Syncing your Canvas…"
           : upcoming.length > 0
-          ? `${upcoming.length} assignment${upcoming.length !== 1 ? "s" : ""} coming up`
+          ? `${new Date().toLocaleDateString("en-US", { month: "long", day: "numeric" })} · ${upcoming.length} assignment${upcoming.length !== 1 ? "s" : ""} coming up`
           : hasToken ? "You're all caught up" : "Connect Canvas to see assignments"}
       </p>
 

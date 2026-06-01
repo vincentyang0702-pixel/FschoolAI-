@@ -138,11 +138,14 @@ NAVIGATION: When the user wants to go somewhere or study a course, append this E
 Omit "course"/"mode" when not relevant. Only use <nav> for clear navigation intent.
 
 RULES:
-- Never dump the full course list. If asked, summarize (e.g. "You have 6 courses including Physics and Media Studies")
-- Use the student's real GPA/streak/assignments when answering
-- If you have a living mind doc, let it heavily inform your tone and approach — you know this student
-- Be direct and specific, not generic
-- ${isFirstMessage ? "FIRST MESSAGE RULE: The student just opened chat. Greet them naturally and briefly — DO NOT list assignments, courses, or deadlines unprompted. Wait for them to ask." : "You may reference assignments and deadlines when directly relevant to the student's question."}`;
+- Be human and conversational. Max 2 sentences for casual questions, more only when asked.
+- NEVER read out course codes (e.g. GGRC25H3, MDSB11H3) — use the course name only.
+- NEVER dump assignments, deadlines, or course lists unless the student directly asks.
+- NEVER mention GPA/streak/stats unless directly asked.
+- If asked something personal (name, age, city) — answer from STUDENT DATA or say you don't have it. Do not pivot to courses.
+- Match the student's energy — casual when they're casual, focused when they need help.
+- Use the living mind doc to inform your tone — you know this student well.
+- ${isFirstMessage ? "FIRST MESSAGE RULE: Greet them warmly by name in one short sentence only. No assignments, no stats, no courses." : "Only mention assignments or deadlines if directly relevant to what they asked."}\`;
 }
 
 function parseNav(raw) {
@@ -333,6 +336,8 @@ export default function NeuralRing() {
 
   // ── Tutor impressions + living mind — loaded once on mount ─────────────────
   const [impressions,  setImpressions]  = useState([]);
+  const abortCtrlRef   = useRef(null);   // cancel in-flight fetch
+  const audioSourceRef = useRef(null);   // cancel in-flight audio
   const [lastSession,  setLastSession]  = useState(null);
   const [livingMind,   setLivingMind]   = useState(null);
 
@@ -689,6 +694,7 @@ export default function NeuralRing() {
       // ── Dynamic context fetch (chatbot agent upgrade) ─────────────────────
       // Fires in parallel — if it resolves before Claude, gets injected into prompt
       let dynamicContext = null;
+      abortCtrlRef.current = new AbortController();
       const contextFetch = fetch("/api/tutor-context", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
@@ -885,19 +891,49 @@ export default function NeuralRing() {
                 </div>
               ) : (
                 messages.map((m, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      alignSelf: m.role === "user" ? "flex-end" : "flex-start",
-                      maxWidth: "84%",
-                      background: m.role === "user" ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.05)",
-                      borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
-                      padding: "10px 14px", color: "var(--text-primary)",
-                      fontSize: "14px", lineHeight: "1.6",
-                      border: "1px solid rgba(255,255,255,0.07)",
-                    }}
-                  >
-                    {m.content}
+                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "84%" }}>
+                    <div
+                      style={{
+                        background: m.role === "user" ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.05)",
+                        borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+                        padding: "10px 14px", color: "var(--text-primary)",
+                        fontSize: "14px", lineHeight: "1.6",
+                        border: "1px solid rgba(255,255,255,0.07)",
+                      }}
+                    >
+                      {m.content}
+                    </div>
+                    {m.role === "assistant" && (
+                      <div style={{ display: "flex", gap: "6px", marginTop: "5px", paddingLeft: "2px" }}>
+                        <button
+                          onClick={() => navigator.clipboard?.writeText(m.content)}
+                          title="Copy"
+                          style={{ background: "none", border: "none", color: "rgba(255,255,255,0.25)", fontSize: "12px", cursor: "pointer", padding: "2px 6px", borderRadius: "6px", fontFamily: "inherit" }}
+                          onMouseEnter={e => e.currentTarget.style.color = "rgba(255,255,255,0.6)"}
+                          onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.25)"}
+                        >
+                          Copy
+                        </button>
+                        <button
+                          onClick={() => writeImpression(userId, messages[i-1]?.content ?? "", m.content + " [thumbs up]")}
+                          title="Good response"
+                          style={{ background: "none", border: "none", color: "rgba(255,255,255,0.25)", fontSize: "13px", cursor: "pointer", padding: "2px 4px", borderRadius: "6px" }}
+                          onMouseEnter={e => e.currentTarget.style.color = "rgba(100,220,155,0.8)"}
+                          onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.25)"}
+                        >
+                          👍
+                        </button>
+                        <button
+                          onClick={() => writeImpression(userId, messages[i-1]?.content ?? "", m.content + " [thumbs down — student disliked this response]")}
+                          title="Bad response"
+                          style={{ background: "none", border: "none", color: "rgba(255,255,255,0.25)", fontSize: "13px", cursor: "pointer", padding: "2px 4px", borderRadius: "6px" }}
+                          onMouseEnter={e => e.currentTarget.style.color = "rgba(255,100,90,0.8)"}
+                          onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.25)"}
+                        >
+                          👎
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ))
               )}
@@ -937,20 +973,34 @@ export default function NeuralRing() {
                 onFocus={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.22)")}
                 onBlur={e  => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)")}
               />
-              <button
-                onClick={sendMessage}
-                disabled={!input.trim() || loading}
-                style={{
-                  background: !input.trim() || loading ? "rgba(255,255,255,0.18)" : "var(--color-accent)",
-                  color: "#111", border: "none", borderRadius: "var(--radius-btn)",
-                  padding: "11px 18px", fontSize: "14px", fontWeight: "600",
-                  cursor: !input.trim() || loading ? "not-allowed" : "pointer",
-                  fontFamily: "inherit", flexShrink: 0,
-                  transition: "background var(--dur-base) var(--ease-apple)",
-                }}
-              >
-                Send
-              </button>
+              {loading ? (
+                <button
+                  onClick={stopResponse}
+                  style={{
+                    background: "rgba(255,80,80,0.15)", color: "rgba(255,120,100,0.9)",
+                    border: "1px solid rgba(255,80,80,0.25)", borderRadius: "var(--radius-btn)",
+                    padding: "11px 16px", fontSize: "14px", fontWeight: "600",
+                    cursor: "pointer", fontFamily: "inherit", flexShrink: 0,
+                  }}
+                >
+                  Stop
+                </button>
+              ) : (
+                <button
+                  onClick={sendMessage}
+                  disabled={!input.trim()}
+                  style={{
+                    background: !input.trim() ? "rgba(255,255,255,0.18)" : "var(--color-accent)",
+                    color: "#111", border: "none", borderRadius: "var(--radius-btn)",
+                    padding: "11px 18px", fontSize: "14px", fontWeight: "600",
+                    cursor: !input.trim() ? "not-allowed" : "pointer",
+                    fontFamily: "inherit", flexShrink: 0,
+                    transition: "background var(--dur-base) var(--ease-apple)",
+                  }}
+                >
+                  Send
+                </button>
+              )}
             </div>
           </div>
         </>
