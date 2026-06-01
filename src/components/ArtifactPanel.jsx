@@ -27,109 +27,80 @@ function stripModuleSyntax(code) {
 }
 
 function buildHtml(componentCode) {
-  const safe = escapeScriptTag(stripModuleSyntax(componentCode));
+  // Store Claude's code as plain text — browser won't try to parse it as JS.
+  // We manually Babel.transform() it at runtime so any syntax error in Claude's
+  // code is isolated and caught, never corrupting our helper scripts.
+  const clean = stripModuleSyntax(componentCode);
+
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<!-- crossorigin="anonymous" lets window.onerror see real error messages for these scripts -->
-<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous" onerror="showCdnError('React')"><\/script>
-<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous" onerror="showCdnError('ReactDOM')"><\/script>
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js" crossorigin="anonymous" onerror="showCdnErr('React')"><\/script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js" crossorigin="anonymous" onerror="showCdnErr('ReactDOM')"><\/script>
 <script src="https://unpkg.com/prop-types@15.8.1/prop-types.min.js" crossorigin="anonymous"><\/script>
-<script src="https://unpkg.com/recharts@2.8.0/umd/Recharts.js" crossorigin="anonymous" onerror="showCdnError('Recharts')"><\/script>
-<script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js" crossorigin="anonymous" onerror="showCdnError('Babel')"><\/script>
-<script>
-function showCdnError(lib) {
-  document.getElementById('root').innerHTML =
-    '<div class="error-box">Failed to load ' + lib + ' from CDN.\\nCheck your network connection and try again.</div>';
-}
-// Catch errors that escape Babel's scope
-window.onerror = function(msg, src, line, col, err) {
-  if (msg === 'Script error.') return false; // handled by inner try-catch
-  document.getElementById('root').innerHTML =
-    '<div class="error-box">Error: ' + msg + (line ? ' (line ' + line + ')' : '') +
-    (err && err.stack ? '\\n\\n' + err.stack : '') + '</div>';
-  return true;
-};
-<\/script>
+<script src="https://unpkg.com/recharts@2.8.0/umd/Recharts.js" crossorigin="anonymous" onerror="showCdnErr('Recharts')"><\/script>
+<script src="https://unpkg.com/@babel/standalone@7.23.10/babel.min.js" crossorigin="anonymous" onerror="showCdnErr('Babel')"><\/script>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; background: #111111; color: rgba(255,255,255,0.9); }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif;
-    padding: 20px;
-    overflow: auto;
-    min-height: 100vh;
-  }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Helvetica Neue', sans-serif; padding: 20px; overflow: auto; min-height: 100vh; }
   #root { width: 100%; min-height: calc(100vh - 40px); }
-  .error-box {
-    background: rgba(255,59,48,0.1);
-    border: 1px solid rgba(255,59,48,0.3);
-    border-radius: 10px;
-    padding: 18px 20px;
-    color: rgba(255,100,90,0.9);
-    font-family: monospace;
-    font-size: 12px;
-    line-height: 1.7;
-    white-space: pre-wrap;
-    margin-top: 24px;
-  }
-  ::-webkit-scrollbar { width: 4px; }
-  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
-</style>
+  .err { background: rgba(255,59,48,0.1); border: 1px solid rgba(255,59,48,0.3); border-radius: 10px; padding: 18px 20px; color: rgba(255,100,90,0.9); font-family: monospace; font-size: 12px; line-height: 1.7; white-space: pre-wrap; margin-top: 16px; }
+  ::-webkit-scrollbar { width: 4px; } ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 2px; }
+<\/style>
 </head>
 <body>
 <div id="root"></div>
-<script type="text/babel">
-// Everything is wrapped in try-catch so errors are caught INSIDE Babel's scope,
-// giving us the real error message (not the sanitised cross-origin "Script error.").
-(function() {
-  function showError(err) {
-    document.getElementById('root').innerHTML =
-      '<div class="error-box">Component Error:\\n' +
-      (err && err.message ? err.message : String(err)) +
-      (err && err.stack ? '\\n\\n' + err.stack : '') + '</div>';
-  }
+
+<!-- Helpers in plain JS — completely separate from Claude's code -->
+<script>
+function showErr(msg, detail) {
+  document.getElementById('root').innerHTML =
+    '<div class="err">' + msg + (detail ? '\\n\\n' + detail : '') + '<\/div>';
+}
+function showCdnErr(lib) {
+  showErr(lib + ' failed to load from CDN — check network connection');
+}
+window.onerror = function(msg, src, line, col, err) {
+  if (msg === 'Script error.') return false;
+  showErr('Uncaught: ' + msg, err && err.stack);
+  return true;
+};
+<\/script>
+
+<!-- Claude's raw code stored as plain text — browser does NOT parse this as JS -->
+<script id="artifact" type="text/plain">${escapeScriptTag(clean)}<\/script>
+
+<!-- Bootstrap: manually compile + run after all CDN scripts have loaded -->
+<script>
+window.addEventListener('load', function () {
+  if (typeof Babel    === 'undefined') return showErr('Babel did not load');
+  if (typeof Recharts === 'undefined') return showErr('Recharts did not load');
+
+  // Globals Claude's component can use (injected before its code)
+  var globals = [
+    'const{useState,useEffect,useCallback,useMemo,useRef,useReducer,useContext,createContext,Fragment}=React;',
+    'const{ResponsiveContainer,LineChart,Line,BarChart,Bar,PieChart,Pie,AreaChart,Area,RadarChart,Radar,ScatterChart,Scatter,ComposedChart,Cell,XAxis,YAxis,ZAxis,CartesianGrid,Tooltip,Legend,PolarGrid,PolarAngleAxis,PolarRadiusAxis,ReferenceLine,ReferenceArea,Brush,LabelList}=Recharts;',
+  ].join('\\n');
+
+  var src = document.getElementById('artifact').textContent;
 
   try {
-    if (typeof Recharts === 'undefined') throw new Error('Recharts library did not load from CDN');
+    // Babel.transform compiles JSX → plain JS; any syntax error is caught here
+    var compiled = Babel.transform(
+      globals + '\\n' + src + '\\nReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));',
+      { presets: ['react'], filename: 'artifact.jsx' }
+    ).code;
 
-    // ── React hooks ──────────────────────────────────────────────────────────
-    const {
-      useState, useEffect, useCallback, useMemo, useRef,
-      useReducer, useContext, createContext, Fragment,
-    } = React;
-
-    // ── Recharts components ──────────────────────────────────────────────────
-    const {
-      ResponsiveContainer,
-      LineChart, Line,
-      BarChart, Bar,
-      PieChart, Pie,
-      AreaChart, Area,
-      RadarChart, Radar,
-      ScatterChart, Scatter,
-      ComposedChart,
-      Cell,
-      XAxis, YAxis, ZAxis,
-      CartesianGrid, Tooltip, Legend,
-      PolarGrid, PolarAngleAxis, PolarRadiusAxis,
-      ReferenceLine, ReferenceArea, Brush,
-      LabelList,
-    } = Recharts;
-
-    // ── Component code from Claude ───────────────────────────────────────────
-    ${safe}
-
-    // ── Mount ────────────────────────────────────────────────────────────────
-    ReactDOM.createRoot(document.getElementById('root')).render(
-      React.createElement(App)
-    );
+    // new Function runs the compiled code in global scope (React/Recharts are on window)
+    // eslint-disable-next-line no-new-func
+    new Function(compiled)();
   } catch (err) {
-    showError(err);
+    showErr('Component error: ' + err.message, err.stack);
   }
-})();
+});
 <\/script>
 </body>
 </html>`;
