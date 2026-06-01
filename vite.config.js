@@ -113,7 +113,61 @@ const groqProxyPlugin = {
   },
 };
 
+const claudeProxyPlugin = {
+  name: "claude-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/claude", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        const ANTHROPIC_KEY = loadEnvKey("ANTHROPIC_API_KEY");
+        if (!ANTHROPIC_KEY) {
+          res.statusCode = 500;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: "ANTHROPIC_API_KEY not set in .env" }));
+          return;
+        }
+
+        try {
+          const { messages, system } = JSON.parse(body);
+
+          const upstream = await fetch("https://api.anthropic.com/v1/messages", {
+            method:  "POST",
+            headers: {
+              "x-api-key":         ANTHROPIC_KEY,
+              "anthropic-version": "2023-06-01",
+              "content-type":      "application/json",
+            },
+            body: JSON.stringify({
+              model:      "claude-haiku-4-5-20251001",
+              max_tokens: 4096,
+              ...(system ? { system } : {}),
+              messages,
+            }),
+          });
+
+          const data = await upstream.json();
+          res.statusCode = upstream.ok ? 200 : upstream.status;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify(
+            upstream.ok
+              ? { content: data.content?.[0]?.text ?? "" }
+              : { error: data.error?.message ?? `Claude error ${upstream.status}` }
+          ));
+        } catch (err) {
+          res.statusCode = 502;
+          res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
 export default defineConfig({
-  plugins: [react(), canvasProxyPlugin, groqProxyPlugin],
+  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin],
   server:  { port: 5173 },
 });

@@ -12,7 +12,9 @@
 import { useRef, useEffect, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { groq } from "../api/groq";
+import { claude } from "../api/claude";
 import { useApp } from "../context/AppContext";
+import ArtifactPanel from "./ArtifactPanel";
 
 const NAV_REGEX = /<nav>([\s\S]*?)<\/nav>/;
 
@@ -57,6 +59,42 @@ function parseNav(raw) {
   }
   return { cmd: null, text: raw };
 }
+
+const ARTIFACT_REGEX = /<artifact>([\s\S]*?)<\/artifact>/i;
+
+const VIZ_KEYWORDS = [
+  "chart", "graph", "visuali", "plot", "diagram", "dashboard",
+  "bar chart", "pie chart", "line chart", "histogram", "scatter",
+];
+
+function isVizRequest(text) {
+  const lower = text.toLowerCase();
+  return VIZ_KEYWORDS.some(kw => lower.includes(kw));
+}
+
+function parseArtifact(raw) {
+  const m = raw.match(ARTIFACT_REGEX);
+  if (!m) return { code: null, text: raw };
+  return {
+    code: m[1].trim(),
+    text: raw.replace(ARTIFACT_REGEX, "").trim() || "Here's your visualization.",
+  };
+}
+
+const VIZ_SYSTEM = `You are a data visualization expert. Create stunning interactive React visualizations.
+
+RULES:
+1. Wrap your ENTIRE React component in <artifact></artifact> tags — nothing outside the tags.
+2. The component must be a function named App.
+3. Use only these globals (already loaded — do NOT import them):
+   - React hooks: useState, useEffect, useCallback, useMemo, useRef
+   - Recharts: LineChart, Line, BarChart, Bar, PieChart, Pie, AreaChart, Area,
+     RadarChart, Radar, ScatterChart, Scatter, Cell, XAxis, YAxis, CartesianGrid,
+     Tooltip, Legend, ResponsiveContainer, PolarGrid, PolarAngleAxis, PolarRadiusAxis
+4. Use realistic sample data if none is provided.
+5. Dark theme: background transparent/#111, text rgba(255,255,255,0.9), accent #e8ff6b.
+6. Make it interactive (hover states, click filters, etc.) when appropriate.
+7. Return ONLY the <artifact> block — no explanation, no markdown, no extra text.`;
 
 const SIZE   = 68;
 const RADIUS = 24;
@@ -122,6 +160,10 @@ export default function NeuralRing() {
   const [input, setInput]       = useState("");
   const [loading, setLoading]   = useState(false);
   const messagesEndRef          = useRef(null);
+
+  // Artifact / visualization state
+  const [artifactCode, setArtifactCode] = useState(null);
+  const [artifactOpen, setArtifactOpen] = useState(false);
 
   // Sheet swipe-to-close
   const sheetStartY             = useRef(null);
@@ -257,20 +299,34 @@ export default function NeuralRing() {
     setInput("");
     setLoading(true);
     try {
-      const raw = await groq([...messages, userMsg], buildChatSystem(courseOptions));
+      const isViz = isVizRequest(userMsg.content);
 
-      const { cmd, text: displayText } = parseNav(raw);
-
-      if (cmd?.page) {
-        if (cmd.course || cmd.mode) {
-          setStudyConfig({ course: cmd.course ?? null, mode: cmd.mode ?? "flashcards" });
+      if (isViz) {
+        // Route to Claude for visualization artifacts
+        const raw = await claude([userMsg], VIZ_SYSTEM);
+        const { code, text: displayText } = parseArtifact(raw);
+        if (code) {
+          setArtifactCode(code);
+          setMessages(m => [...m, { role: "assistant", content: displayText, hasArtifact: true }]);
+        } else {
+          setMessages(m => [...m, { role: "assistant", content: displayText }]);
         }
-        setTimeout(() => setPendingNav({ page: cmd.page }), 600);
-      }
+      } else {
+        // Regular chat via Groq
+        const raw = await groq([...messages, userMsg], buildChatSystem(courseOptions));
+        const { cmd, text: displayText } = parseNav(raw);
 
-      setMessages(m => [...m, { role: "assistant", content: displayText }]);
-    } catch {
-      setMessages(m => [...m, { role: "assistant", content: "Couldn't connect. Check your Groq API key in src/api/groq.js." }]);
+        if (cmd?.page) {
+          if (cmd.course || cmd.mode) {
+            setStudyConfig({ course: cmd.course ?? null, mode: cmd.mode ?? "flashcards" });
+          }
+          setTimeout(() => setPendingNav({ page: cmd.page }), 600);
+        }
+
+        setMessages(m => [...m, { role: "assistant", content: displayText }]);
+      }
+    } catch (err) {
+      setMessages(m => [...m, { role: "assistant", content: `Error: ${err.message}` }]);
     }
     setLoading(false);
   };
@@ -389,13 +445,49 @@ export default function NeuralRing() {
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginTop: "48px", gap: "14px" }}>
                   <div style={{ width: 52, height: 52, borderRadius: "50%", background: "radial-gradient(circle at 35% 35%, rgba(255,255,255,0.14), rgba(255,255,255,0.03))", border: "1px solid rgba(255,255,255,0.10)" }} />
                   <p style={{ color: "rgba(255,255,255,0.22)", fontSize: "14px", textAlign: "center", lineHeight: "1.7" }}>
-                    Ask me about your courses,<br />assignments, or study material.
+                    Ask me about your courses,<br />assignments, or study material.<br />
+                    <span style={{ color: "rgba(232,255,107,0.5)", fontSize: "12px" }}>Try "show me a chart of study progress"</span>
                   </p>
                 </div>
               ) : (
                 messages.map((m, i) => (
-                  <div key={i} style={{ alignSelf: m.role === "user" ? "flex-end" : "flex-start", maxWidth: "84%", background: m.role === "user" ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.05)", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", padding: "10px 14px", color: "var(--text-primary)", fontSize: "14px", lineHeight: "1.6", border: "1px solid rgba(255,255,255,0.07)" }}>
+                  <div
+                    key={i}
+                    style={{
+                      alignSelf: m.role === "user" ? "flex-end" : "flex-start",
+                      maxWidth: "84%",
+                      background: m.role === "user" ? "rgba(255,255,255,0.10)" : "rgba(255,255,255,0.05)",
+                      borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+                      padding: "10px 14px",
+                      color: "var(--text-primary)",
+                      fontSize: "14px",
+                      lineHeight: "1.6",
+                      border: m.hasArtifact ? "1px solid rgba(232,255,107,0.2)" : "1px solid rgba(255,255,255,0.07)",
+                    }}
+                  >
                     {m.content}
+                    {m.hasArtifact && (
+                      <button
+                        onClick={() => setArtifactOpen(true)}
+                        style={{
+                          display: "block",
+                          marginTop: "10px",
+                          background: "rgba(232,255,107,0.12)",
+                          border: "1px solid rgba(232,255,107,0.3)",
+                          borderRadius: "8px",
+                          padding: "7px 14px",
+                          color: "#e8ff6b",
+                          fontSize: "12px",
+                          fontWeight: "600",
+                          cursor: "pointer",
+                          fontFamily: "inherit",
+                          width: "100%",
+                          textAlign: "center",
+                        }}
+                      >
+                        View Visualization →
+                      </button>
+                    )}
                   </div>
                 ))
               )}
@@ -428,6 +520,9 @@ export default function NeuralRing() {
             </div>
           </div>
         </>
+      )}
+      {artifactOpen && artifactCode && (
+        <ArtifactPanel code={artifactCode} onClose={() => setArtifactOpen(false)} />
       )}
     </>,
     document.body
