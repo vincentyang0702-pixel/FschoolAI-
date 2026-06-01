@@ -312,8 +312,10 @@ export default function NeuralRing() {
           setMessages(m => [...m, { role: "assistant", content: displayText }]);
         }
       } else {
+        // Strip UI-only properties (e.g. hasArtifact) before sending to API
+        const apiHistory = messages.map(({ role, content }) => ({ role, content }));
         // Regular chat via Groq
-        const raw = await groq([...messages, userMsg], buildChatSystem(courseOptions));
+        const raw = await groq([...apiHistory, userMsg], buildChatSystem(courseOptions));
         const { cmd, text: displayText } = parseNav(raw);
 
         if (cmd?.page) {
