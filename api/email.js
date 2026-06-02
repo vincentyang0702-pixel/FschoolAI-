@@ -47,7 +47,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Failed to store token" });
     }
 
-    const verifyUrl = `https://fschoolai.com/api/email?action=verify&token=${token}&userId=${userId}`;
+    const verifyUrl = `https://neuro-agi.vercel.app/api/email?action=verify&token=${token}&userId=${userId}`;
 
     try {
       await resend.emails.send({
