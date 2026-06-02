@@ -45,7 +45,7 @@ const inputBase = {
   transition: "border-color 0.15s",
 };
 
-function AuthModal({ mode, onClose, onEnter, onSwitchMode }) {
+function AuthModal({ mode, onClose, onEnter, onSwitchMode, onForgotPassword }) {
   const [name,      setName]      = useState("");
   const [email,     setEmail]     = useState("");
   const [password,  setPassword]  = useState("");
@@ -128,6 +128,13 @@ function AuthModal({ mode, onClose, onEnter, onSwitchMode }) {
             <>
               <input placeholder="Email" type="email" value={email} onChange={e => setEmail(e.target.value)} onKeyDown={handleKey} style={inputBase} />
               <input placeholder="Password" type="password" value={password} onChange={e => setPassword(e.target.value)} onKeyDown={handleKey} style={inputBase} />
+              <button
+                type="button"
+                onClick={() => onForgotPassword(email.trim())}
+                style={{ background: "none", border: "none", color: "rgba(255,255,255,0.3)", fontSize: "12px", cursor: "pointer", textAlign: "right", fontFamily: "inherit", padding: "0", textDecoration: "underline" }}
+              >
+                Forgot password?
+              </button>
             </>
           )}
         </div>
@@ -272,12 +279,33 @@ function AppPreview() {
 /* ─── Main component ────────────────────────────────────────────────────── */
 
 export default function Landing({ onEnter }) {
-  const [authMode, setAuthMode] = useState(null); // null | "signup" | "login"
+  const [authMode,       setAuthMode]       = useState(null);
+  const [forgotSent,     setForgotSent]     = useState(false);
+  const [forgotLoading,  setForgotLoading]  = useState(false);
+
+  async function handleForgotPassword(email) {
+    if (!email) { alert("Enter your email first, then tap Forgot password."); return; }
+    setForgotLoading(true);
+    try {
+      await fetch("/api/email?action=reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      setForgotSent(true);
+      setTimeout(() => setForgotSent(false), 5000);
+    } catch {}
+    setForgotLoading(false);
+  } // null | "signup" | "login"
 
   return (
     <div style={{ background: "#111111", minHeight: "100dvh", fontFamily: "var(--font-sans)", overflowX: "clip" }}>
       <style>{`
-        @keyframes lSheetUp { from { transform: translateY(100%) } to { transform: translateY(0) } }
+        @keyframes lSheetUp { from { transform: translateY(100%) }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  } to { transform: translateY(0) } }
         @keyframes lFadeUp  { from { opacity: 0; transform: translateY(14px) } to { opacity: 1; transform: translateY(0) } }
 
         .l-fade { opacity: 0; animation: lFadeUp 0.7s cubic-bezier(0.25,0.46,0.45,0.94) forwards; }
@@ -361,10 +389,27 @@ export default function Landing({ onEnter }) {
           fontSize: "10px", color: "rgba(255,255,255,0.3)",
           letterSpacing: "3px", textTransform: "uppercase",
           border: "1px solid rgba(255,255,255,0.09)", borderRadius: "20px",
-          padding: "4px 14px", marginBottom: "28px",
+          padding: "4px 14px", marginBottom: "16px",
         }}>
           Your academic mind
         </p>
+
+        {/* Beta badge */}
+        <div className="l-fade l-d1" style={{ marginBottom: "28px" }}>
+          <span style={{
+            display: "inline-flex", alignItems: "center", gap: "6px",
+            background: "rgba(255,200,80,0.1)",
+            border: "1px solid rgba(255,200,80,0.25)",
+            borderRadius: "20px",
+            padding: "5px 14px",
+            fontSize: "12px",
+            color: "rgba(255,200,80,0.85)",
+            fontWeight: "500",
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: "rgba(255,200,80,0.8)", display: "inline-block", animation: "pulse 2s infinite" }} />
+            Beta — Join free, get 1 month subscription
+          </span>
+        </div>
 
         <h1 className="l-hero-h1 l-fade l-d2" style={{
           fontSize: "72px", fontWeight: "700", color: "#F5F5F5",
@@ -389,7 +434,7 @@ export default function Landing({ onEnter }) {
             onClick={() => setAuthMode("signup")}
             style={{ background: "rgba(255,255,255,0.92)", color: "#111", border: "none", borderRadius: "12px", padding: "13px 28px", fontSize: "15px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit", transition: "background 0.15s, transform 0.15s" }}
           >
-            Start for free
+            Join the Beta →
           </button>
           <button
             className="l-btn-ghost"
@@ -469,11 +514,17 @@ export default function Landing({ onEnter }) {
 
       {/* ── Auth modal ───────────────────────────────────────────────────── */}
       {authMode && (
+        {forgotSent && (
+          <div style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 1001, padding: "12px 20px", textAlign: "center", fontSize: "13px", fontWeight: "500", background: "rgba(52,199,89,0.95)", color: "#fff" }}>
+            ✓ Password reset email sent — check your inbox.
+          </div>
+        )}
         <AuthModal
           mode={authMode}
           onClose={() => setAuthMode(null)}
           onEnter={onEnter}
           onSwitchMode={setAuthMode}
+          onForgotPassword={handleForgotPassword}
         />
       )}
     </div>

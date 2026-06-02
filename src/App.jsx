@@ -93,16 +93,64 @@ export default function App() {
     return params.get("verify") || null;
   });
 
-  // Clear ?verify= param from URL after reading it
+  // ── Password reset state ────────────────────────────────────────────────────
+  const [resetMode, setResetMode] = useState(() => {
+    const params = new URLSearchParams(window.location.search);
+    return params.get("reset") === "confirm" ? {
+      token:  params.get("token"),
+      userId: params.get("userId"),
+    } : null;
+  });
+  const [resetPw,      setResetPw]      = useState("");
+  const [resetConfirm, setResetConfirm] = useState("");
+  const [resetLoading, setResetLoading] = useState(false);
+  const [resetError,   setResetError]   = useState("");
+  const [resetDone,    setResetDone]    = useState(false);
+
+  async function handleResetSubmit() {
+    if (!resetPw || resetPw !== resetConfirm) { setResetError("Passwords don't match."); return; }
+    if (resetPw.length < 6) { setResetError("Password must be at least 6 characters."); return; }
+    setResetLoading(true);
+    setResetError("");
+    try {
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(resetPw));
+      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+      await supabase.from("users").update({ password_hash, email_verify_token: null }).eq("id", resetMode.userId);
+      setResetDone(true);
+      setTimeout(() => { setResetMode(null); setResetDone(false); }, 3000);
+      const url = new URL(window.location.href);
+      url.searchParams.delete("reset");
+      url.searchParams.delete("token");
+      url.searchParams.delete("userId");
+      window.history.replaceState({}, "", url.toString());
+    } catch (err) {
+      setResetError("Failed to reset password. Try again.");
+    }
+    setResetLoading(false);
+  }
+
+  // Clear ?verify= param from URL after reading it + listen for cross-tab verify
   useEffect(() => {
     if (!verifyBanner) return;
     const url = new URL(window.location.href);
     url.searchParams.delete("verify");
     url.searchParams.delete("reason");
     window.history.replaceState({}, "", url.toString());
-    const t = setTimeout(() => setVerifyBanner(null), 5000);
+    const t = setTimeout(() => setVerifyBanner(null), 6000);
     return () => clearTimeout(t);
   }, [verifyBanner]);
+
+  // If user verifies email in another tab, show banner in this tab too
+  useEffect(() => {
+    function onStorage(e) {
+      if (e.key === "fschool_verified" && e.newValue === "1") {
+        setVerifyBanner("success");
+        localStorage.removeItem("fschool_verified");
+      }
+    }
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   const fadingRef = useRef(false);
 
@@ -188,8 +236,8 @@ export default function App() {
         }).catch(() => {});
 
       } else {
-        // Email already registered — use existing account, don't create duplicate
-        localStorage.setItem("fschool_uid", existing.id);
+        // Email already registered — throw error, don't silently merge into existing account
+        throw new Error("An account with this email already exists. Please sign in instead.");
       }
     } catch (err) {
       console.warn("Supabase signup failed:", err.message);
@@ -265,6 +313,41 @@ export default function App() {
           {verifyBanner === "success"      && "✓ Email verified — your 1-month free subscription is active."}
           {verifyBanner === "already_done" && "✓ Email already verified."}
           {verifyBanner === "error"        && "Verification link is invalid or expired. Check your email for a new one."}
+        </div>
+      )}
+
+      {/* ── Password reset modal ─────────────────────────────────────────── */}
+      {resetMode && !resetDone && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 1000, background: "rgba(0,0,0,0.7)", backdropFilter: "blur(8px)", display: "flex", alignItems: "flex-end" }}>
+          <div style={{ width: "100%", background: "rgba(16,16,18,0.97)", borderRadius: "22px 22px 0 0", border: "1px solid rgba(255,255,255,0.09)", borderBottom: "none", padding: "24px 28px 48px" }}>
+            <h2 style={{ color: "#F5F5F5", fontSize: "20px", fontWeight: "600", marginBottom: "6px" }}>Set new password</h2>
+            <p style={{ color: "rgba(255,255,255,0.35)", fontSize: "13px", marginBottom: "20px" }}>Enter a new password for your account.</p>
+            <div style={{ display: "flex", flexDirection: "column", gap: "10px", marginBottom: "16px" }}>
+              <input
+                type="password" placeholder="New password (min 6 characters)"
+                value={resetPw} onChange={e => setResetPw(e.target.value)}
+                style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)", borderRadius: "10px", padding: "12px 14px", color: "#F5F5F5", fontSize: "14px", outline: "none", fontFamily: "inherit" }}
+              />
+              <input
+                type="password" placeholder="Confirm new password"
+                value={resetConfirm} onChange={e => setResetConfirm(e.target.value)}
+                style={{ background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)", borderRadius: "10px", padding: "12px 14px", color: "#F5F5F5", fontSize: "14px", outline: "none", fontFamily: "inherit" }}
+              />
+            </div>
+            {resetError && <p style={{ color: "rgba(255,100,90,0.85)", fontSize: "12px", marginBottom: "10px" }}>{resetError}</p>}
+            <button
+              onClick={handleResetSubmit}
+              disabled={resetLoading}
+              style={{ width: "100%", background: "rgba(255,255,255,0.92)", color: "#111", border: "none", borderRadius: "12px", padding: "14px", fontSize: "15px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit" }}
+            >
+              {resetLoading ? "Saving…" : "Save new password →"}
+            </button>
+          </div>
+        </div>
+      )}
+      {resetDone && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, zIndex: 999, padding: "12px 20px", textAlign: "center", fontSize: "13px", fontWeight: "500", background: "rgba(52,199,89,0.95)", color: "#fff" }}>
+          ✓ Password updated — you can now sign in with your new password.
         </div>
       )}
 
