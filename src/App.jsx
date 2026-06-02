@@ -177,7 +177,7 @@ export default function App() {
           );
 
         // Send verification email — non-blocking, won't fail signup if email fails
-        fetch("/api/send-verify", {
+        fetch("/api/email?action=send", {
           method:  "POST",
           headers: { "Content-Type": "application/json" },
           body:    JSON.stringify({
