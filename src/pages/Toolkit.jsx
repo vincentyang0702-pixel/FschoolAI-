@@ -548,7 +548,7 @@ function TwilioTab() {
           "\n\nGood luck! — FSchoolAI"
         : `Hi ${name}! No urgent assignments in the next 48 hours. Keep it up! — FSchoolAI`;
 
-      const res = await fetch("/api/twilio", {
+      const res = await fetch("/api/utils?fn=twilio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ to: phone.trim(), body }),

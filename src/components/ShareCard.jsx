@@ -65,7 +65,7 @@ function parseSong(raw) {
 async function searchiTunes(term) {
   if (!term || term.trim().length < 2) return [];
   // Always use /api/itunes serverless proxy — fixes CORS on iOS Safari, Android, all browsers
-  const url = `/api/itunes?term=${encodeURIComponent(term)}&media=music&entity=song&limit=8&lang=en_us`;
+  const url = `/api/utils?fn=itunes&term=${encodeURIComponent(term)}&media=music&entity=song&limit=8&lang=en_us`;
   const res = await fetch(url);
   if (!res.ok) return [];
   const data = await res.json();
