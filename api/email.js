@@ -14,6 +14,16 @@ const supabase = createClient(
 );
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// Build the public base URL from the incoming request so verify/reset links
+// point back to the SAME deployment that sent them (prod link from prod,
+// preview link from preview) instead of a hardcoded domain. Falls back to
+// production if headers are missing.
+function getBaseUrl(req) {
+  const host  = req.headers["x-forwarded-host"] || req.headers.host;
+  const proto = req.headers["x-forwarded-proto"] || "https";
+  return host ? proto + "://" + host : "https://neuro-agi.vercel.app";
+}
+
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -46,7 +56,7 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: "Failed to store token" });
     }
 
-    const verifyUrl = "https://neuro-agi.vercel.app/api/email?action=verify&token=" + token + "&userId=" + userId;
+    const verifyUrl = getBaseUrl(req) + "/api/email?action=verify&token=" + token + "&userId=" + userId;
 
     try {
       await resend.emails.send({
@@ -154,7 +164,7 @@ export default async function handler(req, res) {
       .update({ email_verify_token: token, email_verify_sent_at: new Date().toISOString() })
       .eq("id", user.id);
 
-    const resetUrl = "https://neuro-agi.vercel.app/api/email?action=reset-confirm&token=" + token + "&userId=" + user.id;
+    const resetUrl = getBaseUrl(req) + "/api/email?action=reset-confirm&token=" + token + "&userId=" + user.id;
 
     try {
       await resend.emails.send({
