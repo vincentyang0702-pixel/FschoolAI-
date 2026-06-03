@@ -520,12 +520,8 @@ export default function Landing({ onEnter }) {
       {/* ── Forgot password banners ─────────────────────────────────────── */}
       <style>{`
         @keyframes bannerIn {
-          from { opacity:0; transform:translateX(-50%) translateY(-14px) scale(0.95); }
-          to   { opacity:1; transform:translateX(-50%) translateY(0) scale(1); }
-        }
-        @keyframes pulseRing {
-          0%   { transform:scale(1);   opacity:0.6; }
-          100% { transform:scale(1.9); opacity:0;   }
+          from { opacity:0; transform:translateX(-50%) translateY(-10px); }
+          to   { opacity:1; transform:translateX(-50%) translateY(0); }
         }
       `}</style>
       {forgotError && (
@@ -533,21 +529,21 @@ export default function Landing({ onEnter }) {
           position:"fixed", top:"env(safe-area-inset-top, 0px)", left:"50%",
           transform:"translateX(-50%)", zIndex:1001, marginTop:"16px",
           width:"calc(100% - 40px)", maxWidth:"420px",
-          padding:"14px 18px", borderRadius:"16px",
-          display:"flex", alignItems:"center", gap:"12px",
-          background:"rgba(30,10,10,0.92)",
-          border:"1px solid rgba(255,80,70,0.22)",
-          backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)",
-          boxShadow:"0 8px 32px rgba(255,59,48,0.18), 0 0 0 1px rgba(255,80,70,0.08)",
-          animation:"bannerIn 0.4s cubic-bezier(0.34,1.56,0.64,1) both",
+          padding:"14px 18px", borderRadius:"12px",
+          display:"flex", alignItems:"center", gap:"14px",
+          background:"#1a1814",
+          border:"1px solid rgba(255,100,90,0.25)",
+          boxShadow:"0 4px 28px rgba(0,0,0,0.28)",
+          animation:"bannerIn 0.3s cubic-bezier(0.0,0.0,0.2,1.0) both",
         }}>
-          <div style={{ position:"relative", flexShrink:0, width:"10px", height:"10px" }}>
-            <div style={{ position:"absolute", inset:0, borderRadius:"50%", background:"#ff453a", animation:"pulseRing 1.4s ease-out infinite" }}/>
-            <div style={{ position:"absolute", inset:0, borderRadius:"50%", background:"#ff453a" }}/>
-          </div>
+          <svg width="34" height="34" viewBox="0 0 34 34" fill="none" style={{flexShrink:0}}>
+            <circle cx="17" cy="17" r="16" stroke="#ff6961" strokeWidth="1" opacity="0.55"/>
+            <circle cx="17" cy="17" r="12" stroke="#ff6961" strokeWidth="1.4"/>
+            <path d="M12 12l10 10M22 12l-10 10" stroke="#ff6961" strokeWidth="2" strokeLinecap="round"/>
+          </svg>
           <div style={{ flex:1 }}>
-            <div style={{ fontSize:"13px", fontWeight:"600", color:"#ff6961", letterSpacing:"-0.1px", marginBottom:"2px" }}>Enter your email first</div>
-            <div style={{ fontSize:"12px", color:"rgba(255,255,255,0.4)" }}>Type your email above, then tap Forgot password.</div>
+            <div style={{ fontSize:"13px", fontWeight:"700", color:"#ff6961", letterSpacing:"-0.1px", marginBottom:"3px" }}>Enter your email first</div>
+            <div style={{ fontSize:"12px", color:"rgba(255,255,255,0.42)" }}>Type your email above, then tap Forgot password.</div>
           </div>
         </div>
       )}
@@ -556,21 +552,21 @@ export default function Landing({ onEnter }) {
           position:"fixed", top:"env(safe-area-inset-top, 0px)", left:"50%",
           transform:"translateX(-50%)", zIndex:1001, marginTop:"16px",
           width:"calc(100% - 40px)", maxWidth:"420px",
-          padding:"14px 18px", borderRadius:"16px",
-          display:"flex", alignItems:"center", gap:"12px",
-          background:"rgba(10,24,16,0.92)",
-          border:"1px solid rgba(52,199,89,0.22)",
-          backdropFilter:"blur(24px)", WebkitBackdropFilter:"blur(24px)",
-          boxShadow:"0 8px 32px rgba(52,199,89,0.2), 0 0 0 1px rgba(52,199,89,0.08)",
-          animation:"bannerIn 0.4s cubic-bezier(0.34,1.56,0.64,1) both",
+          padding:"14px 18px", borderRadius:"12px",
+          display:"flex", alignItems:"center", gap:"14px",
+          background:"#F6F2E9",
+          border:"1px solid rgba(196,154,60,0.28)",
+          boxShadow:"0 4px 28px rgba(0,0,0,0.24)",
+          animation:"bannerIn 0.3s cubic-bezier(0.0,0.0,0.2,1.0) both",
         }}>
-          <div style={{ position:"relative", flexShrink:0, width:"10px", height:"10px" }}>
-            <div style={{ position:"absolute", inset:0, borderRadius:"50%", background:"#30d158", animation:"pulseRing 1.4s ease-out infinite" }}/>
-            <div style={{ position:"absolute", inset:0, borderRadius:"50%", background:"#30d158" }}/>
-          </div>
+          <svg width="34" height="34" viewBox="0 0 34 34" fill="none" style={{flexShrink:0}}>
+            <circle cx="17" cy="17" r="16" stroke="#C49A3C" strokeWidth="1" strokeDasharray="4 2.5" opacity="0.5"/>
+            <circle cx="17" cy="17" r="12" stroke="#C49A3C" strokeWidth="1.4"/>
+            <path d="M11 17l4.5 4.5 7.5-8" stroke="#C49A3C" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+          </svg>
           <div style={{ flex:1 }}>
-            <div style={{ fontSize:"13px", fontWeight:"600", color:"#30d158", letterSpacing:"-0.1px", marginBottom:"2px" }}>Reset email sent</div>
-            <div style={{ fontSize:"12px", color:"rgba(255,255,255,0.4)" }}>Check your inbox — link expires in 1 hour.</div>
+            <div style={{ fontSize:"13px", fontWeight:"700", color:"#1a1814", letterSpacing:"-0.1px", marginBottom:"3px" }}>Reset email sent</div>
+            <div style={{ fontSize:"12px", color:"rgba(26,24,20,0.5)" }}>Check your inbox — link expires in 1 hour.</div>
           </div>
         </div>
       )}

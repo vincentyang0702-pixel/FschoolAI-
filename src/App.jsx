@@ -75,6 +75,18 @@ if (!document.getElementById("app-shell-styles")) {
   document.head.appendChild(tag);
 }
 
+if (!document.getElementById("fs-fraunces-font")) {
+  const preconnect = document.createElement("link");
+  preconnect.rel = "preconnect";
+  preconnect.href = "https://fonts.googleapis.com";
+  document.head.appendChild(preconnect);
+  const link = document.createElement("link");
+  link.id = "fs-fraunces-font";
+  link.rel = "stylesheet";
+  link.href = "https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,700&display=swap";
+  document.head.appendChild(link);
+}
+
 export default function App() {
   const { userId, setUserId, refreshUser, saveCanvasCredentials, updateUserField, pendingNav, setPendingNav } = useApp();
 
@@ -282,13 +294,12 @@ export default function App() {
   const overlays = (
     <>
       <style>{`
-        @keyframes fsBannerIn { from{opacity:0;transform:translateX(-50%) translateY(-12px) scale(.96)} to{opacity:1;transform:translateX(-50%) translateY(0) scale(1)} }
-        @keyframes fsPulseRing { 0%{transform:scale(1);opacity:.6} 100%{transform:scale(1.9);opacity:0} }
-        @keyframes fsCardUp { from{opacity:0;transform:translateY(20px) scale(.97)} to{opacity:1;transform:none} }
-        @keyframes fsRing { 0%{transform:scale(1);opacity:.55} 100%{transform:scale(2.3);opacity:0} }
-        @keyframes fsSpin { to{transform:rotate(360deg)} }
-        .fs-reset-input:focus { border-color: rgba(48,209,88,.5) !important; background: rgba(255,255,255,.07) !important; }
-        .fs-reset-btn:active { transform: scale(.985); }
+        @keyframes fsBannerIn { from{opacity:0;transform:translateX(-50%) translateY(-10px)} to{opacity:1;transform:translateX(-50%) translateY(0)} }
+        @keyframes fsCardUp   { from{opacity:0;transform:translateY(16px) scale(.98)} to{opacity:1;transform:none} }
+        @keyframes fsSealIn   { from{opacity:0;transform:scale(.82)} to{opacity:1;transform:scale(1)} }
+        @keyframes fsSpin     { to{transform:rotate(360deg)} }
+        .fs-reset-input:focus { border-color: rgba(196,154,60,.55) !important; }
+        .fs-reset-btn:active  { transform: scale(.985); }
       `}</style>
 
       {/* Email verify banner */}
@@ -297,26 +308,35 @@ export default function App() {
           position:"fixed", top:"env(safe-area-inset-top, 0px)", left:"50%",
           transform:"translateX(-50%)", zIndex:999, marginTop:"16px",
           width:"calc(100% - 40px)", maxWidth:"420px", padding:"14px 18px",
-          borderRadius:"16px", display:"flex", alignItems:"center", gap:"12px",
-          background: verifyBanner === "error" ? "rgba(30,10,10,0.88)" : "rgba(10,24,16,0.88)",
-          border: verifyBanner === "error" ? "1px solid rgba(255,80,70,0.25)" : "1px solid rgba(52,199,89,0.22)",
-          backdropFilter:"blur(20px)", WebkitBackdropFilter:"blur(20px)",
-          boxShadow: verifyBanner === "error"
-            ? "0 8px 32px rgba(255,59,48,0.18), 0 0 0 1px rgba(255,80,70,0.1)"
-            : "0 8px 32px rgba(52,199,89,0.18), 0 0 0 1px rgba(52,199,89,0.1)",
-          animation:"fsBannerIn 0.4s cubic-bezier(0.34,1.56,0.64,1) both",
+          borderRadius:"12px", display:"flex", alignItems:"center", gap:"14px",
+          background: verifyBanner === "error" ? "#1a1814" : "#F6F2E9",
+          border: verifyBanner === "error" ? "1px solid rgba(255,100,90,0.25)" : "1px solid rgba(196,154,60,0.28)",
+          boxShadow:"0 4px 28px rgba(0,0,0,0.24)",
+          animation:"fsBannerIn 0.3s cubic-bezier(0.0,0.0,0.2,1.0) both",
         }}>
-          <div style={{ position:"relative", flexShrink:0, width:"10px", height:"10px" }}>
-            <div style={{ position:"absolute", inset:0, borderRadius:"50%", background: verifyBanner === "error" ? "#ff453a" : "#30d158", animation:"fsPulseRing 1.4s ease-out infinite" }}/>
-            <div style={{ position:"absolute", inset:0, borderRadius:"50%", background: verifyBanner === "error" ? "#ff453a" : "#30d158" }}/>
-          </div>
-          <div style={{ flex:1 }}>
-            <div style={{ fontSize:"13px", fontWeight:"600", color: verifyBanner === "error" ? "#ff6961" : "#30d158", letterSpacing:"-0.1px", marginBottom:"2px" }}>
+          {verifyBanner !== "error" ? (
+            <svg width="34" height="34" viewBox="0 0 34 34" fill="none" style={{flexShrink:0}}>
+              <circle cx="17" cy="17" r="16" stroke="#C49A3C" strokeWidth="1" strokeDasharray="4 2.5" opacity="0.5"/>
+              <circle cx="17" cy="17" r="12" stroke="#C49A3C" strokeWidth="1.4"/>
+              <path d="M11 17l4.5 4.5 7.5-8" stroke="#C49A3C" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+            </svg>
+          ) : (
+            <svg width="34" height="34" viewBox="0 0 34 34" fill="none" style={{flexShrink:0}}>
+              <circle cx="17" cy="17" r="16" stroke="#ff6961" strokeWidth="1" opacity="0.55"/>
+              <circle cx="17" cy="17" r="12" stroke="#ff6961" strokeWidth="1.4"/>
+              <path d="M12 12l10 10M22 12l-10 10" stroke="#ff6961" strokeWidth="2" strokeLinecap="round"/>
+            </svg>
+          )}
+          <div style={{flex:1}}>
+            <div style={{
+              fontSize:"13px", fontWeight:"700", letterSpacing:"-0.1px", marginBottom:"3px",
+              color: verifyBanner === "error" ? "#ff6961" : "#1a1814",
+            }}>
               {verifyBanner === "success"      && "Email verified"}
               {verifyBanner === "already_done" && "Already verified"}
               {verifyBanner === "error"        && "Verification failed"}
             </div>
-            <div style={{ fontSize:"12px", color:"rgba(255,255,255,0.4)" }}>
+            <div style={{fontSize:"12px", color: verifyBanner === "error" ? "rgba(255,255,255,0.42)" : "rgba(26,24,20,0.5)"}}>
               {verifyBanner === "success"      && "Your 1-month free subscription is now active."}
               {verifyBanner === "already_done" && "Your email is already verified."}
               {verifyBanner === "error"        && "Link is invalid or expired \u2014 check your inbox."}
@@ -325,60 +345,65 @@ export default function App() {
         </div>
       )}
 
-      {/* Premium password-reset card */}
+      {/* Password-reset card */}
       {(resetMode || resetDone) && (
         <div style={{
           position:"fixed", inset:0, zIndex:1000,
-          background:"rgba(8,8,10,0.72)", backdropFilter:"blur(14px)", WebkitBackdropFilter:"blur(14px)",
+          background:"rgba(10,8,6,0.74)", backdropFilter:"blur(12px)", WebkitBackdropFilter:"blur(12px)",
           display:"flex", alignItems:"center", justifyContent:"center", padding:"24px",
         }}>
           <div style={{
             width:"100%", maxWidth:"380px",
-            background:"linear-gradient(180deg, rgba(24,24,27,0.98), rgba(16,16,18,0.98))",
-            border:"1px solid rgba(255,255,255,0.08)", borderRadius:"24px", padding:"36px 28px",
-            boxShadow:"0 30px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.03), inset 0 1px 0 rgba(255,255,255,0.05)",
-            animation:"fsCardUp .5s cubic-bezier(.34,1.56,.64,1) both", textAlign:"center",
+            background:"#F6F2E9",
+            border:"1px solid rgba(196,154,60,0.22)",
+            borderRadius:"20px", padding:"40px 32px 36px",
+            boxShadow:"0 32px 80px rgba(0,0,0,0.42)",
+            animation:"fsCardUp .42s cubic-bezier(0.0,0.0,0.2,1.0) both",
+            textAlign:"center",
           }}>
             {!resetDone ? (
               <>
-                <div style={{ width:"52px", height:"52px", margin:"0 auto 22px", borderRadius:"16px", background:"rgba(48,209,88,0.12)", border:"1px solid rgba(48,209,88,0.22)", display:"flex", alignItems:"center", justifyContent:"center" }}>
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-                    <rect x="5" y="11" width="14" height="9" rx="2" stroke="#30d158" strokeWidth="1.8"/>
-                    <path d="M8 11V8a4 4 0 0 1 8 0v3" stroke="#30d158" strokeWidth="1.8" strokeLinecap="round"/>
+                <div style={{margin:"0 auto 24px", width:"68px", height:"68px", animation:"fsSealIn .5s cubic-bezier(0.34,1.15,0.64,1) both .05s"}}>
+                  <svg width="68" height="68" viewBox="0 0 68 68" fill="none">
+                    <circle cx="34" cy="34" r="32" stroke="#C49A3C" strokeWidth="1" strokeDasharray="4 3" opacity="0.45"/>
+                    <circle cx="34" cy="34" r="26" stroke="#C49A3C" strokeWidth="1.5" opacity="0.65"/>
+                    <circle cx="34" cy="34" r="19" fill="rgba(196,154,60,0.06)" stroke="#C49A3C" strokeWidth="1.5"/>
+                    <rect x="23" y="31" width="22" height="14" rx="2.5" stroke="#C49A3C" strokeWidth="1.8"/>
+                    <path d="M27 31v-4.5a7 7 0 0 1 14 0v4.5" stroke="#C49A3C" strokeWidth="1.8" strokeLinecap="round"/>
                   </svg>
                 </div>
-                <h2 style={{ color:"#F5F5F5", fontSize:"21px", fontWeight:"700", letterSpacing:"-0.4px", marginBottom:"8px" }}>Set a new password</h2>
-                <p style={{ color:"rgba(255,255,255,0.4)", fontSize:"13.5px", lineHeight:1.6, marginBottom:"26px" }}>Choose a strong password to secure your FSchoolAI account.</p>
-                <div style={{ display:"flex", flexDirection:"column", gap:"10px", marginBottom:"14px", textAlign:"left" }}>
+                <h2 style={{fontFamily:"'Fraunces',Georgia,serif", color:"#1a1814", fontSize:"24px", fontWeight:"700", letterSpacing:"-0.4px", marginBottom:"10px", lineHeight:1.15}}>Set a new password</h2>
+                <p style={{color:"rgba(26,24,20,0.5)", fontSize:"13.5px", lineHeight:1.6, marginBottom:"28px"}}>Choose a strong password to secure your FSchoolAI account.</p>
+                <div style={{display:"flex", flexDirection:"column", gap:"10px", marginBottom:"14px", textAlign:"left"}}>
                   <input className="fs-reset-input" type="password" placeholder="New password" value={resetPw}
                     onChange={e => { setResetPw(e.target.value); if (resetError) setResetError(""); }}
-                    style={{ background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"12px", padding:"13px 15px", color:"#F5F5F5", fontSize:"14px", outline:"none", fontFamily:"inherit", transition:"all .2s ease" }}/>
+                    style={{background:"#fff", border:"1px solid rgba(26,24,20,0.16)", borderRadius:"10px", padding:"13px 15px", color:"#1a1814", fontSize:"14px", outline:"none", fontFamily:"inherit", transition:"border-color .15s"}}/>
                   <input className="fs-reset-input" type="password" placeholder="Confirm new password" value={resetConfirm}
                     onChange={e => { setResetConfirm(e.target.value); if (resetError) setResetError(""); }}
                     onKeyDown={e => { if (e.key === "Enter") handleResetSubmit(); }}
-                    style={{ background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"12px", padding:"13px 15px", color:"#F5F5F5", fontSize:"14px", outline:"none", fontFamily:"inherit", transition:"all .2s ease" }}/>
+                    style={{background:"#fff", border:"1px solid rgba(26,24,20,0.16)", borderRadius:"10px", padding:"13px 15px", color:"#1a1814", fontSize:"14px", outline:"none", fontFamily:"inherit", transition:"border-color .15s"}}/>
                 </div>
-                {resetError && <p style={{ color:"#ff6961", fontSize:"12.5px", marginBottom:"14px", textAlign:"left" }}>{resetError}</p>}
+                {resetError && <p style={{color:"#b33a2a", fontSize:"12.5px", marginBottom:"14px", textAlign:"left"}}>{resetError}</p>}
                 <button className="fs-reset-btn" onClick={handleResetSubmit} disabled={resetLoading}
-                  style={{ width:"100%", background: resetLoading ? "rgba(255,255,255,0.55)" : "#fff", color:"#111", border:"none", borderRadius:"13px", padding:"14px", fontSize:"15px", fontWeight:"650", cursor: resetLoading ? "default" : "pointer", fontFamily:"inherit", transition:"transform .1s ease, background .2s ease", display:"flex", alignItems:"center", justifyContent:"center", gap:"8px" }}>
+                  style={{width:"100%", background: resetLoading ? "rgba(26,24,20,0.55)" : "#1a1814", color:"#F6F2E9", border:"none", borderRadius:"11px", padding:"14px", fontSize:"15px", fontWeight:"650", cursor: resetLoading ? "default" : "pointer", fontFamily:"inherit", transition:"opacity .15s, transform .1s", display:"flex", alignItems:"center", justifyContent:"center", gap:"8px"}}>
                   {resetLoading
-                    ? <><span style={{ width:"15px", height:"15px", border:"2px solid rgba(17,17,17,0.25)", borderTopColor:"#111", borderRadius:"50%", display:"inline-block", animation:"fsSpin .6s linear infinite" }}/>Saving\u2026</>
+                    ? <><span style={{width:"15px", height:"15px", border:"2px solid rgba(246,242,233,0.25)", borderTopColor:"#F6F2E9", borderRadius:"50%", display:"inline-block", animation:"fsSpin .6s linear infinite"}}/>Saving\u2026</>
                     : "Save new password \u2192"}
                 </button>
               </>
             ) : (
               <>
-                <div style={{ position:"relative", width:"56px", height:"56px", margin:"0 auto 24px" }}>
-                  <div style={{ position:"absolute", inset:0, borderRadius:"50%", background:"#30d158", animation:"fsRing 1.6s ease-out infinite" }}/>
-                  <div style={{ position:"absolute", inset:"6px", borderRadius:"50%", background:"#30d158", display:"flex", alignItems:"center", justifyContent:"center" }}>
-                    <svg width="20" height="20" viewBox="0 0 18 18" fill="none"><path d="M3.5 9l4 4 7-7" stroke="#0a1a0f" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/></svg>
-                  </div>
+                <div style={{margin:"0 auto 28px", animation:"fsSealIn .55s cubic-bezier(0.34,1.15,0.64,1) both"}}>
+                  <svg width="76" height="76" viewBox="0 0 76 76" fill="none">
+                    <circle cx="38" cy="38" r="36" stroke="#C49A3C" strokeWidth="1" strokeDasharray="4.5 3" opacity="0.45"/>
+                    <circle cx="38" cy="38" r="29.5" stroke="#C49A3C" strokeWidth="1.5" opacity="0.65"/>
+                    <circle cx="38" cy="38" r="22" fill="rgba(196,154,60,0.07)" stroke="#C49A3C" strokeWidth="1.5"/>
+                    <path d="M25.5 38.5l9 9 16.5-17" stroke="#C49A3C" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
                 </div>
-                <div style={{ display:"inline-flex", alignItems:"center", gap:"6px", background:"rgba(48,209,88,0.1)", border:"1px solid rgba(48,209,88,0.2)", borderRadius:"20px", padding:"6px 14px", fontSize:"11.5px", color:"rgba(48,209,88,0.9)", fontWeight:"600", marginBottom:"18px", letterSpacing:"0.2px" }}>
-                  <span style={{ width:"6px", height:"6px", borderRadius:"50%", background:"#30d158" }}/>Password updated
-                </div>
-                <h2 style={{ color:"#F5F5F5", fontSize:"21px", fontWeight:"700", letterSpacing:"-0.4px", marginBottom:"8px" }}>You're all set.</h2>
-                <p style={{ color:"rgba(255,255,255,0.4)", fontSize:"13.5px", lineHeight:1.6 }}>Sign in with your new password to continue.</p>
+                <p style={{fontSize:"11px", letterSpacing:"3px", textTransform:"uppercase", color:"rgba(26,24,20,0.35)", fontWeight:"500", marginBottom:"16px"}}>Password updated</p>
+                <h2 style={{fontFamily:"'Fraunces',Georgia,serif", color:"#1a1814", fontSize:"28px", fontWeight:"700", letterSpacing:"-0.4px", marginBottom:"10px", lineHeight:1.15}}>You're all set.</h2>
+                <p style={{color:"rgba(26,24,20,0.5)", fontSize:"14px", lineHeight:1.6}}>Sign in with your new password to continue.</p>
               </>
             )}
           </div>
