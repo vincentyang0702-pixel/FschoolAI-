@@ -4,6 +4,9 @@
 import { useState } from "react";
 import { useApp } from "../context/AppContext";
 import ManualUploadSheet from "../components/ManualUploadSheet";
+import { fetchAssignments, fetchModules } from "../../canvas-module/canvasApi.js";
+import { normalizeAssignment, normalizeModule } from "../../canvas-module/canvasTransform.js";
+import { supabase } from "../api/supabase.js";
 
 /* ─── helpers ─────────────────────────────────────────────── */
 
@@ -506,8 +509,9 @@ export default function Canvas() {
   const {
     courses, assignments, announcements,
     modules, assignmentGroups,
-    canvasToken, syncStatus, saveCanvasCredentials,
-    addManualCourse, forceSync,
+    setModules, setAssignments,
+    canvasToken, canvasBaseUrl, syncStatus, saveCanvasCredentials,
+    userId, addManualCourse, forceSync,
     pastCourses,
   } = useApp();
 
@@ -521,19 +525,73 @@ export default function Canvas() {
   async function handleAddPastCourse(pastCourse) {
     if (addedPastIds.has(pastCourse.id)) return;
     setAddingPast(true);
-    await addManualCourse(
+
+    // 1. Insert the course (now also stores canvas_course_id and returns the DB id)
+    const dbCourseId = await addManualCourse(
       {
-        name:       pastCourse.name,
-        courseCode: pastCourse.courseCode,
-        source:     "past_canvas",
-        semester:   pastCourse.semester,
+        name:           pastCourse.name,
+        courseCode:     pastCourse.courseCode,
+        source:         "past_canvas",
+        semester:       pastCourse.semester,
+        canvasCourseId: pastCourse.id,   // pass Canvas id so sync can link future data
       },
       []
     );
+
     const next = new Set(addedPastIds);
     next.add(pastCourse.id);
     setAddedPastIds(next);
     localStorage.setItem("fschool_added_past", JSON.stringify([...next]));
+
+    // 2. Immediately fetch assignments + modules from Canvas if we have credentials.
+    // Past courses may have access restrictions — all errors are silent.
+    if (canvasToken && canvasBaseUrl && dbCourseId) {
+      const [assignResult, moduleResult] = await Promise.allSettled([
+        fetchAssignments(canvasToken, canvasBaseUrl, pastCourse.id, "/api/canvas"),
+        fetchModules(canvasToken, canvasBaseUrl, pastCourse.id, "/api/canvas"),
+      ]);
+
+      // Assignments — upsert to DB with the real course_id so CourseCard can find them
+      if (assignResult.status === "fulfilled" && assignResult.value.length > 0) {
+        const meta = { courseId: String(pastCourse.id), courseCode: pastCourse.courseCode, courseName: pastCourse.name };
+        const normalized = assignResult.value.map(a => normalizeAssignment(a, meta));
+        const rows = normalized.map(a => ({
+          user_id:              userId,
+          course_id:            dbCourseId,
+          canvas_assignment_id: String(a.id),
+          title:                a.name,
+          description:          a.description ?? null,
+          due_at:               a.dueAt ?? null,
+          points_possible:      a.pointsPossible ?? null,
+          score:                a.submission?.score ?? null,
+          submitted_at:         a.submission?.submittedAt ?? null,
+          late:                 a.submission?.late ?? false,
+          missing:              a.submission?.missing ?? false,
+          submission_type:      a.submission?.submissionType ?? null,
+          source:               "past_canvas",
+          is_manual:            false,
+        })).filter(r => r.canvas_assignment_id);
+        await supabase.from("assignments").upsert(rows, { onConflict: "user_id,canvas_assignment_id" });
+        // Update context so the CourseCard shows them immediately
+        const ctxAssignments = normalized.map(a => ({
+          ...a,
+          courseId: dbCourseId,   // use DB id — matches CourseCard's a.courseId === course.id filter
+        }));
+        setAssignments(prev => [...prev, ...ctxAssignments]);
+      }
+
+      // Modules — add to context so the Modules tab shows immediately
+      if (moduleResult.status === "fulfilled" && moduleResult.value.length > 0) {
+        const moduleEntry = {
+          courseId:   dbCourseId,   // use DB id to match CourseCard's String(m.courseId) === cid
+          courseCode: pastCourse.courseCode,
+          courseName: pastCourse.name,
+          modules:    moduleResult.value.map(normalizeModule),
+        };
+        setModules(prev => [...prev, moduleEntry]);
+      }
+    }
+
     setAddingPast(false);
   }
 

@@ -161,20 +161,22 @@ export function AppProvider({ children }) {
     setCanvasBaseUrl(baseUrl);
   }, [userId]);
 
-  /** Merge a manually-uploaded course + its assignments into local state AND persist to Supabase. */
+  /** Merge a manually-uploaded course + its assignments into local state AND persist to Supabase.
+   *  Returns the new DB course id so callers can link follow-up data (e.g. past-course fetches). */
   const addManualCourse = useCallback(async (course, newAssignments) => {
     try {
       // Insert course first — let Supabase generate a real UUID as the PK
       const { data: insertedCourse, error: courseErr } = await supabase
         .from("courses")
         .insert({
-          user_id:      userId,
-          name:         course.name,
-          course_code:  course.courseCode ?? course.course_code ?? null,
-          current_score: null,
-          final_score:  null,
-          source:       "manual",
-          is_manual:    true,
+          user_id:           userId,
+          name:              course.name,
+          course_code:       course.courseCode ?? course.course_code ?? null,
+          canvas_course_id:  course.canvasCourseId ?? course.canvas_course_id ?? null,
+          current_score:     null,
+          final_score:       null,
+          source:            course.source ?? "manual",
+          is_manual:         course.source === "past_canvas" ? false : true,
         })
         .select("id")
         .single();
@@ -227,12 +229,14 @@ export function AppProvider({ children }) {
       // Update local state with DB-backed ids
       setCourses(prev => [...prev, localCourse]);
       setAssignments(prev => [...prev, ...localAssignments]);
+      return dbCourseId;  // caller can use this to link follow-up fetches
 
     } catch (err) {
       console.warn("Failed to persist manual course to Supabase:", err.message);
       // Fallback: still show in UI even if DB write failed
       setCourses(prev => [...prev, course]);
       setAssignments(prev => [...prev, ...newAssignments]);
+      return null;
     }
   }, [userId]);
 
@@ -280,8 +284,10 @@ export function AppProvider({ children }) {
       canvasBaseUrl,
       courses,
       assignments,
+      setAssignments,
       announcements,
       modules,
+      setModules,
       assignmentGroups,
       discussionTopics,
       syncStatus,

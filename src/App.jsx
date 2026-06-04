@@ -112,6 +112,20 @@ export default function App() {
   const [resetLoading, setResetLoading] = useState(false);
   const [resetError,   setResetError]   = useState("");
   const [resetDone,    setResetDone]    = useState(false);
+  const [resendSent,   setResendSent]   = useState(false);
+
+  async function resendVerification() {
+    if (!userData?.email) return;
+    try {
+      await fetch("/api/email?action=send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId, email: userData.email, name: userData.name || "" }),
+      });
+    } catch {}
+    setResendSent(true);
+    setTimeout(() => setResendSent(false), 30000); // allow resend again after 30s
+  }
 
   async function handleResetSubmit() {
     if (!resetPw || resetPw !== resetConfirm) { setResetError("Passwords don't match."); return; }
@@ -448,6 +462,49 @@ export default function App() {
 
   if (!isLoggedIn) {
     return (<>{overlays}<Landing onEnter={handleEnter} /></>);
+  }
+
+  // ── Email verification gate ───────────────────────────────────────────────
+  // Block access until the user verifies their email. Only gates accounts
+  // where email_verified is explicitly false (null = legacy user, let through).
+  if (userData && userData.email_verified === false) {
+    return (
+      <>
+        {overlays}
+        <div style={{ minHeight:"100dvh", background:"#0b0c0f", display:"flex", alignItems:"center", justifyContent:"center", padding:"24px", fontFamily:"var(--font-sans,-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif)" }}>
+          <div style={{ width:"100%", maxWidth:"360px", textAlign:"center" }}>
+            <div style={{ width:"58px", height:"58px", margin:"0 auto 24px", borderRadius:"16px", background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.09)", display:"flex", alignItems:"center", justifyContent:"center" }}>
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+                <rect x="2" y="4" width="20" height="16" rx="3" stroke="rgba(255,255,255,0.55)" strokeWidth="1.6"/>
+                <path d="M2 7l10 7 10-7" stroke="rgba(255,255,255,0.55)" strokeWidth="1.6" strokeLinecap="round"/>
+              </svg>
+            </div>
+            <div style={{ fontSize:"22px", fontWeight:"700", color:"#F5F5F5", letterSpacing:"-0.4px", marginBottom:"10px" }}>Check your email</div>
+            <p style={{ fontSize:"14px", color:"rgba(255,255,255,0.42)", lineHeight:1.65, marginBottom:"4px" }}>We sent a verification link to</p>
+            <p style={{ fontSize:"14px", fontWeight:"600", color:"rgba(255,255,255,0.72)", marginBottom:"30px" }}>{userData.email}</p>
+            <button
+              onClick={() => refreshUser()}
+              style={{ width:"100%", background:"#F5F5F5", color:"#111", border:"none", borderRadius:"13px", padding:"14px", fontSize:"15px", fontWeight:"650", cursor:"pointer", fontFamily:"inherit", marginBottom:"10px", transition:"opacity .15s" }}
+            >
+              I&apos;ve verified — continue &rarr;
+            </button>
+            <button
+              onClick={resendVerification}
+              disabled={resendSent}
+              style={{ width:"100%", background:"transparent", color: resendSent ? "rgba(48,209,88,0.75)" : "rgba(255,255,255,0.4)", border:"1px solid rgba(255,255,255,0.08)", borderRadius:"13px", padding:"13px", fontSize:"14px", fontWeight:"500", cursor: resendSent ? "default" : "pointer", fontFamily:"inherit", transition:"color .2s" }}
+            >
+              {resendSent ? "Verification email sent ✓" : "Resend verification email"}
+            </button>
+            <p style={{ marginTop:"22px", fontSize:"12px", color:"rgba(255,255,255,0.22)" }}>
+              Wrong account?{" "}
+              <button onClick={() => { localStorage.clear(); window.location.reload(); }} style={{ background:"none", border:"none", color:"rgba(255,255,255,0.32)", fontSize:"12px", cursor:"pointer", padding:0, textDecoration:"underline" }}>
+                Sign out
+              </button>
+            </p>
+          </div>
+        </div>
+      </>
+    );
   }
 
   const PageComponent = PAGES[currentPage];
