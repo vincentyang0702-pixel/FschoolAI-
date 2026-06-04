@@ -166,9 +166,11 @@ export function AppProvider({ children }) {
   const addManualCourse = useCallback(async (course, newAssignments) => {
     try {
       // Insert course first — let Supabase generate a real UUID as the PK
+      // Upsert so re-adding the same Canvas course updates instead of 409ing
+      // (nulls never conflict, so purely-manual courses still insert freely)
       const { data: insertedCourse, error: courseErr } = await supabase
         .from("courses")
-        .insert({
+        .upsert({
           user_id:           userId,
           name:              course.name,
           course_code:       course.courseCode ?? course.course_code ?? null,
@@ -177,7 +179,7 @@ export function AppProvider({ children }) {
           final_score:       null,
           source:            course.source ?? "manual",
           is_manual:         course.source === "past_canvas" ? false : true,
-        })
+        }, { onConflict: "user_id,canvas_course_id" })
         .select("id")
         .single();
 
