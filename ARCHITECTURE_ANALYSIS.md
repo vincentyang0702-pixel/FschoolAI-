@@ -1,13 +1,13 @@
-# Architecture Analysis: NeuroAGI vs FschoolAI vs Reggie
+# Architecture Analysis: NeuroAGI vs FschoolAI (with Reggie AI Tutor)
 
 ## Executive Summary
 
 You're building a **platform-level brain system** (NeuroAGI) that will power multiple products. The key insight: **each user gets their own brain** that learns about them continuously. This brain should be:
 
 1. **Unified** — One brain per user across all products
-2. **Portable** — Works with FschoolAI, Reggie, and any future product
+2. **Portable** — Works with FschoolAI and any future product
 3. **Scalable** — Each company/product can use the same brain infrastructure
-4. **Beneficial** — Data from one product (Reggie) improves the brain for all products
+4. **Beneficial** — Data from FschoolAI improves the brain for all future products
 
 ---
 
@@ -64,7 +64,7 @@ You're building a **platform-level brain system** (NeuroAGI) that will power mul
 
 **Total: 57 tables (complete AGI-level system)**
 
-### Reggie Database (22 tables)
+### Legacy Reggie DB (grademaxing.com — 22 tables, now retired)
 
 **Simplified version with:**
 - Core identity (users, universities, courses)
@@ -87,7 +87,7 @@ Based on your vision:
 - NeuroAGI = **The brain operating system for every company**
 - Each user gets their own brain that learns about them
 - The brain is **portable** across products
-- Data from Reggie (student) benefits FschoolAI (teacher) and vice versa
+- Data from FschoolAI student interactions benefits the brain and vice versa
 
 **Example:**
 ```
@@ -97,9 +97,9 @@ NeuroAGI creates Vincent's brain
   ↓
 Vincent's brain learns: teaching style, student interactions, grading patterns
   ↓
-Vincent tries Reggie (student platform)
+Vincent uses FschoolAI (student platform)
   ↓
-Reggie uses the same brain
+FschoolAI's Reggie tutor uses the same brain
   ↓
 Brain learns: learning style, knowledge gaps, emotional patterns
   ↓
@@ -127,7 +127,7 @@ NeuroAGI Database (Supabase)
 ```
 
 **Benefits:**
-- ✅ One brain per user (Vincent's brain learns from both FschoolAI and Reggie)
+- ✅ One brain per user (Vincent's brain learns from all FschoolAI interactions)
 - ✅ Data portability (switch products, brain comes with you)
 - ✅ Cross-product insights (teacher insights + student insights = complete picture)
 - ✅ Scalable (new products use same brain infrastructure)
@@ -135,7 +135,7 @@ NeuroAGI Database (Supabase)
 
 **Implementation:**
 - Use FschoolAI's 57-table schema as the base
-- Add product context to distinguish FschoolAI vs Reggie vs future products
+- Add product context to distinguish FschoolAI vs future products
 - Add role context (teacher, student, admin, etc.)
 - All products query the same database
 
@@ -150,7 +150,7 @@ FschoolAI Brain (Supabase Project 1)
 ├── Vincent's teacher data
 └── Vincent's teaching patterns
 
-Reggie Brain (Supabase Project 2)
+NeuroAGI Brain (Supabase Project 2 — separate from FschoolAI product DB)
 ├── Vincent's student data
 └── Vincent's learning patterns
 
@@ -168,53 +168,53 @@ NeuroAGI Brain (Supabase Project 3)
 
 ---
 
-## What Should Reggie Use?
+## What Database Should FschoolAI Use?
 
 ### Current Situation:
 - FschoolAI has the complete 57-table NeuroOS brain
-- Reggie has a simplified 22-table schema
+- The old grademaxing.com (Reggie demo) had a simplified 22-table schema
 - They're not connected
 
 ### Best Approach:
 
-**Reggie should use the SAME database as FschoolAI:**
+**FschoolAI and the NeuroAGI Brain should use separate databases:**
 
 1. **Don't duplicate the schema**
-2. **Reggie connects to the same Supabase project**
-3. **Add a `product` column to key tables** to distinguish Reggie data from FschoolAI data
-4. **Reggie writes signals to the same tables**
-5. **Reggie reads from the same knowledge graph**
+2. **FschoolAI connects to FschoolAI Production DB**
+3. **NeuroAGI Brain DB** holds brain.* schemas — separate from FschoolAI product tables
+4. **FschoolAI writes brain signals** to NeuroAGI Brain DB via brain SDK
+5. **FschoolAI reads from the knowledge graph** in NeuroAGI Brain DB
 
 **Example:**
 ```sql
--- When Reggie records a behavioral signal
+-- When FschoolAI records a behavioral signal
 INSERT INTO behavioral_signals (
   student_id,
   course_id,
   signal_type,
   value,
-  product,  -- NEW: 'reggie' or 'fschoolai'
+  product,  -- 'fschoolai'
   metadata
 ) VALUES (
   'vincent-id',
   'cs101',
   'typing_speed',
   75.5,
-  'reggie',  -- Reggie is recording this
+  'fschoolai',  -- FschoolAI is recording this
   '{"device": "iphone", "app": "imessage"}'
 );
 
 -- When FschoolAI queries Vincent's brain
 SELECT * FROM behavioral_signals
 WHERE student_id = 'vincent-id'
--- Gets data from BOTH Reggie and FschoolAI!
+-- Gets all FschoolAI brain data for this user
 ```
 
 ---
 
 ## Vincent's Data Flow
 
-### Scenario: Vincent is a Teacher in FschoolAI + Student in Reggie
+### Scenario: Vincent uses FschoolAI (Reggie is the AI tutor inside)
 
 **FschoolAI (Teacher):**
 ```
@@ -229,13 +229,13 @@ Brain records: grading decision, time spent, emotional state
 Brain learns: Vincent prefers detailed feedback, takes 5 min per assignment
 ```
 
-**Reggie (Student):**
+**Reggie (FschoolAI AI Tutor):**
 ```
 Vincent texts: "I don't understand recursion"
   ↓
 Brain loads: learning style, knowledge gaps, emotional state
   ↓
-Reggie provides personalized explanation
+Reggie (FschoolAI tutor) provides personalized explanation
   ↓
 Brain records: learning signal, emotional response, mastery level
   ↓
@@ -260,9 +260,9 @@ FschoolAI can recommend: "Show your students more examples"
 
 **Step 1:** Use FschoolAI's 57-table schema as the source of truth
 ```bash
-# Copy all FschoolAI migrations to Reggie
+# Copy all FschoolAI migrations to the brain DB
 cp /home/ubuntu/FschoolAI-/supabase/migrations/* \
-   /home/ubuntu/reggie-mobile-proto/database/migrations/
+   /home/ubuntu/FschoolAI-/backend/supabase/migrations/
 ```
 
 **Step 2:** Add product context to key tables
@@ -277,30 +277,30 @@ ALTER TABLE knowledge_signals ADD COLUMN product VARCHAR(50) DEFAULT 'fschoolai'
 **Step 3:** Both products use the same Supabase project
 ```
 FschoolAI → Supabase (vanzrpqmkmqgsbjdnfvj)
-Reggie → Supabase (vanzrpqmkmqgsbjdnfvj)  [SAME PROJECT]
+FschoolAI (Reggie tutor) → Supabase (vanzrpqmkmqgsbjdnfvj)  [SAME PROJECT]
 ```
 
-### Phase 2: Connect Reggie to Unified Brain
+### Phase 2: Connect FschoolAI (Reggie tutor) to Unified Brain
 
-**Step 1:** Reggie reads from the unified brain
+**Step 1:** FschoolAI reads from the unified brain
 ```typescript
-// When Reggie needs student's knowledge gaps
+// When FschoolAI needs student's knowledge gaps
 const gaps = await supabase
   .from('concept_progress')
   .select('*')
   .eq('student_id', vincent_id)
   .lt('mastery_level', 0.7);
-// Gets Vincent's learning gaps from FschoolAI + Reggie
+// Gets Vincent's learning gaps from FschoolAI
 ```
 
-**Step 2:** Reggie writes signals with product context
+**Step 2:** FschoolAI writes signals with product context
 ```typescript
-// When Reggie records a signal
+// When FschoolAI records a signal
 await supabase.from('behavioral_signals').insert({
   student_id: vincent_id,
   signal_type: 'typing_speed',
   value: 75.5,
-  product: 'reggie',  // Mark as Reggie data
+  product: 'fschoolai',  // Mark as FschoolAI data
   metadata: { app: 'imessage' }
 });
 ```
@@ -322,7 +322,7 @@ class NeuroAGI {
       signals: { ... },
       knowledgeGraph: { ... },
       insights: { ... },
-      products: ['fschoolai', 'reggie'],
+      products: ['fschoolai'],
     };
   }
 
@@ -337,8 +337,7 @@ class NeuroAGI {
   async generateCrossProductInsights(userId: string) {
     // Generate insights using data from all products
     const fschoolaiData = await getProductData(userId, 'fschoolai');
-    const reggieData = await getProductData(userId, 'reggie');
-    return synthesizeInsights(fschoolaiData, reggieData);
+    return synthesizeInsights(fschoolaiData);
   }
 }
 ```
@@ -364,16 +363,16 @@ class NeuroAGI {
 
 **Use the Unified Brain approach:**
 
-1. **Reggie should connect to the same Supabase project as FschoolAI**
+1. **FschoolAI and its Reggie tutor connect to the same Supabase project**
 2. **Use FschoolAI's 57-table schema as the base**
 3. **Add product context to distinguish data sources**
 4. **Build NeuroAGI as a platform service** that manages brains across products
 5. **Each user gets ONE brain** that learns from all products
 
 **This way:**
-- ✅ Vincent's brain learns from both teaching (FschoolAI) and learning (Reggie)
-- ✅ Reggie benefits from Vincent's existing FschoolAI data
-- ✅ FschoolAI benefits from Vincent's Reggie learning data
+- ✅ Vincent's brain learns from FschoolAI interactions
+- ✅ Reggie (FschoolAI tutor) benefits from Vincent's brain data
+- ✅ FschoolAI continuously improves as brain data grows
 - ✅ NeuroAGI becomes the brain OS for every company
 - ✅ Scalable to unlimited products
 
@@ -382,9 +381,9 @@ class NeuroAGI {
 ## Next Steps
 
 1. **Confirm this architecture** with you
-2. **Migrate Reggie to use FschoolAI's 57-table schema**
+2. **FschoolAI uses the unified brain schema**
 3. **Add product context columns** to signal tables
-4. **Update Reggie's backend services** to write to unified database
+4. **Update FschoolAI backend services** to write to unified brain database
 5. **Build NeuroAGI platform service** for cross-product brain management
 6. **Deploy to Supabase** (vanzrpqmkmqgsbjdnfvj)
 

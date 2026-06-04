@@ -2,7 +2,7 @@
 
 ## Overview
 
-NeuroAGI is the **brain operating system** for every company. Each user gets **ONE brain** that learns from all products they use (FschoolAI, Reggie, etc.).
+NeuroAGI is the **brain operating system** for every company. Each user gets **ONE brain** that learns from all products they use (FschoolAI, and future products).
 
 **Key Principle:** Data from one product improves the brain for all products.
 
@@ -12,12 +12,12 @@ NeuroAGI is the **brain operating system** for every company. Each user gets **O
 
 ### Unified Database
 
-All products (FschoolAI, Reggie, future products) connect to **one Supabase project**:
+All products (FschoolAI, future products) connect to the **NeuroAGI Brain database**:
 
 ```
 Supabase Project: vanzrpqmkmqgsbjdnfvj
 ├── 57 tables (complete NeuroOS brain)
-├── Product context (fschoolai, reggie, etc.)
+├── Product context (fschoolai, etc.)
 ├── User brains (one per user)
 └── Cross-product insights
 ```
@@ -25,8 +25,8 @@ Supabase Project: vanzrpqmkmqgsbjdnfvj
 ### Data Flow
 
 ```
-FschoolAI                    Reggie
-(Teacher Platform)           (Student Platform)
+FschoolAI (with Reggie AI tutor)
+(Student Academic Platform)
     ↓                            ↓
     └────────────┬───────────────┘
                  ↓
@@ -44,11 +44,11 @@ FschoolAI                    Reggie
 Each signal includes a `product` column:
 
 ```sql
--- Behavioral signal from Reggie
-INSERT INTO behavioral_signals (
-  student_id, signal_type, value, product
+-- Behavioral signal from FschoolAI
+INSERT INTO brain.signals (
+  person_id, signal_type, value, product
 ) VALUES (
-  'vincent-id', 'typing_speed', 75.5, 'reggie'
+  'vincent-id', 'typing_speed', 75.5, 'fschoolai'
 );
 
 -- Behavioral signal from FschoolAI
@@ -100,8 +100,8 @@ SELECT * FROM unified_brain_signals;
 -- FschoolAI-only data
 SELECT * FROM fschoolai_brain_signals;
 
--- Reggie-only data
-SELECT * FROM reggie_brain_signals;
+-- FschoolAI-only data
+SELECT * FROM brain.signals WHERE product = 'fschoolai';
 
 -- Cross-product insights
 SELECT * FROM cross_product_insights;
@@ -122,13 +122,13 @@ SELECT * FROM cross_product_insights;
 const brain = await neuroAGI.getUserBrain(userId);
 
 // Get brain for specific product
-const reggiBrain = await neuroAGI.getProductBrain(userId, 'reggie');
+const fschoolBrain = await neuroAGI.getProductBrain(userId, 'fschoolai');
 
 // Generate cross-product insights
 const insights = await neuroAGI.generateCrossProductInsights(userId);
 
 // Switch product context
-const context = await neuroAGI.switchProductContext(userId, 'reggie');
+const context = await neuroAGI.switchProductContext(userId, 'fschoolai');
 
 // Get brain health metrics
 const health = await neuroAGI.getBrainHealthMetrics(userId);
@@ -148,13 +148,13 @@ await neuroAGI.deleteBrainData(userId);
 
 ```typescript
 // Sync all Canvas data (with product context)
-await canvasSync.syncCanvasData(userId, 'reggie');
+await canvasSync.syncCanvasData(userId, 'fschoolai');
 
 // Get last sync time
-const lastSync = await canvasSync.getLastSyncTime(userId, 'reggie');
+const lastSync = await canvasSync.getLastSyncTime(userId, 'fschoolai');
 
 // Schedule periodic sync
-await canvasSync.scheduleSyncJob(userId, 'reggie', 60); // Every 60 minutes
+await canvasSync.scheduleSyncJob(userId, 'fschoolai', 60); // Every 60 minutes
 ```
 
 ### 3. Brain Compounding Engine (`server/services/brain-compounding.ts`)
@@ -169,7 +169,7 @@ const result = await brainEngine.processSignal({
   type: 'outcome',
   userId,
   courseId,
-  data: { assignmentId, score, maxScore, product: 'reggie' }
+  data: { assignmentId, score, maxScore, product: 'fschoolai' }
 });
 
 // Process feedback
@@ -235,7 +235,7 @@ Response: [{ title, description, sourceProducts, confidence, recommendation }]
 
 // Switch product
 POST /api/brain/:userId/switch-product
-Body: { product: 'reggie' }
+Body: { product: 'fschoolai' }
 Response: { product, role, signals, insights, lastActive }
 
 // Get brain health
@@ -256,7 +256,7 @@ Response: { success: true }
 ```typescript
 // Sync Canvas data
 POST /api/canvas/sync
-Body: { userId, product: 'reggie' }
+Body: { userId, product: 'fschoolai' }
 Response: { status: 'success', synced_at }
 
 // Get last sync
@@ -265,7 +265,7 @@ Response: { lastSyncTime: '2026-05-20T10:30:00Z' }
 
 // Schedule sync
 POST /api/canvas/sync/:userId/schedule
-Body: { product: 'reggie', intervalMinutes: 60 }
+Body: { product: 'fschoolai', intervalMinutes: 60 }
 Response: { scheduled: true }
 ```
 
@@ -279,13 +279,13 @@ Body: {
   type: 'outcome',
   courseId,
   data: { assignmentId, score, maxScore },
-  product: 'reggie'
+  product: 'fschoolai'
 }
 Response: { signalId, processed: true }
 
 // Record feedback
 POST /api/signals/feedback
-Body: { userId, actionId, feedbackType, feedbackValue, product: 'reggie' }
+Body: { userId, actionId, feedbackType, feedbackValue, product: 'fschoolai' }
 Response: { feedbackId, processed: true }
 ```
 
@@ -337,13 +337,13 @@ Response: { feedbackId, processed: true }
 
 ### Phase 3: Product Integration
 
-1. **Reggie writes signals with product context**
+1. **FschoolAI writes signals with product context**
    ```typescript
    await brainEngine.processSignal({
      type: 'outcome',
      userId,
      courseId,
-     data: { assignmentId, score, maxScore, product: 'reggie' }
+     data: { assignmentId, score, maxScore, product: 'fschoolai' }
    });
    ```
 
@@ -360,7 +360,7 @@ Response: { feedbackId, processed: true }
 3. **Both products read from unified brain**
    ```typescript
    const brain = await neuroAGI.getUserBrain(userId);
-   // Contains data from both Reggie and FschoolAI
+   // Contains all FschoolAI brain data
    ```
 
 ### Phase 4: Cross-Product Insights
@@ -383,7 +383,7 @@ Response: { feedbackId, processed: true }
 
 ### Example 1: Vincent's Unified Brain
 
-**Vincent is a teacher in FschoolAI + student in Reggie**
+**Vincent is a student in FschoolAI (Reggie is the AI tutor)**
 
 ```json
 {
@@ -392,7 +392,7 @@ Response: { feedbackId, processed: true }
     "name": "Vincent Yang",
     "email": "vincent@example.com",
     "role": "teacher",
-    "products": ["fschoolai", "reggie"]
+    "products": ["fschoolai"]
   },
   "signals": {
     "behavioral": [
@@ -401,7 +401,7 @@ Response: { feedbackId, processed: true }
         "student_id": "vincent-id",
         "signal_type": "typing_speed",
         "value": 75.5,
-        "product": "reggie",
+        "product": "fschoolai",
         "timestamp": "2026-05-20T10:30:00Z"
       },
       {
@@ -427,7 +427,7 @@ Response: { feedbackId, processed: true }
         "student_id": "vincent-id",
         "emotion_type": "confidence",
         "intensity": 0.7,
-        "product": "reggie",
+        "product": "fschoolai",
         "timestamp": "2026-05-20T10:45:00Z"
       }
     ]
@@ -438,8 +438,8 @@ Response: { feedbackId, processed: true }
       "role": "teacher",
       "lastActive": "2026-05-20T11:05:00Z"
     },
-    "reggie": {
-      "product": "reggie",
+    "fschoolai": {
+      "product": "fschoolai",
       "role": "student",
       "lastActive": "2026-05-20T10:45:00Z"
     }
@@ -453,7 +453,7 @@ Response: { feedbackId, processed: true }
 {
   "title": "Teaching Stress Detected",
   "description": "You experience more stress while teaching than learning",
-  "sourceProducts": ["fschoolai", "reggie"],
+  "sourceProducts": ["fschoolai"],
   "confidence": 0.8,
   "actionable": true,
   "recommendation": "Try stress management techniques between classes"
@@ -473,7 +473,7 @@ Response: { feedbackId, processed: true }
 - [ ] Knowledge graph service updated
 - [ ] Agent coordinator updated
 - [ ] API routes implemented
-- [ ] Reggie writes signals with product context
+- [ ] FschoolAI writes signals with product context
 - [ ] FschoolAI reads from unified brain
 - [ ] Cross-product insights working
 - [ ] Testing completed
