@@ -1,6 +1,8 @@
 # Environment Setup Guide
 
-**Complete guide to configure environment variables for FschoolAI backend.**
+**FschoolAI Backend — Two-Database Architecture**
+
+> ⚠️ **Updated June 4, 2026:** FschoolAI now uses TWO separate Supabase databases. `SUPABASE_URL` (single DB) is replaced by `BRAIN_SUPABASE_URL` and `FSCHOOL_SUPABASE_URL`. See below.
 
 ---
 
@@ -36,20 +38,27 @@ NODE_ENV=development          # or production
 PORT=5000                     # Server port
 ```
 
-### Supabase Configuration
+### Supabase Configuration — TWO Databases
+
+**NeuroAGI Brain DB** (intelligence layer — signals, memory, sessions, patterns)
 ```
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=your-anon-key
-SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
-SUPABASE_DB_PASSWORD=your-db-password
+BRAIN_SUPABASE_URL=https://qiolhlvqfzujnkwnymft.supabase.co
+BRAIN_SUPABASE_SERVICE_KEY=<service_role key — NeuroAGI Brain → Settings → API>
 ```
+
+**FschoolAI Production DB** (Canvas data — users, courses, assignments, grades)
+```
+FSCHOOL_SUPABASE_URL=https://wqgxpouhbwhwpzudrptp.supabase.co
+FSCHOOL_SUPABASE_ANON_KEY=<anon key — FschoolAI Production → Settings → API>
+```
+
+**Rule:** Brain services use `BRAIN_SUPABASE_*`. Canvas services use `FSCHOOL_SUPABASE_*`. Never mix them.
 
 **How to get Supabase credentials:**
 1. Go to https://app.supabase.com
-2. Select your project
+2. Select the project (NeuroAGI Brain OR FschoolAI Production)
 3. Click "Settings" → "API"
-4. Copy `URL` and `anon key`
-5. For service role key: Click "Settings" → "API" → "Service Role Secret"
+4. Copy the URL and the appropriate key
 
 ### Frontend Configuration
 ```
@@ -157,10 +166,11 @@ curl http://localhost:5000/health
 npm install
 ```
 
-### "SUPABASE_URL is not defined"
+### "BRAIN_SUPABASE_URL is not defined" or "FSCHOOL_SUPABASE_URL is not defined"
 - Check `.env` file exists
-- Check `SUPABASE_URL` is set
+- Check both `BRAIN_SUPABASE_URL` and `FSCHOOL_SUPABASE_URL` are set
 - Check no spaces around `=`
+- Note: the old `SUPABASE_URL` single-variable approach is no longer used
 
 ### "Database connection failed"
 ```bash
@@ -169,7 +179,10 @@ echo $SUPABASE_URL
 echo $SUPABASE_ANON_KEY
 
 # Test connection
-psql postgresql://postgres:$SUPABASE_DB_PASSWORD@db.vanzrpqmkmqgsbjdnfvj.supabase.co:5432/postgres -c "SELECT 1"
+# Test Brain DB connection
+curl https://qiolhlvqfzujnkwnymft.supabase.co/rest/v1/ -H "apikey: $BRAIN_SUPABASE_SERVICE_KEY"
+# Test FschoolAI DB connection
+curl https://wqgxpouhbwhwpzudrptp.supabase.co/rest/v1/ -H "apikey: $FSCHOOL_SUPABASE_ANON_KEY"
 ```
 
 ### "Port 5000 already in use"
@@ -267,10 +280,10 @@ docker run -p 5000:5000 --env-file .env.production fschoolai-backend
 - [ ] `CTO_EMAIL` - Set to johannaresh@gmail.com
 - [ ] `NODE_ENV` - Set to development or production
 - [ ] `PORT` - Set to 5000 (or custom)
-- [ ] `SUPABASE_URL` - Set to your Supabase URL
-- [ ] `SUPABASE_ANON_KEY` - Set to your anon key
-- [ ] `SUPABASE_SERVICE_ROLE_KEY` - Set to service role key
-- [ ] `SUPABASE_DB_PASSWORD` - Set to database password
+- [ ] `BRAIN_SUPABASE_URL` - NeuroAGI Brain DB URL
+- [ ] `BRAIN_SUPABASE_SERVICE_KEY` - NeuroAGI Brain service_role key
+- [ ] `FSCHOOL_SUPABASE_URL` - FschoolAI Production DB URL
+- [ ] `FSCHOOL_SUPABASE_ANON_KEY` - FschoolAI Production anon key
 - [ ] `FRONTEND_URL` - Set to frontend URL
 - [ ] `CANVAS_API_URL` - Set to Canvas URL (if using Canvas)
 - [ ] `CANVAS_API_TOKEN` - Set to Canvas token (if using Canvas)

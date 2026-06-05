@@ -20,16 +20,30 @@ npm install
 cp .env.example .env
 ```
 
-Fill in `.env`:
+Fill in `.env` — **TWO databases required:**
 ```
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=your-key
-SUPABASE_SERVICE_ROLE_KEY=your-key
-SUPABASE_DB_PASSWORD=your-password
-CANVAS_API_URL=https://your-canvas.instructure.com
-CANVAS_API_TOKEN=your-token
-JWT_SECRET=generate-random-32-char-string
+# NeuroAGI Brain DB (intelligence layer)
+BRAIN_SUPABASE_URL=https://qiolhlvqfzujnkwnymft.supabase.co
+BRAIN_SUPABASE_SERVICE_KEY=<service_role key from NeuroAGI Brain project>
+
+# FschoolAI Production DB (Canvas data)
+FSCHOOL_SUPABASE_URL=https://wqgxpouhbwhwpzudrptp.supabase.co
+FSCHOOL_SUPABASE_ANON_KEY=<anon key from FschoolAI Production project>
+
+# Canvas OAuth
+CANVAS_CLIENT_ID=<from Canvas developer keys>
+CANVAS_CLIENT_SECRET=<from Canvas developer keys>
+CANVAS_REDIRECT_URI=https://your-domain.com/api/canvas/callback
+
+# AI
+ANTHROPIC_API_KEY=<your Anthropic key>
+
+# Server
+JWT_SECRET=<run: openssl rand -hex 32>
+PORT=5000
 ```
+
+See `ENVIRONMENT_SETUP.md` for full details.
 
 ### 3. Start Server
 ```bash
@@ -53,16 +67,18 @@ Server runs on `http://localhost:5000`
 **Option 2: Command Line**
 ```bash
 # Connect to database
-psql postgresql://postgres:$SUPABASE_DB_PASSWORD@db.vanzrpqmkmqgsbjdnfvj.supabase.co:5432/postgres
+# Brain DB (intelligence)
+psql postgresql://postgres:neuro-agi533@db.qiolhlvqfzujnkwnymft.supabase.co:5432/postgres
 
-# List all tables
-\dt
+# FschoolAI Production DB (Canvas data)
+# Connect via Supabase dashboard — FschoolAI Production project
 
-# View specific table
-SELECT * FROM users LIMIT 10;
-
-# View schema
-\d users
+# List all schemas and tables
+\dn
+\dt brain.*
+\dt neuro.*
+\dt agents.*
+\dt fschool.*
 ```
 
 **Option 3: View All Tables**
@@ -77,25 +93,31 @@ WHERE schemaname = 'public'
 ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC;
 ```
 
-### Key Tables to Review
+### Key Tables to Review (run in NeuroAGI Brain DB)
 
 ```sql
--- User data
-SELECT COUNT(*) FROM users;
+-- Students (Brain persons)
+SELECT COUNT(*) FROM neuro.persons;
 
 -- All signals collected
-SELECT COUNT(*) FROM behavioral_signals;
-SELECT COUNT(*) FROM emotional_signals;
-SELECT COUNT(*) FROM knowledge_signals;
+SELECT COUNT(*) FROM brain.signals;
 
--- Brain state
-SELECT * FROM brain_state LIMIT 5;
+-- Chat sessions
+SELECT COUNT(*) FROM agents.sessions;
+SELECT COUNT(*) FROM agents.messages;
 
--- Canvas integration
-SELECT COUNT(*) FROM canvas_courses;
+-- Patterns learned
+SELECT COUNT(*) FROM neuro.patterns;
 
--- Agent logs
-SELECT * FROM agent_logs ORDER BY created_at DESC LIMIT 10;
+-- Context windows (pre-computed)
+SELECT COUNT(*) FROM brain.context_window;
+```
+
+```sql
+-- Run in FschoolAI Production DB
+SELECT COUNT(*) FROM public.users;
+SELECT COUNT(*) FROM fschool.courses;
+SELECT COUNT(*) FROM fschool.assignments;
 ```
 
 ---
@@ -202,46 +224,22 @@ cat docs/BRAIN_ARCHITECTURE.md
 
 ## Database Schema Overview
 
-**57 Tables across 7 Layers:**
+> ⚠️ **Updated June 4, 2026:** The old flat-table schema (behavioral_signals, brain_state, etc.) no longer exists. The actual schema uses 4 namespaced schemas. See `CURRENT_ARCHITECTURE.md` for the full table list.
 
-### Layer 1: Core (2 tables)
-- `users` - User profiles
-- `sessions` - Active sessions
+**NeuroAGI Brain DB — 4 Schemas:**
 
-### Layer 2: Signals (5 tables)
-- `behavioral_signals` - User actions
-- `emotional_signals` - Emotional state
-- `knowledge_signals` - Learning data
-- `context_signals` - Environment
-- `outcome_signals` - Results
+| Schema | Purpose | Key Tables |
+|---|---|---|
+| `neuro.*` | Person identity & memory | `persons`, `memory`, `patterns`, `preferences` |
+| `brain.*` | Intelligence & learning | `signals`, `reflections`, `reports`, `context_window` |
+| `agents.*` | Chat & sessions | `sessions`, `messages`, `agent_registry` |
+| `fschool.*` | Academic data mirror | `courses`, `assignments` |
 
-### Layer 3: Knowledge (4 tables)
-- `concepts` - Learning concepts
-- `concept_relationships` - Connections
-- `knowledge_graph` - Full graph
-- `mastery_tracking` - Mastery levels
+**FschoolAI Production DB — 1 Schema:**
 
-### Layer 4: Brain (4 tables)
-- `brain_state` - Current state
-- `insights` - Generated insights
-- `predictions` - Predictions
-- `interventions` - Recommendations
-
-### Layer 5: Canvas (4 tables)
-- `canvas_courses` - Courses
-- `canvas_assignments` - Assignments
-- `canvas_submissions` - Submissions
-- `canvas_grades` - Grades
-
-### Layer 6: Agents (3 tables)
-- `agent_logs` - Execution logs
-- `agent_responses` - Outputs
-- `agent_feedback` - Feedback
-
-### Layer 7: Blockchain (3 tables)
-- `blockchain_events` - Events
-- `data_proofs` - Proofs
-- `audit_logs` - Audit trail
+| Schema | Purpose | Key Tables |
+|---|---|---|
+| `public.*` | Canvas accounts | `users`, `canvas_oauth_tokens` |
 
 **View full schema:**
 ```bash
