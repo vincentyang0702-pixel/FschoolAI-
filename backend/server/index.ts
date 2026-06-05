@@ -68,11 +68,13 @@ app.get('/health', (req: Request, res: Response) => {
 // authenticate middleware verifies the Bearer token and attaches req.user
 // All /api/* routes require a valid Supabase JWT
 
-app.use('/api/agents', authenticate, require('./routes/agents').default);
-app.use('/api/canvas', authenticate, require('./routes/canvas').default);
-app.use('/api/brain',  authenticate, require('./routes/brain').default);
-app.use('/api/signals', authenticate, require('./routes/signals').default);
-app.use('/api/chat',    authenticate, require('./routes/chat').default);
+app.use('/api/agents',   authenticate, require('./routes/agents').default);
+app.use('/api/canvas',   authenticate, require('./routes/canvas').default);
+app.use('/api/brain',    authenticate, require('./routes/brain').default);
+app.use('/api/signals',  authenticate, require('./routes/signals').default);
+app.use('/api/chat',     authenticate, require('./routes/chat').default);
+app.use('/api/voice',    authenticate, require('./routes/voice').default);    // TTS streaming + voice customization
+app.use('/api/feedback', authenticate, require('./routes/feedback').default); // Session feedback + ratings
 
 // ── Error Handling ─────────────────────────────────────────────────────────────
 app.use((err: any, req: Request, res: Response, next: NextFunction) => {

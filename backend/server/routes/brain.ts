@@ -4,6 +4,7 @@ import { AgentOrchestrator } from '../services/agent-orchestrator';
 import { CausalInferenceEngine } from '../services/causal-inference';
 import { PredictionEngine } from '../services/prediction-engine';
 import { InterventionEngine } from '../services/intervention-engine';
+import { brainScheduler } from '../services/brain-scheduler';
 
 const router = Router();
 const orchestrator = new AgentOrchestrator();
@@ -121,6 +122,21 @@ router.post('/feedback', asyncHandler(async (req: Request, res: Response) => {
 
   await orchestrator.processFeedback(userId, feedbackType, content, context);
   res.json({ success: true, message: 'Feedback processed' });
+}));
+
+/**
+ * POST /api/brain/trigger-context-window
+ * Manually trigger a context window refresh for a person.
+ * Called by the frontend on session start to ensure the brain snapshot is fresh.
+ * The scheduler runs this every 30 minutes automatically — this is for on-demand refresh.
+ */
+router.post('/trigger-context-window', asyncHandler(async (req: Request, res: Response) => {
+  const { person_id } = req.body;
+  if (!person_id) {
+    throw createBrainError('person_id is required');
+  }
+  const result = await brainScheduler.triggerContextWindowRefresh(person_id);
+  res.json({ success: result.success, skipped: result.skipped || false });
 }));
 
 export default router;

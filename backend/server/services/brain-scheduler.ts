@@ -6,6 +6,7 @@
  * 
  * Schedule:
  * - Every 15 minutes: Check for urgent interventions needed
+ * - Every 30 minutes: Refresh context windows (pre-compute brain snapshot for fast chat)
  * - Every hour: Evaluate all persons for proactive interventions
  * - Every night at 11pm: Run daily reflections for all persons
  * - Every Sunday at 9am: Run weekly synthesis for all persons
@@ -15,12 +16,15 @@
 import { reflectionEngine } from './autonomous-reflection-engine';
 import { interventionEngine } from './proactive-intervention-engine';
 import { hypothesisEngine } from './hypothesis-engine';
+import { ContextWindowWriter } from './brain-context-window';
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY!
 );
+
+const contextWindowWriter = new ContextWindowWriter();
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Brain Scheduler
@@ -39,6 +43,14 @@ export class BrainScheduler {
     // Every 15 minutes: check for urgent interventions
     this.intervals.push(
       setInterval(() => this.runUrgentInterventionCheck(), 15 * 60 * 1000)
+    );
+
+    // Every 30 minutes: refresh context windows for all active persons
+    // Pre-computes the brain intelligence snapshot so chat starts instantly (<50ms).
+    // FschoolAI reads this at session start — brain already knows what matters
+    // before the student types their first message.
+    this.intervals.push(
+      setInterval(() => this.runContextWindowRefresh(), 30 * 60 * 1000)
     );
 
     // Every hour: evaluate all persons for proactive interventions
@@ -99,6 +111,10 @@ export class BrainScheduler {
             console.log(`[BrainScheduler] Seeded ${result.seeded} hypotheses for ${person.name}`);
           }
         }
+
+        // Pre-compute context windows for all active persons on startup
+        // so the first chat session is already fast
+        await this.runContextWindowRefresh();
       }
 
       // Check if any reflections are due
@@ -134,6 +150,8 @@ export class BrainScheduler {
         if (criticalSignals && criticalSignals.length > 0) {
           // High-urgency signal detected — evaluate for immediate intervention
           await interventionEngine.evaluate(person.id);
+          // Also refresh context window so next chat reflects the urgent state
+          await contextWindowWriter.refresh(person.id);
         }
       }
     } catch (err) {
@@ -156,6 +174,8 @@ export class BrainScheduler {
       const result = await reflectionEngine.runScheduledReflections();
       if (result.processed > 0) {
         console.log(`[BrainScheduler] Reflections: ${result.processed} processed, ${result.errors} errors`);
+        // After reflections complete, refresh context windows — reflections change what matters
+        await this.runContextWindowRefresh();
       }
     } catch (err) {
       console.error('[BrainScheduler] Scheduled reflections error:', err);
@@ -184,6 +204,52 @@ export class BrainScheduler {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // Context Window Refresh
+  // Pre-computes the brain intelligence snapshot for each active person.
+  // FschoolAI reads this at session start — zero latency, brain already
+  // knows what matters before the student types their first message.
+  //
+  // What goes in the context window:
+  //   - Current stress level and momentum state
+  //   - Active deadlines and academic pressure
+  //   - Confirmed hypotheses about how this person responds
+  //   - Pending intervention (if any) — what the brain wants to say
+  //   - What the brain is watching for right now
+  //   - What NOT to mention (defensive topics, recent sensitivities)
+  //   - Voice and communication preferences
+  //   - Recent patterns (last 48h signals summary)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  private async runContextWindowRefresh(): Promise<void> {
+    try {
+      const { data: persons } = await supabase
+        .schema('neuro')
+        .from('persons')
+        .select('id, name')
+        .eq('is_active', true);
+
+      if (!persons || persons.length === 0) return;
+
+      let refreshed = 0;
+      let skipped = 0;
+      let errors = 0;
+
+      for (const person of persons) {
+        const result = await contextWindowWriter.refresh(person.id);
+        if (result.success && !result.skipped) refreshed++;
+        else if (result.skipped) skipped++;
+        else errors++;
+      }
+
+      if (refreshed > 0 || errors > 0) {
+        console.log(`[BrainScheduler] Context windows: ${refreshed} refreshed, ${skipped} unchanged, ${errors} errors`);
+      }
+    } catch (err) {
+      console.error('[BrainScheduler] Context window refresh error:', err);
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // Manual Triggers (for API endpoints)
   // ─────────────────────────────────────────────────────────────────────────
 
@@ -197,6 +263,10 @@ export class BrainScheduler {
 
   async triggerHypothesisEval(personId: string): Promise<any> {
     return hypothesisEngine.evaluateAgainstSignals(personId);
+  }
+
+  async triggerContextWindowRefresh(personId: string): Promise<any> {
+    return contextWindowWriter.refresh(personId);
   }
 }
 
