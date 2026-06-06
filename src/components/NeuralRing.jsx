@@ -1120,6 +1120,21 @@ export default function NeuralRing() {
     }
   }, [muted, typewrite]);
 
+  // ── Instant client-side navigation — handles unambiguous "take me to X" phrases ──
+  // Fires before any API call so navigation feels instant. Claude's <nav> tags
+  // handle all other nav (e.g. "I want to study calculus") — this is just a fast
+  // path for the obvious verbs that never need AI interpretation.
+  const NAV_INTENTS = [
+    { re: /take me to study|open study|go to study/i,               page: "study"       },
+    { re: /open toolkit|go to toolkit/i,                             page: "toolkit"     },
+    { re: /show.*leaderboard|open leaderboard|go to leaderboard/i,  page: "leaderboard" },
+    { re: /go to canvas|open canvas/i,                               page: "canvas"      },
+    { re: /go to assignments|open assignments|show assignments/i,    page: "assignment"  },
+    { re: /go home|go to dashboard|open work/i,                      page: "work"        },
+    { re: /go to courses|open courses|my courses/i,                  page: "courses"     },
+    { re: /go to identity|open identity|my profile/i,                page: "identity"    },
+  ];
+
   // ── Chat ──────────────────────────────────────────────────────────────────────────
   const sendMessage = async (overrideText) => {
     const text = overrideText ?? input.trim();
@@ -1129,6 +1144,18 @@ export default function NeuralRing() {
     setInput("");
     setLoading(true);
     logChat(userId, "user", userMsg.content, null);
+
+    // ── Instant nav shortcut (pre-API) ────────────────────────────────────────
+    const navMatch = NAV_INTENTS.find(n => n.re.test(text));
+    if (navMatch) {
+      const reply = "On it.";
+      logChat(userId, "assistant", reply, null);
+      setMessages(m => [...m, { role: "assistant", content: reply }]);
+      setLoading(false);
+      setTimeout(() => { setPendingNav({ page: navMatch.page }); setChatOpen(false); }, 380);
+      return;
+    }
+
     try {
       // ── Visualization routing — send to Claude artifact builder ───────────
       if (isVizRequest(userMsg.content)) {
@@ -1183,6 +1210,17 @@ export default function NeuralRing() {
         raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
       } catch {
         raw = await groq(apiMessages, finalSystem);
+      }
+
+      // ── Quiz detection (before parseNav so tags don't confuse nav parser) ───
+      const quizCards = parseQuiz(raw);
+      if (quizCards) {
+        const preText = raw.replace(/\[QUIZ_START\][\s\S]*?\[QUIZ_END\]/, "").trim();
+        const display = preText || "Here's your quiz:";
+        logChat(userId, "assistant", display, null);
+        setMessages(m => [...m, { role: "assistant", content: display, quiz: quizCards }]);
+        setLoading(false);
+        return; // don't TTS the quiz block
       }
 
       const { cmd, text: displayText } = parseNav(raw);
