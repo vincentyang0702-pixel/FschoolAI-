@@ -78,7 +78,7 @@ if (!document.getElementById("app-shell-styles")) {
 }
 
 export default function App() {
-  const { userId, setUserId, refreshUser, userData, saveCanvasCredentials, updateUserField, pendingNav, setPendingNav } = useApp();
+  const { userId, setUserId, refreshUser, userData, saveCanvasCredentials, updateUserField, pendingNav, setPendingNav, tokenSummary } = useApp();
 
   const [isLoggedIn, setIsLoggedIn] = useState(
     () => Boolean(localStorage.getItem(LOGGED_IN_KEY))
@@ -538,6 +538,29 @@ export default function App() {
           <span className="app-page-label">
             {LABEL[currentPage]}
           </span>
+          {tokenSummary && (
+            <button
+              onClick={() => navigate("leaderboard")}
+              style={{
+                display: "flex", alignItems: "center", gap: "5px",
+                background: "rgba(196,154,60,0.08)", border: "1px solid rgba(196,154,60,0.22)",
+                borderRadius: "20px", padding: "4px 10px",
+                cursor: "pointer", fontFamily: "inherit", outline: "none",
+                transition: "background 0.15s",
+              }}
+              onMouseEnter={e => e.currentTarget.style.background = "rgba(196,154,60,0.15)"}
+              onMouseLeave={e => e.currentTarget.style.background = "rgba(196,154,60,0.08)"}
+            >
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#C49A3C", display: "inline-block", flexShrink: 0 }} />
+              <span style={{ color: "#C49A3C", fontSize: "11px", fontWeight: "600", letterSpacing: "-0.1px" }}>
+                {tokenSummary.points}
+              </span>
+              <span style={{ color: "rgba(196,154,60,0.5)", fontSize: "10px" }}>·</span>
+              <span style={{ color: "rgba(255,255,255,0.35)", fontSize: "10px", letterSpacing: "0.3px" }}>
+                {tokenSummary.tier}
+              </span>
+            </button>
+          )}
           <PageDots currentPage={currentPage} />
         </header>
 

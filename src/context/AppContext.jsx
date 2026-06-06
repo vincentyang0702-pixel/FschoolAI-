@@ -2,8 +2,9 @@
 // User identity is a UUID persisted in localStorage (no Supabase auth required).
 
 import { createContext, useContext, useState, useEffect, useCallback } from "react";
-import { supabase } from "../api/supabase";
+import { supabase }                  from "../api/supabase";
 import { syncCanvasData, loadCanvasData } from "../api/canvasSync";
+import { getTokenSummary, onTokenAwarded } from "../api/tokens";
 
 const AppContext = createContext(null);
 
@@ -35,10 +36,11 @@ export function AppProvider({ children }) {
   const [syncStatus, setSyncStatus]           = useState("idle");
 
   // AI navigation: set by NeuralRing, consumed by App.jsx
-  // { page: string }
   const [pendingNav, setPendingNav]   = useState(null);
   // Pre-config for Study page: { course: string, mode: 'flashcards'|'guide' }
   const [studyConfig, setStudyConfig] = useState(null);
+  // Token economy
+  const [tokenSummary, setTokenSummary] = useState(null);
 
   // Helper — apply any result object (from loadCanvasData or syncCanvasData)
   // to the relevant state setters. Only overwrites when the array is non-empty
@@ -122,6 +124,26 @@ export function AppProvider({ children }) {
     }
     doSync();
   }, [canvasToken, canvasBaseUrl, userId]);
+
+  /** Fetch / refresh token summary for the current user */
+  const refreshTokens = useCallback(async () => {
+    const s = await getTokenSummary();
+    if (s) setTokenSummary(s);
+  }, []);
+
+  // Load token summary on mount + subscribe to live award events
+  useEffect(() => {
+    if (!userId) return;
+    refreshTokens();
+    return onTokenAwarded(data => {
+      setTokenSummary(prev => prev ? {
+        ...prev,
+        points:     data.newTotal ?? (prev.points + (data.tokens ?? 0)),
+        tier:       data.tier    ?? prev.tier,
+        todayEarned: (prev.todayEarned ?? 0) + (data.tokens ?? 0),
+      } : null);
+    });
+  }, [userId, refreshTokens]);
 
   /** Re-fetch the current user row from Supabase (e.g. after verifying on another device). */
   const refreshUser = useCallback(async () => {
@@ -304,6 +326,8 @@ export function AppProvider({ children }) {
       setPendingNav,
       studyConfig,
       setStudyConfig,
+      tokenSummary,
+      refreshTokens,
     }}>
       {children}
     </AppContext.Provider>

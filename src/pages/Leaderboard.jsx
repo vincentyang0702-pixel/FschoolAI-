@@ -31,14 +31,28 @@ function TierBadge({ tier }) {
 }
 
 const TABS  = ["University", "City", "Country", "Continent", "Global"];
-const SORTS = ["GPA", "Streak", "Study Time"];
+const SORTS = ["Tokens", "GPA", "Streak", "Study Time"]; // Tokens first = default
 
-const SORT_COL = { GPA: "gpa", Streak: "streak", "Study Time": "study_time" };
+const SORT_COL = { GPA: "gpa", Streak: "streak", "Study Time": "study_time", Tokens: "points" };
 const SORT_FMT = {
   gpa:        v => v?.toFixed(2) ?? "—",
   streak:     v => v != null ? `${v}d` : "—",
   study_time: v => v != null ? `${v}h` : "—",
+  points:     v => v != null ? `${v} pts` : "—",
 };
+
+const TIER_ORDER  = ["Basic", "Scholar", "Mastermind", "Brain Owner"];
+const TIER_MIN    = { Basic: 0, Scholar: 100, Mastermind: 500, "Brain Owner": 2000 };
+
+function tierProgress(points, tier) {
+  const idx      = TIER_ORDER.indexOf(tier ?? "Basic");
+  const nextName = TIER_ORDER[idx + 1];
+  if (!nextName) return { pct: 1, label: "Max tier reached", nextTier: null };
+  const min = TIER_MIN[tier] ?? 0;
+  const max = TIER_MIN[nextName];
+  const pct = Math.min(Math.max((points - min) / (max - min), 0), 1);
+  return { pct, label: `${points - min} / ${max - min} to ${nextName}`, nextTier: nextName };
+}
 
 const TAB_FILTER_COL = {
   University: "school",
@@ -134,18 +148,42 @@ const ALL_PLACEHOLDER_STUDENTS = [
 ];
 
 export default function Leaderboard() {
-  const { userId, userData } = useApp();
-  const [tab,         setTab]         = useState(0);
-  const [sort,        setSort]        = useState("GPA");
-  const [myTokenData, setMyTokenData] = useState(null); // { points, tier } from leaderboard table
+  const { userId, userData, tokenSummary } = useApp();
+  const [tab,       setTab]     = useState(0);
+  const [sort,      setSort]    = useState("Tokens");
+  const [mounted,   setMounted] = useState(false);
+  const [realRows,  setRealRows]  = useState([]);
+  const [lbLoading, setLbLoading] = useState(true);
 
-  // Fetch real token/tier data for the current user
+  useEffect(() => { const t = setTimeout(() => setMounted(true), 30); return () => clearTimeout(t); }, []);
+
+  // Fetch real leaderboard data joined with user info
   useEffect(() => {
-    if (!userId) return;
-    supabase.from("leaderboard").select("points, tier").eq("user_id", userId).maybeSingle()
-      .then(({ data }) => { if (data) setMyTokenData(data); })
-      .catch(() => {});
-  }, [userId]);
+    async function fetchLb() {
+      setLbLoading(true);
+      try {
+        const { data } = await supabase
+          .from("leaderboard")
+          .select("user_id, points, tier, users ( name, school, city, country, continent, leaderboard_opt_in )")
+          .order("points", { ascending: false })
+          .limit(50);
+        if (data?.length) {
+          setRealRows(data.map(r => ({
+            id:        r.user_id,
+            name:      r.users?.leaderboard_opt_in === false ? "Anonymous Scholar" : (r.users?.name ?? "Anonymous"),
+            school:    r.users?.school    ?? "",
+            city:      r.users?.city      ?? "",
+            country:   r.users?.country   ?? "",
+            continent: r.users?.continent ?? "",
+            points:    r.points ?? 0,
+            tier:      r.tier   ?? "Basic",
+          })));
+        }
+      } catch { /* table may not exist yet */ }
+      setLbLoading(false);
+    }
+    fetchLb();
+  }, []);
 
   const tabName   = TABS[tab];
   const sortCol   = SORT_COL[sort];
@@ -158,8 +196,12 @@ export default function Leaderboard() {
     continent: userData?.continent ?? DEFAULT_LOCATION.continent,
   };
 
-  // Build the current user's entry using real gpa but hardcoded streak/study_time
-  // so the leaderboard always has something to display even before Canvas syncs.
+  // Tokens tab: use real leaderboard rows filtered by tab
+  const filterReal = filterCol
+    ? realRows.filter(r => r[filterCol] === loc[filterCol])
+    : realRows;
+
+  // Legacy tabs (GPA/Streak/Study Time): keep placeholder + meEntry
   const meEntry = userId ? {
     id:         userId,
     name:       userData?.name       ?? "You",
@@ -170,17 +212,16 @@ export default function Leaderboard() {
     gpa:        userData?.gpa        ?? null,
     streak:     userData?.streak     ?? 0,
     study_time: userData?.study_time ?? 0,
+    points:     tokenSummary?.points ?? 0,
+    tier:       tokenSummary?.tier   ?? "Basic",
   } : null;
 
-  const filterVal = filterCol ? loc[filterCol] : null;
-  const base = filterVal
-    ? ALL_PLACEHOLDER_STUDENTS.filter(r => r[filterCol] === filterVal)
-    : ALL_PLACEHOLDER_STUDENTS;
+  const legacyBase  = filterCol ? ALL_PLACEHOLDER_STUDENTS.filter(r => r[filterCol] === loc[filterCol]) : ALL_PLACEHOLDER_STUDENTS;
+  const legacyCombined = meEntry ? [...legacyBase, meEntry] : legacyBase;
+  const legacyRows  = [...legacyCombined].sort((a, b) => (b[sortCol] ?? 0) - (a[sortCol] ?? 0));
 
-  const combined = meEntry ? [...base, meEntry] : base;
-  const rows     = [...combined].sort((a, b) => (b[sortCol] ?? 0) - (a[sortCol] ?? 0));
-
-  const maxVal = rows[0]?.[sortCol] ?? 1;
+  const rows   = sort === "Tokens" ? filterReal : legacyRows;
+  const maxVal = (rows[0]?.[sortCol] ?? rows[0]?.points ?? 1) || 1;
 
   const scopeLabel = tabName === "Global" ? "Global" : `${tabName}: ${loc[TAB_FILTER_COL[tabName]] ?? "—"}`;
 
@@ -255,6 +296,45 @@ export default function Leaderboard() {
         </div>
       </div>
 
+      {/* Pinned "You" card — always visible on Tokens tab */}
+      {sort === "Tokens" && tokenSummary && (
+        <div style={{
+          background: "rgba(196,154,60,0.06)", border: "1px solid rgba(196,154,60,0.25)",
+          borderRadius: "var(--radius-card)", padding: "14px 16px", marginBottom: "14px",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "10px" }}>
+            <div>
+              <span style={{ color: "#C49A3C", fontSize: "13px", fontWeight: "700" }}>{userData?.name ?? "You"}</span>
+              <TierBadge tier={tokenSummary.tier} />
+            </div>
+            <span style={{ color: "#C49A3C", fontSize: "18px", fontWeight: "700", letterSpacing: "-0.5px" }}>
+              {tokenSummary.points} pts
+            </span>
+          </div>
+          {(() => {
+            const { pct, label, nextTier } = tierProgress(tokenSummary.points, tokenSummary.tier);
+            return nextTier ? (
+              <>
+                <div style={{ height: "3px", background: "rgba(196,154,60,0.12)", borderRadius: "2px", marginBottom: "5px" }}>
+                  <div style={{ height: "100%", background: "#C49A3C", borderRadius: "2px", width: `${pct * 100}%`, transition: "width 0.6s ease" }} />
+                </div>
+                <p style={{ color: "rgba(196,154,60,0.5)", fontSize: "10px", letterSpacing: "0.3px" }}>{label}</p>
+              </>
+            ) : (
+              <p style={{ color: "rgba(196,154,60,0.6)", fontSize: "10px", letterSpacing: "0.5px" }}>MAX TIER</p>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* Empty state for Tokens tab when not enough real data */}
+      {sort === "Tokens" && !lbLoading && rows.length < 3 && (
+        <div style={{ textAlign: "center", padding: "48px 24px", background: "rgba(255,255,255,0.02)", borderRadius: "var(--radius-card)", border: "1px solid rgba(255,255,255,0.05)", marginBottom: "16px" }}>
+          <p style={{ color: "rgba(196,154,60,0.6)", fontSize: "14px", fontWeight: "600", marginBottom: "6px" }}>The leaderboard is warming up</p>
+          <p style={{ color: "var(--text-dim)", fontSize: "13px" }}>Earn tokens to claim an early spot.</p>
+        </div>
+      )}
+
       {/* Rows */}
       <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
         {rows.flatMap((row, i) => {
@@ -262,7 +342,7 @@ export default function Leaderboard() {
             const isTop3   = rank <= 3;
             const isMe     = row.id === userId;
             const sublabel = TAB_SUBLABEL[tabName]?.(row);
-            const val      = row[sortCol];
+            const val      = sort === "Tokens" ? row.points : row[sortCol];
             const barPct   = maxVal > 0 && val != null ? Math.max(8, (val / maxVal) * 100) : 0;
             const medal    = isTop3 ? MEDAL[rank - 1] : null;
             const hue      = avatarHue(row.name ?? "");
@@ -361,7 +441,8 @@ export default function Leaderboard() {
                     }}>
                       {row.name ?? "Anonymous"}{isMe ? " · You" : ""}
                     </p>
-                    {isMe && myTokenData?.tier && <TierBadge tier={myTokenData.tier} />}
+                    {(sort === "Tokens" && row.tier) && <TierBadge tier={row.tier} />}
+                    {(sort !== "Tokens" && isMe && tokenSummary?.tier) && <TierBadge tier={tokenSummary.tier} />}
                   </div>
                   {sublabel && (
                     <p style={{
@@ -388,10 +469,10 @@ export default function Leaderboard() {
                   <span style={{
                     fontSize:      isTop3 ? "16px" : "14px",
                     fontWeight:    "700",
-                    color:         isMe ? "rgba(0,210,190,0.9)" : "var(--text-primary)",
+                    color:         isMe ? (sort === "Tokens" ? "#C49A3C" : "rgba(0,210,190,0.9)") : "var(--text-primary)",
                     letterSpacing: "-0.3px",
                   }}>
-                    {SORT_FMT[sortCol](val)}
+                    {sort === "Tokens" ? SORT_FMT.points(val) : SORT_FMT[sortCol](val)}
                   </span>
                   {val != null && (
                     <div style={{

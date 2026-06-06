@@ -13,8 +13,30 @@ import { useApp }                   from "../context/AppContext";
 import GradeGraph, { COURSE_COLORS } from "../components/GradeGraph";
 import ShareCard                     from "../components/ShareCard";
 
+const TOKEN_LABELS = {
+  daily_login:          "Daily login",
+  canvas_sync:          "Canvas synced",
+  flashcards_generated: "Flashcards generated",
+  quiz_completed:       "Quiz completed",
+  quiz_perfect:         "Perfect score",
+  assignment_submitted: "Assignment done",
+  discord_connected:    "Discord connected",
+  streak_day:           "Streak extended",
+  streak_milestone:     "Streak milestone",
+};
+
+function fmtEventDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const now = new Date();
+  const diffDays = Math.floor((now - d) / 86400000);
+  if (diffDays === 0) return "today";
+  if (diffDays === 1) return "yesterday";
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
 export default function Identity() {
-  const { userData, courses, assignments, canvasToken, updateUserField } = useApp();
+  const { userData, courses, assignments, canvasToken, updateUserField, tokenSummary } = useApp();
 
   // Editable name
   const currentName = userData?.name || localStorage.getItem("fschool_name") || "";
@@ -168,6 +190,24 @@ export default function Identity() {
           );
         })}
       </div>
+
+      {/* Token activity */}
+      {tokenSummary?.recentEvents?.length > 0 && (
+        <div style={{ marginBottom: "32px" }}>
+          <p style={{ fontSize: "11px", color: "var(--text-dim)", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "12px" }}>
+            Recent activity
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: "1px" }}>
+            {tokenSummary.recentEvents.map((e, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "9px 14px", background: i % 2 === 0 ? "rgba(255,255,255,0.02)" : "transparent", borderRadius: "8px" }}>
+                <span style={{ color: "#C49A3C", fontSize: "12px", fontWeight: "700", minWidth: "32px" }}>+{e.tokens}</span>
+                <span style={{ color: "var(--text-secondary)", fontSize: "13px", flex: 1 }}>{TOKEN_LABELS[e.action] ?? e.action}</span>
+                <span style={{ color: "var(--text-dim)", fontSize: "11px" }}>{fmtEventDate(e.created_at)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Share card */}
       <ShareCard />
