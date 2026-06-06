@@ -15,7 +15,7 @@
 const TWILIO_SID   = process.env.TWILIO_SID;
 const TWILIO_TOKEN = process.env.TWILIO_TOKEN;
 const TWILIO_FROM  = process.env.TWILIO_FROM;
-const SB_URL       = process.env.SUPABASE_URL  || "https://pedhxfdhacmhrghbvsxi.supabase.co";
+const SB_URL       = process.env.SUPABASE_URL;
 const SB_KEY       = process.env.SUPABASE_SERVICE_KEY; // service role key for server-side reads
 
 const TWILIO_API   = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`;

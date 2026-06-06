@@ -106,6 +106,17 @@ async function logChat(userId, role, content, page) {
   } catch { /* non-fatal */ }
 }
 
+/** Lightweight inline formatter for streaming text — no block elements so partial HTML is safe */
+function renderStreamingHTML(text) {
+  let s = text
+    .replace(/&/g,  "&amp;")
+    .replace(/</g,  "&lt;")
+    .replace(/>/g,  "&gt;");
+  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\n/g, "<br/>");
+  return s;
+}
+
 /** Render tutor message markdown as safe HTML (no dependency) */
 function renderMessageHTML(text) {
   let s = text
@@ -1603,7 +1614,8 @@ export default function NeuralRing() {
                   fontSize: "14px", lineHeight: "1.6",
                   border: "1px solid rgba(255,255,255,0.07)",
                 }}>
-                  {streamingMsg}<span style={{ opacity: 0.4, animation: "blink 1s step-end infinite" }}>|</span>
+                  <span className="nr-md" dangerouslySetInnerHTML={{ __html: renderStreamingHTML(streamingMsg) }} />
+                  <span style={{ opacity: 0.4, animation: "blink 1s step-end infinite" }}>|</span>
                 </div>
               ) : null}
               <div ref={messagesEndRef} />

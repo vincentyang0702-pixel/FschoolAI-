@@ -17,7 +17,7 @@ export function usePageTracking(page, userId) {
     // Insert row when user enters page
     supabase
       .from("beta_sessions")
-      .insert({ student_id: userId, page, entered_at: enteredAt.current })
+      .insert({ user_id: userId, page, entered_at: enteredAt.current })
       .select("id")
       .single()
       .then(({ data }) => {

@@ -23,11 +23,12 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 function getBaseUrl(req) {
   const host  = req.headers["x-forwarded-host"] || req.headers.host;
   const proto = req.headers["x-forwarded-proto"] || "https";
-  // Accept: the exact production subdomain, or any custom domain (no .vercel.app).
-  if (host && (host === "neuro-agi.vercel.app" || !host.endsWith(".vercel.app"))) {
+  // Accept known production subdomains or any custom domain (not a .vercel.app preview).
+  const PROD_HOSTS = ["neuro-agi.vercel.app", "neuro-agi-topaz.vercel.app"];
+  if (host && (PROD_HOSTS.includes(host) || !host.endsWith(".vercel.app"))) {
     return `${proto}://${host}`;
   }
-  return "https://neuro-agi.vercel.app";
+  return "https://neuro-agi-topaz.vercel.app";
 }
 
 export default async function handler(req, res) {
@@ -159,7 +160,7 @@ a.btn:hover{opacity:.82}
 <p class="eyebrow">FSchoolAI &middot; Beta</p>
 <h1>Email verified.</h1>
 <p>Your 1-month free subscription is active.<br/>Open the app on your device to get started.</p>
-<a class="btn" href="https://neuro-agi.vercel.app">Open FSchoolAI &rarr;</a>
+<a class="btn" href="https://neuro-agi-topaz.vercel.app">Open FSchoolAI &rarr;</a>
 </div></body></html>`
     );
   }
