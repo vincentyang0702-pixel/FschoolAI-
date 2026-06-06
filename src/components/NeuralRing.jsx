@@ -99,6 +99,21 @@ async function logChat(userId, role, content, page) {
   } catch { /* non-fatal */ }
 }
 
+/** Load last 20 chat messages for this user, oldest first */
+async function loadChatHistory(userId) {
+  try {
+    const { data } = await supabase
+      .from("chat_logs")
+      .select("role, content, created_at")
+      .eq("student_id", userId)
+      .order("created_at", { ascending: true })
+      .limit(20);
+    return (data ?? []).map(r => ({ role: r.role, content: r.content }));
+  } catch {
+    return [];
+  }
+}
+
 /** Return assignments due within 48h that aren't submitted */
 function getUrgentAssignments(assignments) {
   const now = Date.now();
@@ -271,6 +286,118 @@ async function fetchAndDecodeAudio(text) {
   };
 }
 
+// ── Situation-aware opening greeting ─────────────────────────────────────────
+function buildSituationGreeting(assignments, courses, userData) {
+  const now   = new Date();
+  const hour  = now.getHours();
+  const name  = userData?.name?.split(" ")[0] || "there";
+  const timeTone = hour < 12 ? "morning" : hour < 17 ? "afternoon" : hour < 21 ? "evening" : "latenight";
+
+  const overdue = (assignments || []).filter(a => a.dueAt && new Date(a.dueAt) < now && !a.submission?.submittedAt);
+  const due24h  = (assignments || []).filter(a => {
+    if (!a.dueAt || a.submission?.submittedAt) return false;
+    const diff = new Date(a.dueAt) - now;
+    return diff > 0 && diff < 86400000;
+  });
+  const due48h  = (assignments || []).filter(a => {
+    if (!a.dueAt || a.submission?.submittedAt) return false;
+    const diff = new Date(a.dueAt) - now;
+    return diff > 0 && diff < 172800000;
+  });
+  const streak = userData?.streak || 0;
+
+  let situation = "neutral";
+  if (overdue.length > 0)       situation = "overdue";
+  else if (due24h.length > 0)   situation = "urgent";
+  else if (due48h.length > 0)   situation = "upcoming";
+  else if (streak >= 7)         situation = "streak";
+  else if (timeTone === "latenight") situation = "latenight";
+
+  const greetings = {
+    overdue: [
+      `${name}, you've got ${overdue.length} overdue assignment${overdue.length > 1 ? "s" : ""}. Let's deal with that first.`,
+      `Before anything else — ${overdue[0].name || "an assignment"} is past due. Want to tackle it now?`,
+    ],
+    urgent: [
+      `${due24h[0].name || "An assignment"} is due in under 24 hours. How far along are you?`,
+      `Tight window — ${due24h.length} assignment${due24h.length > 1 ? "s" : ""} due today. Let's prioritize.`,
+    ],
+    upcoming: [
+      `You've got ${due48h.length} thing${due48h.length > 1 ? "s" : ""} due in the next 48 hours. Good time to get ahead.`,
+      `${due48h[0].name || "Something"} is coming up. Want to break it down together?`,
+    ],
+    streak: [
+      `${streak} days in a row — that's real momentum, ${name}. What are we working on today?`,
+      `${streak}-day streak. Let's keep it going. What's on your plate?`,
+    ],
+    latenight: [
+      `Still at it, ${name}? What do you need right now?`,
+      `Late night session. I'm here — what are we solving?`,
+    ],
+    neutral: [
+      `What are we working on${timeTone === "morning" ? " this morning" : timeTone === "evening" ? " tonight" : " today"}, ${name}?`,
+      `Good ${timeTone === "morning" ? "morning" : timeTone === "afternoon" ? "afternoon" : "evening"}, ${name}. What do you need?`,
+    ],
+  };
+
+  const opts = greetings[situation];
+  return opts[Math.floor(Math.random() * opts.length)];
+}
+
+// ── Dynamic smart chips ───────────────────────────────────────────────────────
+function buildSmartChips(assignments, courses, userData) {
+  const now   = new Date();
+  const chips = [];
+
+  const overdue = (assignments || []).filter(a => a.dueAt && new Date(a.dueAt) < now && !a.submission?.submittedAt);
+  if (overdue.length > 0) {
+    chips.push({
+      label:   `Fix ${overdue.length} overdue`,
+      message: `I have ${overdue.length} overdue assignment${overdue.length > 1 ? "s" : ""}. Help me prioritize and make a plan.`,
+    });
+  }
+
+  const dueSoon = (assignments || []).filter(a => {
+    if (!a.dueAt || a.submission?.submittedAt) return false;
+    const diff = new Date(a.dueAt) - now;
+    return diff > 0 && diff < 172800000;
+  });
+  if (dueSoon.length > 0) {
+    chips.push({
+      label:   (`Due soon: ${dueSoon[0].name || "assignment"}`).slice(0, 28),
+      message: `Tell me about my most urgent upcoming assignment and help me make a plan.`,
+    });
+  }
+
+  if ((courses || []).length > 0) {
+    const c = courses[Math.floor(Math.random() * courses.length)];
+    chips.push({
+      label:   `Quiz me on ${(c.name || c.courseCode || "my courses").split(" ")[0]}`,
+      message: `Quiz me on ${c.name || c.courseCode}. Ask me 5 questions to test my understanding.`,
+    });
+  } else {
+    chips.push({ label: "Connect Canvas", message: "How do I connect my Canvas account?" });
+  }
+
+  if ((userData?.streak || 0) >= 3) {
+    chips.push({
+      label:   `${userData.streak}🔥 Keep streak`,
+      message: "What should I study today to keep my streak going?",
+    });
+  }
+
+  const hour = now.getHours();
+  chips.push(hour >= 18
+    ? { label: "Review today's work",  message: "Give me a quick summary of what I should have done today and what's still pending." }
+    : { label: "Plan my day",          message: "Help me plan my study schedule for today based on my assignments and deadlines." }
+  );
+
+  chips.push({ label: "How's my GPA?",  message: "What's my current GPA and grade breakdown?" });
+  chips.push({ label: "Open toolkit",   message: "Open toolkit" });
+
+  return chips.slice(0, 4);
+}
+
 const SIZE           = 68;
 const RADIUS         = 24;
 const N              = 28;
@@ -415,7 +542,14 @@ export default function NeuralRing() {
   const [ringNameInput,  setRingNameInput]  = useState("");
   const ringNameInputRef                    = useRef(null);
 
-  const [messages, setMessages] = useState([]);
+  const [messages,   setMessages]   = useState([]);
+  const [smartChips, setSmartChips] = useState([
+    { label: "What's due soon?",  message: "What assignments do I have due soon?" },
+    { label: "Take me to study",  message: "Take me to study" },
+    { label: "How's my GPA?",     message: "What's my current GPA and grade breakdown?" },
+    { label: "Open toolkit",      message: "Open toolkit" },
+  ]);
+  const historyLoadedRef = useRef(false); // guard: only load history once per mount
   const [input,    setInput]    = useState("");
   const [loading,  setLoading]  = useState(false);
   // Thumbs reaction state — tracks per-message reactions + reason picker
@@ -682,29 +816,32 @@ export default function NeuralRing() {
     };
   }, [userId]);
 
-  // ── Proactive urgent nudge when chat opens ──────────────────────────────────
-  // Only fires if user opens chat without typing first (empty messages state).
-  // Does NOT fire if the student just said their name/age — that's handled
-  // by the first-message rule in buildChatSystem.
+  // ── On chat open: load history OR show situation greeting + refresh chips ────
   const prevChatOpen = useRef(false);
   useEffect(() => {
-    if (chatOpen && !prevChatOpen.current) {
-      const urgent = getUrgentAssignments(assignments);
-      // Only show the nudge if chat is fresh (no messages yet) — never interrupt
-      // an ongoing conversation or a greeting with an assignment dump
-      if (urgent.length > 0 && messages.length === 0) {
-        const names = urgent.map(a => {
-          const h = Math.round((new Date(a.dueAt) - Date.now()) / 3600000);
-          return `• ${a.name} — due in ${h}h`;
-        }).join("\n");
-        setMessages(m => m.length === 0
-          ? [{ role: "assistant", content: `Heads up! You have ${urgent.length} assignment${urgent.length > 1 ? "s" : ""} due soon:\n${names}` }]
-          : m
-        );
-      }
-    }
+    const wasOpen = prevChatOpen.current;
     prevChatOpen.current = chatOpen;
-  }, [chatOpen, assignments]);
+    if (!chatOpen || wasOpen) return; // only fire on false→true transition
+
+    // Always refresh smart chips on open
+    setSmartChips(buildSmartChips(assignments, courses, userData));
+
+    // Load history or show greeting only once per mount (not on every reopen)
+    if (historyLoadedRef.current) return;
+    historyLoadedRef.current = true;
+
+    (async () => {
+      if (userId) {
+        const history = await loadChatHistory(userId);
+        if (history.length > 0) {
+          setMessages(history);
+          return; // history loaded — skip greeting
+        }
+      }
+      // No history → situation-aware greeting as first message bubble
+      setMessages([{ role: "assistant", content: buildSituationGreeting(assignments, courses, userData) }]);
+    })();
+  }, [chatOpen, assignments, courses, userData, userId]);
 
   // ── Typewriter ──────────────────────────────────────────────────────────────────────────
   const typewrite = useCallback((text, durationSecs) => {
@@ -975,22 +1112,18 @@ export default function NeuralRing() {
               {messages.length === 0 ? (
                 <div style={{ display: "flex", flexDirection: "column", alignItems: "center", marginTop: "40px", gap: "12px" }}>
                   <div style={{ width: 52, height: 52, borderRadius: "50%", background: "radial-gradient(circle at 35% 35%, rgba(255,255,255,0.14), rgba(255,255,255,0.03))", border: "1px solid rgba(255,255,255,0.10)" }} />
-                  <p style={{ color: "rgba(255,255,255,0.22)", fontSize: "14px", textAlign: "center", lineHeight: "1.7" }}>
-                    Ask me about your courses,<br />assignments, or study material.<br />
-                    <span style={{ color: "rgba(232,255,107,0.5)", fontSize: "12px" }}>Try "show me a chart of study progress"</span>
-                  </p>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: "7px", justifyContent: "center", marginTop: "4px" }}>
-                    {["What's due soon?", "Take me to study", "How's my GPA?", "Open toolkit"].map(prompt => (
+                    {smartChips.map(chip => (
                       <button
-                        key={prompt}
-                        onClick={() => setInput(prompt)}
+                        key={chip.label}
+                        onClick={() => sendMessage(chip.message)}
                         style={{
                           fontSize: "11px", padding: "5px 11px", borderRadius: "20px",
                           background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)",
                           color: "rgba(255,255,255,0.5)", cursor: "pointer", fontFamily: "inherit",
                         }}
                       >
-                        {prompt}
+                        {chip.label}
                       </button>
                     ))}
                   </div>
