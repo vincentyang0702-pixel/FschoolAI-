@@ -19,6 +19,7 @@ import Canvas      from "./pages/Canvas";
 import Assignment  from "./pages/Assignment";
 import Study       from "./pages/Study";
 import Toolkit     from "./pages/Toolkit";
+import Courses     from "./pages/Courses";
 import Identity    from "./pages/Identity";
 import Leaderboard from "./pages/Leaderboard";
 
@@ -28,6 +29,7 @@ const PAGES = {
   assignment:  Assignment,
   study:       Study,
   toolkit:     Toolkit,
+  courses:     Courses,
   identity:    Identity,
   leaderboard: Leaderboard,
 };
@@ -155,50 +157,58 @@ export default function App() {
     }
 
     // ── Signup ────────────────────────────────────────────────────────────────
-    localStorage.setItem("fschool_name", creds.name);
+    const email = creds.email.toLowerCase().trim();
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
+    const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
 
-    try {
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
-      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-
-      // Check for existing account — prevents duplicate signups
-      const { data: existing } = await supabase
-        .from("users")
-        .select("id")
-        .eq("email", creds.email.toLowerCase().trim())
-        .maybeSingle();
-
-      if (!existing) {
-        await supabase
-          .from("users")
-          .upsert(
-            { id: userId, name: creds.name, email: creds.email.toLowerCase().trim(), password_hash },
-            { onConflict: "id" }
-          );
-
-        // Send verification email — non-blocking, won't fail signup if email fails
-        fetch("/api/email?action=send", {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({
-            userId,
-            email: creds.email.toLowerCase().trim(),
-            name:  creds.name,
-          }),
-        }).catch(() => {});
-
-      } else {
-        // Email already registered — use existing account, don't create duplicate
-        localStorage.setItem("fschool_uid", existing.id);
-      }
-    } catch (err) {
-      console.warn("Supabase signup failed:", err.message);
+    // Duplicate email → send them to log in. Do NOT silently adopt an existing
+    // account (that was an account-takeover path and required no password).
+    const { data: existing } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", email)
+      .maybeSingle();
+    if (existing) {
+      throw new Error("An account with this email already exists — please log in instead.");
     }
 
-    setOnboardingEmail(creds.email);
-    setOnboardingInitName(creds.name);
-    setShowOnboarding(true);
+    // Brand-new account: mint a FRESH id so we can NEVER overwrite another user's
+    // row (the old code reused the ambient fschool_uid, which collapsed accounts).
+    const newId = crypto.randomUUID();
+    const { error: insErr } = await supabase
+      .from("users")
+      .insert({ id: newId, name: creds.name, email, password_hash });
+    if (insErr) throw new Error("Could not create your account. Please try again.");
+
+    // Verification email — non-blocking
+    fetch("/api/email?action=send", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ userId: newId, email, name: creds.name }),
+    }).catch(() => {});
+
+    // Become the new user, then reload so the whole app (incl. context `userId`,
+    // which only re-reads on reload) re-initializes as them. Onboarding resumes
+    // after the reload via the pending flag below.
+    localStorage.setItem("fschool_uid", newId);
+    localStorage.setItem("fschool_name", creds.name);
+    localStorage.setItem("fschool_pending_onboarding", JSON.stringify({ email, name: creds.name }));
+    window.location.reload();
   }, [userId]);
+
+  // Resume onboarding after a signup reload — identity is now the new user, so
+  // any writes from onboarding land on the correct (fresh) id.
+  useEffect(() => {
+    const pending = localStorage.getItem("fschool_pending_onboarding");
+    if (!pending) return;
+    localStorage.removeItem("fschool_pending_onboarding");
+    try {
+      const { email, name } = JSON.parse(pending);
+      setOnboardingEmail(email);
+      setOnboardingInitName(name);
+      setShowOnboarding(true);
+    } catch { /* ignore malformed */ }
+  }, []);
 
   // ── Onboarding complete ────────────────────────────────────────────────────
   const handleOnboardingComplete = useCallback(async ({

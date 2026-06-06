@@ -15,7 +15,7 @@
 const TWILIO_SID   = process.env.TWILIO_SID;
 const TWILIO_TOKEN = process.env.TWILIO_TOKEN;
 const TWILIO_FROM  = process.env.TWILIO_FROM;
-const SB_URL       = process.env.SUPABASE_URL  || "https://pedhxfdhacmhrghbvsxi.supabase.co";
+const SB_URL       = process.env.SUPABASE_URL  || "https://wqgxpouhbwhwpzudrptp.supabase.co";
 const SB_KEY       = process.env.SUPABASE_SERVICE_KEY; // service role key for server-side reads
 
 const TWILIO_API   = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_SID}/Messages.json`;
@@ -29,6 +29,8 @@ async function sbFetch(path, params = {}) {
       apikey:        SB_KEY,
       Authorization: `Bearer ${SB_KEY}`,
       "Content-Type": "application/json",
+      "Accept-Profile":  "neuroagi",   // app data lives in the `neuroagi` schema,
+      "Content-Profile": "neuroagi",   // not public.* (that's Vincent's)
     },
   });
   return res.json();

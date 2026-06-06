@@ -430,6 +430,12 @@ export async function loadCanvasData(userId) {
   const blobMap = {};
   (blobResult.data || []).forEach(row => { blobMap[row.data_type] = row.payload; });
 
+  console.log("[loadCanvasData] userId:", userId,
+    "| blob types:", Object.keys(blobMap),
+    "| ext_courses:", blobMap['ext_courses']?.length ?? 0,
+    "| ext_assignments:", blobMap['ext_assignments']?.length ?? 0,
+    "| ext_grades:", blobMap['ext_grades']?.length ?? 0);
+
   const annResult  = { data: { payload: blobMap['announcements']    ?? [] } };
   const modResult  = { data: { payload: blobMap['modules']          ?? [] } };
   const agResult   = { data: { payload: blobMap['assignment_groups']?? [] } };
@@ -491,6 +497,83 @@ export async function loadCanvasData(userId) {
   (fcResult.data || []).forEach(row => {
     flashcardMap[row.course_id] = { cards: row.cards, generatedAt: row.generated_at };
   });
+
+  // ── Merge browser-extension data (non-Canvas users) ──────────────────────────
+  // The Chrome extension writes ext_courses / ext_assignments / ext_grades blobs.
+  // Convert them to the app's shape and append so they show on the dashboard.
+  const extCourses     = blobMap['ext_courses']     ?? [];
+  const extAssignments = blobMap['ext_assignments'] ?? [];
+  const extGrades      = blobMap['ext_grades']      ?? [];
+
+  // Parse a percentage/score string ("85%", "85/100", "A") into a 0-100 number
+  function parseScore(g) {
+    if (g == null) return null;
+    const s = String(g);
+    const pct = s.match(/(\d{1,3}(?:\.\d+)?)\s*%/);
+    if (pct) return parseFloat(pct[1]);
+    const frac = s.match(/(\d+(?:\.\d+)?)\s*\/\s*(\d+(?:\.\d+)?)/);
+    if (frac) return (parseFloat(frac[1]) / parseFloat(frac[2])) * 100;
+    const num = s.match(/^\s*(\d{1,3}(?:\.\d+)?)\s*$/);
+    if (num) return parseFloat(num[1]);
+    return null; // letter grades left unscored
+  }
+
+  if (extCourses.length) {
+    // Map course name → score from ext_grades
+    const gradeByCourse = {};
+    extGrades.forEach(g => {
+      const score = parseScore(g.percentage) ?? parseScore(g.score) ?? null;
+      if (g.course) gradeByCourse[g.course.toLowerCase()] = score;
+    });
+
+    extCourses.forEach((c, i) => {
+      const key = (c.name ?? c.code ?? `ext${i}`).toLowerCase();
+      const score = gradeByCourse[key]
+        ?? gradeByCourse[(c.code ?? "").toLowerCase()]
+        ?? null;
+      courses.push({
+        id:               `ext_${c.code ?? i}`,
+        dbId:             null,
+        name:             c.name ?? c.code ?? "Course",
+        courseCode:       c.code ?? "",
+        currentScore:     score,
+        finalScore:       null,
+        imageUrl:         null,
+        source:           "extension",
+        isManual:         false,
+        enrollmentState:  "active",
+        accessRestricted: false,
+        assignmentGroups: null,
+      });
+    });
+  }
+
+  if (extAssignments.length) {
+    extAssignments.forEach((a, i) => {
+      const due = a.dueDate ? new Date(a.dueDate) : null;
+      const validDue = due && !isNaN(due.getTime()) ? due.toISOString() : null;
+      const submitted = a.status === "submitted" || a.status === "graded";
+      assignments.push({
+        id:             `ext_a_${i}_${(a.name ?? "").slice(0, 20)}`,
+        name:           a.name ?? "Assignment",
+        description:    null,
+        dueAt:          validDue,
+        pointsPossible: a.pointsPossible != null ? Number(String(a.pointsPossible).replace(/[^\d.]/g, "")) || null : null,
+        courseId:       `ext_${a.course ?? ""}`,
+        courseCode:     a.course ?? "",
+        courseName:     a.course ?? "",
+        source:         "extension",
+        isManual:       false,
+        submission: {
+          score:          parseScore(a.grade),
+          submittedAt:    submitted ? new Date().toISOString() : null,
+          submissionType: null,
+          late:           false,
+          missing:        a.status === "missing",
+        },
+      });
+    });
+  }
 
   return {
     courses,

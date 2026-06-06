@@ -109,17 +109,50 @@ function getUrgentAssignments(assignments) {
   });
 }
 
-function buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, isFirstMessage = false) {
+function buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, isFirstMessage = false, courses = []) {
   const courseList = courseOptions.length
     ? courseOptions.join("\n- ")
     : "No courses loaded yet";
 
   const now = Date.now();
+
+  // Per-course grades the tutor can speak to directly
+  const courseGrades = (courses || [])
+    .filter(c => c.currentScore != null || c.finalScore != null)
+    .map(c => {
+      const pct = c.currentScore ?? c.finalScore;
+      return `- ${c.name || c.courseCode}: ${Math.round(pct)}%`;
+    })
+    .join("\n");
+
+  // Upcoming (future, unsubmitted)
   const upcoming = (assignments || [])
-    .filter(a => a.dueAt && new Date(a.dueAt).getTime() > now)
+    .filter(a => a.dueAt && new Date(a.dueAt).getTime() > now && !a.submission?.submittedAt)
     .sort((a, b) => new Date(a.dueAt) - new Date(b.dueAt))
-    .slice(0, 5)
+    .slice(0, 8)
     .map(a => `- ${a.name} (${a.courseName || a.courseCode || ""}) — due ${new Date(a.dueAt).toLocaleDateString()}`)
+    .join("\n");
+
+  // Recent graded / submitted work with scores
+  const recentWork = (assignments || [])
+    .filter(a => a.submission?.score != null || a.submission?.submittedAt)
+    .sort((a, b) => new Date(b.dueAt || 0) - new Date(a.dueAt || 0))
+    .slice(0, 12)
+    .map(a => {
+      const score = a.submission?.score;
+      const scoreStr = score != null
+        ? (a.pointsPossible ? ` — ${Math.round((score / a.pointsPossible) * 100)}%` : ` — ${score}`)
+        : " — submitted";
+      return `- ${a.name} (${a.courseName || a.courseCode || ""})${scoreStr}`;
+    })
+    .join("\n");
+
+  // Anything overdue and not submitted
+  const overdue = (assignments || [])
+    .filter(a => a.dueAt && new Date(a.dueAt).getTime() < now && !a.submission?.submittedAt)
+    .sort((a, b) => new Date(b.dueAt) - new Date(a.dueAt))
+    .slice(0, 8)
+    .map(a => `- ${a.name} (${a.courseName || a.courseCode || ""}) — was due ${new Date(a.dueAt).toLocaleDateString()}`)
     .join("\n");
 
   const userContext = userData ? [
@@ -163,8 +196,17 @@ function buildChatSystem(courseOptions, userData, assignments, flashcardMap, syl
 STUDENT DATA:
 ${userContext || "No user data yet"}
 
+COURSE GRADES (you CAN share these when asked):
+${courseGrades || "No grades synced yet"}
+
 UPCOMING ASSIGNMENTS:
 ${upcoming || "None"}
+
+OVERDUE / NOT SUBMITTED:
+${overdue || "None"}
+
+RECENT GRADED / SUBMITTED WORK (with scores — you CAN share these when asked):
+${recentWork || "None"}
 
 COURSES (internal reference — never list back verbatim):
 - ${courseList}
@@ -179,7 +221,7 @@ ${livingMind ? `LIVING MIND (your full student model — built across all sessio
 
 ${lastSessionLine ? `CONTINUITY:\n${lastSessionLine}` : ""}
 
-PAGES: work, canvas, assignment, study, identity, leaderboard, toolkit
+PAGES: work, canvas, assignment, study, courses, identity, leaderboard, toolkit
 
 NAVIGATION: When the user wants to go somewhere or study a course, append this EXACTLY at the end of your reply — nothing after it:
 <nav>{"page":"pagename","course":"EXACT course string","mode":"flashcards or guide"}</nav>
@@ -188,8 +230,9 @@ Omit "course"/"mode" when not relevant. Only use <nav> for clear navigation inte
 RULES:
 - Be human and conversational. Max 2 sentences for casual questions, more only when asked.
 - NEVER read out course codes (e.g. GGRC25H3, MDSB11H3) — use the course name only.
-- NEVER dump assignments, deadlines, or course lists unless the student directly asks.
-- NEVER mention GPA/streak/stats unless directly asked.
+- You DO have access to their courses, assignments, grades, and scores (listed above) — answer confidently and specifically when asked. Never say you can't see them.
+- Don't dump the full lists unprompted, but when asked about assignments/grades/a course, give the real specifics from the data above.
+- Only mention GPA/streak/stats when relevant or asked.
 - If asked something personal (name, age, city) — answer from STUDENT DATA or say you don't have it. Do not pivot to courses.
 - Match the student's energy — casual when they're casual, focused when they need help.
 - Use the living mind doc to inform your tone — you know this student well.
@@ -803,7 +846,8 @@ export default function NeuralRing() {
       const system = buildChatSystem(
         courseOptions, userData, assignments,
         flashcardMap, syllabus, impressions, lastSession, livingMind,
-        messages.length === 0  // isFirstMessage — no prior exchanges yet
+        messages.length === 0,  // isFirstMessage — no prior exchanges yet
+        courses                  // per-course grades for grade-aware answers
       );
 
       // Wait briefly for context fetch (max 1.2s) — if still pending, proceed without it

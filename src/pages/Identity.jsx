@@ -56,8 +56,12 @@ export default function Identity() {
       ];
 
   function handleSignOut() {
+    // Clear the FULL identity — especially fschool_uid. Leaving it behind made the
+    // next signup reuse this user's id and overwrite their row (accounts collapsed).
+    localStorage.removeItem("fschool_uid");
     localStorage.removeItem("fschool_logged_in");
     localStorage.removeItem("fschool_name");
+    localStorage.removeItem("sa_onboarding_draft");
     window.location.reload();
   }
 

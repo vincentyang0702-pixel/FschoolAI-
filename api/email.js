@@ -9,7 +9,8 @@ import { Resend } from "resend";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
+  process.env.SUPABASE_SERVICE_KEY,
+  { db: { schema: "neuroagi" } }  // app data lives in `neuroagi`, not public.* (Vincent's)
 );
 const resend = new Resend(process.env.RESEND_API_KEY);
 
