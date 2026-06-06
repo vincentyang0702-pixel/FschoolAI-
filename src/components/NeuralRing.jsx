@@ -685,9 +685,13 @@ export default function NeuralRing() {
   const sessionStartedAt  = useRef(null);
   const exchangeCountRef  = useRef(0); // increments each AI response
 
-  const canvasRef = useRef(null);
-  const rafRef    = useRef(null);
-  const rotRef    = useRef(0);
+  const canvasRef      = useRef(null);
+  const rafRef         = useRef(null);
+  const rotRef         = useRef(0);
+  const sphereStateRef = useRef("idle");    // "idle"|"thinking"|"speaking"
+  const rotSpeedRef    = useRef(0.004);     // lerped rotation speed
+  const colorMixRef    = useRef(0);         // 0=white → 1=gold, lerped
+  const pulseSineRef   = useRef(0);         // for speaking radius pulse
 
   const [pos, setPos]           = useState(defaultPos);
   const [isDragging, setIsDrag] = useState(false);
@@ -853,20 +857,50 @@ export default function NeuralRing() {
     return () => style.remove();
   }, []);
 
-  // ── Canvas animation ────────────────────────────────────────────────────────
+  // ── Sphere state sync — updates ref so draw loop reads it without re-render ──
+  useEffect(() => {
+    sphereStateRef.current = loading ? "thinking" : speaking ? "speaking" : "idle";
+  }, [loading, speaking]);
+
+  // ── Canvas animation (state-reactive) ────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d");
     const draw = () => {
+      const state = sphereStateRef.current;
+
+      // Target rotation speed per state
+      const targetSpeed = state === "thinking" ? 0.010 : state === "speaking" ? 0.006 : 0.004;
+      // Target color mix: 0=white, 1=gold #C49A3C=rgb(196,154,60)
+      const targetMix   = state === "thinking" || state === "speaking" ? 1 : 0;
+
+      // Lerp smoothly toward targets
+      rotSpeedRef.current += (targetSpeed - rotSpeedRef.current) * 0.04;
+      colorMixRef.current += (targetMix   - colorMixRef.current) * 0.04;
+
       ctx.clearRect(0, 0, SIZE, SIZE);
-      rotRef.current += 0.004;
+      rotRef.current += rotSpeedRef.current;
+
+      // Radius pulse for speaking state (±6% on sine wave)
+      pulseSineRef.current += 0.08;
+      const pulse = state === "speaking" ? Math.sin(pulseSineRef.current) * 0.06 : 0;
+      const R = RADIUS * (1 + pulse);
+
       const rot = rotRef.current;
+      const mix = colorMixRef.current;
+
+      // Interpolate RGB: white(255,255,255) → gold(196,154,60)
+      const cr = Math.round(255 + (196 - 255) * mix);
+      const cg = Math.round(255 + (154 - 255) * mix);
+      const cb = Math.round(255 + (60  - 255) * mix);
+
       const projected = NODES.map(({ x, y, z }) => {
         const rx = x * Math.cos(rot) + z * Math.sin(rot);
         const rz = -x * Math.sin(rot) + z * Math.cos(rot);
-        return { sx: rx * RADIUS + SIZE / 2, sy: y * RADIUS + SIZE / 2, sz: rz, depth: (rz + 1) * 0.5 };
+        return { sx: rx * R + SIZE / 2, sy: y * R + SIZE / 2, sz: rz, depth: (rz + 1) * 0.5 };
       });
+
       ctx.lineWidth = 0.7;
       for (let i = 0; i < projected.length; i++) {
         for (let j = i + 1; j < projected.length; j++) {
@@ -875,7 +909,7 @@ export default function NeuralRing() {
           const d3 = Math.sqrt(da.x * da.x + da.y * da.y + da.z * da.z);
           if (d3 < RADIUS * 2 * EDGE_THRESHOLD) {
             const alpha = 0.05 + (ri.depth + rj.depth) * 0.07;
-            ctx.strokeStyle = `rgba(255,255,255,${alpha.toFixed(2)})`;
+            ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(2)})`;
             ctx.beginPath(); ctx.moveTo(ri.sx, ri.sy); ctx.lineTo(rj.sx, rj.sy); ctx.stroke();
           }
         }
@@ -883,7 +917,7 @@ export default function NeuralRing() {
       for (const { sx, sy, depth } of projected) {
         ctx.beginPath();
         ctx.arc(sx, sy, 0.9 + depth * 0.8, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(255,255,255,${(0.5 + depth * 0.4).toFixed(2)})`;
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${(0.5 + depth * 0.4).toFixed(2)})`;
         ctx.fill();
       }
       rafRef.current = requestAnimationFrame(draw);
