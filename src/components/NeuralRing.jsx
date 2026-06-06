@@ -99,6 +99,44 @@ async function logChat(userId, role, content, page) {
   } catch { /* non-fatal */ }
 }
 
+/** Render tutor message markdown as safe HTML (no dependency) */
+function renderMessageHTML(text) {
+  let s = text
+    .replace(/&/g,  "&amp;")
+    .replace(/</g,  "&lt;")
+    .replace(/>/g,  "&gt;");
+  // Bold
+  s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // Bullet items
+  s = s.replace(/^[-•] (.+)$/gm, "<li>$1</li>");
+  // Wrap runs of <li> in <ul>
+  s = s.replace(/(<li>[\s\S]*?<\/li>)/g, m =>
+    m.startsWith("<ul>") ? m : "<ul>" + m + "</ul>"
+  );
+  s = s.replace(/<\/ul>\s*<ul>/g, "");   // merge adjacent lists
+  // Paragraph breaks
+  s = s.replace(/\n\n/g, "</p><p>");
+  s = s.replace(/\n/g,   "<br/>");
+  return "<p>" + s + "</p>";
+}
+
+/** Parse [QUIZ_START]...[QUIZ_END] block from a Claude response */
+function parseQuiz(text) {
+  const match = text.match(/\[QUIZ_START\]([\s\S]*?)\[QUIZ_END\]/);
+  if (!match) return null;
+  const cards = match[1].trim().split("\n")
+    .filter(l => l.includes("Q:") && l.includes(" | ") && l.includes("A:"))
+    .map(l => {
+      const [q, a] = l.split(" | ");
+      return {
+        q: (q || "").replace(/^Q:\s*/i, "").trim(),
+        a: (a || "").replace(/^A:\s*/i, "").trim(),
+      };
+    })
+    .filter(c => c.q && c.a);
+  return cards.length > 0 ? cards : null;
+}
+
 /** Load last 20 chat messages for this user, oldest first */
 async function loadChatHistory(userId) {
   try {
@@ -396,6 +434,111 @@ function buildSmartChips(assignments, courses, userData) {
   chips.push({ label: "Open toolkit",   message: "Open toolkit" });
 
   return chips.slice(0, 4);
+}
+
+// ── Inline quiz component (renders inside chat when Claude returns quiz format) ─
+function InlineQuiz({ cards, userId, courseId }) {
+  const [idx,     setIdx]     = useState(0);
+  const [flipped, setFlipped] = useState(false);
+  const [results, setResults] = useState([]);
+  const [done,    setDone]    = useState(false);
+  const [saving,  setSaving]  = useState(false);
+  const [saved,   setSaved]   = useState(false);
+
+  const card = cards[idx];
+
+  function judge(correct) {
+    const next = [...results, correct];
+    setResults(next);
+    setFlipped(false);
+    if (idx + 1 >= cards.length) setDone(true);
+    else setIdx(i => i + 1);
+  }
+
+  async function saveCards() {
+    setSaving(true);
+    try {
+      await supabase.from("flashcards").upsert(
+        {
+          user_id:      userId,
+          course_id:    courseId ?? null,
+          cards:        cards.map(c => ({ question: c.q, answer: c.a })),
+          generated_at: new Date().toISOString(),
+        },
+        { onConflict: "user_id,course_id" }
+      );
+      setSaved(true);
+    } catch { /* non-fatal */ }
+    setSaving(false);
+  }
+
+  const wrap = {
+    background: "rgba(255,255,255,0.04)",
+    border: "1px solid rgba(196,154,60,0.35)",
+    borderRadius: "14px",
+    padding: "16px",
+    marginTop: "8px",
+  };
+
+  if (done) {
+    const correct = results.filter(Boolean).length;
+    return (
+      <div style={wrap}>
+        <p style={{ color: "var(--text-primary)", fontSize: "15px", fontWeight: "600", marginBottom: "8px" }}>
+          {correct}/{cards.length} correct
+        </p>
+        <div style={{ display: "flex", gap: "5px", marginBottom: "12px" }}>
+          {results.map((r, i) => (
+            <div key={i} style={{ width: 10, height: 10, borderRadius: "50%", background: r ? "rgba(52,199,89,0.85)" : "rgba(255,59,48,0.7)" }} />
+          ))}
+        </div>
+        {!saved
+          ? <button onClick={saveCards} disabled={saving}
+              style={{ background: "rgba(196,154,60,0.12)", border: "1px solid rgba(196,154,60,0.28)", borderRadius: "8px", padding: "7px 14px", color: "#C49A3C", fontSize: "12px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit" }}>
+              {saving ? "Saving…" : "Save to flashcards"}
+            </button>
+          : <p style={{ color: "#C49A3C", fontSize: "12px" }}>✓ Saved to flashcards</p>
+        }
+      </div>
+    );
+  }
+
+  return (
+    <div style={wrap}>
+      <p style={{ color: "rgba(196,154,60,0.55)", fontSize: "10px", letterSpacing: "1.5px", textTransform: "uppercase", marginBottom: "10px" }}>
+        {idx + 1} / {cards.length}
+      </p>
+      <div style={{ minHeight: "58px", marginBottom: "12px" }}>
+        {!flipped ? (
+          <>
+            <p style={{ color: "rgba(255,255,255,0.3)", fontSize: "10px", textTransform: "uppercase", letterSpacing: "1px", marginBottom: "6px" }}>Question</p>
+            <p style={{ color: "var(--text-primary)", fontSize: "14px", lineHeight: "1.6", fontFamily: "'Fraunces',Georgia,serif" }}>{card.q}</p>
+          </>
+        ) : (
+          <>
+            <p style={{ color: "rgba(196,154,60,0.55)", fontSize: "10px", textTransform: "uppercase", letterSpacing: "1px", marginBottom: "6px" }}>Answer</p>
+            <p style={{ color: "var(--text-primary)", fontSize: "14px", lineHeight: "1.6" }}>{card.a}</p>
+          </>
+        )}
+      </div>
+      {!flipped
+        ? <button onClick={() => setFlipped(true)}
+            style={{ width: "100%", background: "rgba(255,255,255,0.07)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", padding: "9px", color: "var(--text-primary)", fontSize: "13px", cursor: "pointer", fontFamily: "inherit" }}>
+            Reveal answer
+          </button>
+        : <div style={{ display: "flex", gap: "8px" }}>
+            <button onClick={() => judge(false)}
+              style={{ flex: 1, background: "rgba(255,59,48,0.1)", border: "1px solid rgba(255,59,48,0.22)", borderRadius: "8px", padding: "9px", color: "rgba(255,85,75,0.9)", fontSize: "13px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit" }}>
+              Missed
+            </button>
+            <button onClick={() => judge(true)}
+              style={{ flex: 1, background: "rgba(52,199,89,0.08)", border: "1px solid rgba(52,199,89,0.22)", borderRadius: "8px", padding: "9px", color: "rgba(72,210,110,0.9)", fontSize: "13px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit" }}>
+              Got it
+            </button>
+          </div>
+      }
+    </div>
+  );
 }
 
 const SIZE           = 68;
@@ -1140,7 +1283,11 @@ export default function NeuralRing() {
                         border: m.hasArtifact ? "1px solid rgba(232,255,107,0.2)" : "1px solid rgba(255,255,255,0.07)",
                       }}
                     >
-                      {m.content}
+                      {m.role === "assistant"
+                        ? <div className="nr-md" dangerouslySetInnerHTML={{ __html: renderMessageHTML(m.content) }} />
+                        : m.content
+                      }
+                      {m.quiz && <InlineQuiz cards={m.quiz} userId={userId} courseId={null} />}
                       {m.hasArtifact && (
                         <button
                           onClick={() => setArtifactOpen(true)}
