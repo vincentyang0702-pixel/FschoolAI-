@@ -1,149 +1,49 @@
 // content/universal.js — NeuroAgi auto-capture content script
-// Runs on every page. Detects if the page contains academic data,
-// extracts it silently, and sends to background service worker.
-// No user action needed — just browse your portal normally.
+// Runs on every page. When the student lands on an academic portal page, it asks
+// the background worker to sync — which uses the SAME API-first → scrape-fallback
+// flow as the popup button. The content script itself can't reach the page's JS
+// (window.ENV / M.cfg) or run scripting, so the background does the actual work.
+// Throttled so normal browsing doesn't re-sync on every page load.
 
-const PAGE_PATTERNS = [
-  { type: "courses",     test: u => /\/d2l\/home\/?$|\/d2l\/home\/[^/]+$/.test(u) || document.querySelector(".my-courses-content, .d2l-my-courses") !== null },
-  { type: "assignments", test: u => /dropbox|assignments|tasks|coursework/i.test(u) },
-  { type: "grades",      test: u => /grades|marks|results|progress/i.test(u) },
-  { type: "schedule",    test: u => /calendar|schedule|timetable/i.test(u) },
-  { type: "courses",     test: u => /courses|my-courses|dashboard|home/i.test(u) },
+const SYNC_THROTTLE_MS = 20 * 60 * 1000;   // at most once per 20 min
+
+// Only fire on URLs that clearly belong to a known LMS — this is an AUTOMATIC
+// trigger, so we must not run on arbitrary sites. The background's API sync grabs
+// everything regardless of which LMS page you're on, so broad in-portal matching
+// isn't needed; the scrape fallback is reserved for unsupported LMS portals.
+const PORTAL_HINTS = [
+  /\/d2l\//i,                          // Brightspace / D2L
+  /instructure\.com/i,                 // Canvas (hosted)
+  /\/course\/view\.php|\/my\/.*moodle|\/moodle\//i,  // Moodle
+  /blackboard\.com|\/ultra\/|\/webapps\/blackboard/i, // Blackboard
 ];
 
-function detectPageType(url) {
-  for (const p of PAGE_PATTERNS) {
-    if (p.test(url)) return p.type;
-  }
-  return null;
-}
-
-// Deep text extractor — pierces shadow DOM (D2L uses d2l-* web components)
-// and reads same-origin iframes (D2L homepage widgets).
-function deepText(root) {
-  let out = "";
-  const skip = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG"]);
-  function walk(node) {
-    if (!node) return;
-    if (node.nodeType === Node.TEXT_NODE) {
-      const t = node.textContent.replace(/\s+/g, " ").trim();
-      if (t) out += t + " ";
-      return;
-    }
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-    if (skip.has(node.tagName)) return;
-
-    // Pierce shadow root (web components like d2l-card)
-    if (node.shadowRoot) node.shadowRoot.childNodes.forEach(walk);
-
-    // Pierce same-origin iframes (D2L homepage widgets)
-    if (node.tagName === "IFRAME") {
-      try {
-        const doc = node.contentDocument;
-        if (doc?.body) walk(doc.body);
-      } catch { /* cross-origin — skip */ }
-      return;
-    }
-    node.childNodes.forEach(walk);
-  }
-  walk(root);
-  return out;
-}
-
-function extractContent() {
-  const text = deepText(document.body)
-    .replace(/\s{3,}/g, "\n").trim().slice(0, 10000);
-
-  // Tables (also search shadow roots and same-origin iframes)
-  const tables = [];
-  function collectTables(root) {
-    root.querySelectorAll?.("table").forEach(t => {
-      const rows = [];
-      t.querySelectorAll("tr").forEach(row => {
-        const cells = [...row.querySelectorAll("th,td")].map(c => c.innerText.trim());
-        if (cells.some(c => c)) rows.push(cells.join(" | "));
-      });
-      if (rows.length > 1) tables.push(rows.join("\n"));
-    });
-    root.querySelectorAll?.("*").forEach(el => { if (el.shadowRoot) collectTables(el.shadowRoot); });
-  }
-  collectTables(document);
-  document.querySelectorAll("iframe").forEach(f => {
-    try { if (f.contentDocument) collectTables(f.contentDocument); } catch {}
-  });
-
-  // D2L course IDs from links (search shadow + iframes too)
-  const courseIds = [];
-  function collectIds(root) {
-    root.querySelectorAll?.("a[href]").forEach(a => {
-      const m = a.href.match(/[?&/]ou[=/](\d+)/);
-      if (m && !courseIds.includes(m[1])) courseIds.push(m[1]);
-    });
-    root.querySelectorAll?.("*").forEach(el => { if (el.shadowRoot) collectIds(el.shadowRoot); });
-  }
-  collectIds(document);
-
-  return {
-    text,
-    tables:    tables.slice(0, 5).join("\n\n"),
-    url:       location.href,
-    title:     document.title,
-    courseIds,
-  };
+function looksLikePortal(url) {
+  return PORTAL_HINTS.some(re => re.test(url));
 }
 
 async function tryCapture() {
-  // Check if user is logged into NeuroAgi
-  const result = await chrome.storage.local.get(["neuroagi_user", "neuroagi_captured_urls"]);
-  if (!result.neuroagi_user) return; // not logged in, skip
+  const { neuroagi_user, neuroagi_last_autosync = 0 } =
+    await chrome.storage.local.get(["neuroagi_user", "neuroagi_last_autosync"]);
+  if (!neuroagi_user) return;                       // not logged in
+  if (!looksLikePortal(location.href)) return;       // not an academic page
+  if (Date.now() - neuroagi_last_autosync < SYNC_THROTTLE_MS) return;  // throttled
 
-  const url      = location.href;
-  const pageType = detectPageType(url);
-  if (!pageType) return; // not an academic page
+  // Claim the throttle slot up-front so two tabs don't sync at once.
+  await chrome.storage.local.set({ neuroagi_last_autosync: Date.now() });
 
-  // Skip if this exact URL was captured in the last 30 minutes
-  const captured = result.neuroagi_captured_urls ?? {};
-  const lastTime = captured[url] ?? 0;
-  if (Date.now() - lastTime < 30 * 60 * 1000) return;
-
-  const content = extractContent();
-
-  // Must have meaningful content
-  if (content.text.length < 100) return;
-
-  // Work out which step this is based on what's already captured
-  const { neuroagi_captures = [] } = await chrome.storage.local.get("neuroagi_captures");
-  const stepIndex = Math.min(neuroagi_captures.length, 2);
-  const stepOrder = ["courses", "assignments", "grades"];
-  const effectiveStep = stepOrder.includes(pageType) ? pageType : stepOrder[stepIndex];
-
-  // Send to background for Claude extraction + Supabase write
-  chrome.runtime.sendMessage({
-    type:        "NEUROAGI_EXTRACT",
-    userId:      result.neuroagi_user.id,
-    pageContent: content,
-    stepHint:    effectiveStep,
-  }, (response) => {
-    if (response?.ok) {
-      // Mark URL as captured and update step progress
-      const updatedUrls = { ...captured, [url]: Date.now() };
-      const alreadyCaptured = neuroagi_captures.some(c => c.step === effectiveStep);
-      const updatedCaptures = alreadyCaptured
-        ? neuroagi_captures
-        : [...neuroagi_captures, { step: effectiveStep, url, auto: true, timestamp: Date.now() }];
-      chrome.storage.local.set({
-        neuroagi_captured_urls: updatedUrls,
-        neuroagi_captures:      updatedCaptures,
-        neuroagi_stats:         response.stats ?? {},
-      });
+  chrome.runtime.sendMessage(
+    { type: "NEUROAGI_AUTO_SYNC", userId: neuroagi_user.id },
+    (res) => {
+      // If the sync didn't actually do anything (e.g. not a real portal), release
+      // the throttle so a later, genuine portal page can sync sooner.
+      if (!res?.ok) chrome.storage.local.set({ neuroagi_last_autosync: 0 });
     }
-  });
+  );
 }
 
-// Wait 2.5s after page load for async/JS-rendered content (course cards, grade tables etc.)
-function scheduleCapture() {
-  setTimeout(tryCapture, 2500);
-}
+// Wait a moment after load for JS-rendered portals (D2L web components, etc.)
+function scheduleCapture() { setTimeout(tryCapture, 2500); }
 
 if (document.readyState === "complete") {
   scheduleCapture();

@@ -23,6 +23,11 @@
   }
   .orb-dot { width: 8px; height: 8px; border-radius: 50%; background: #f5f5f5; box-shadow: 0 0 8px rgba(255,255,255,0.7); }
   .brand { font-size: 16px; font-weight: 700; letter-spacing: -0.3px; }
+  .ver {
+    margin-left: auto; font-size: 10px; font-weight: 600; letter-spacing: 0.3px;
+    color: rgba(255,255,255,0.3); background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 2px 7px;
+  }
 
   .auth-title { font-size: 20px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 6px; }
   .auth-sub   { font-size: 13px; color: rgba(255,255,255,0.4); margin-bottom: 24px; }
@@ -144,7 +149,7 @@
 
 <!-- ── Login ── -->
 <div id="screen-login" class="screen active">
-  <div class="header"><div class="orb"><div class="orb-dot"></div></div><span class="brand">NeuroAgi</span></div>
+  <div class="header"><div class="orb"><div class="orb-dot"></div></div><span class="brand">NeuroAgi</span><span class="ver" id="app-version-login"></span></div>
   <div class="auth-title">Welcome back</div>
   <div class="auth-sub">Log in to sync your academic data</div>
   <div class="error-msg" id="login-error"></div>
@@ -156,7 +161,7 @@
 
 <!-- ── Sign Up ── -->
 <div id="screen-signup" class="screen">
-  <div class="header"><div class="orb"><div class="orb-dot"></div></div><span class="brand">NeuroAgi</span></div>
+  <div class="header"><div class="orb"><div class="orb-dot"></div></div><span class="brand">NeuroAgi</span><span class="ver" id="app-version-signup"></span></div>
   <div class="auth-title">Create account</div>
   <div class="auth-sub">Your data stays yours — always</div>
   <div class="error-msg" id="signup-error"></div>
@@ -169,7 +174,7 @@
 
 <!-- ── Capture ── -->
 <div id="screen-capture" class="screen">
-  <div class="header"><div class="orb"><div class="orb-dot"></div></div><span class="brand">NeuroAgi</span></div>
+  <div class="header"><div class="orb"><div class="orb-dot"></div></div><span class="brand">NeuroAgi</span><span class="ver" id="app-version-capture"></span></div>
 
   <div class="user-row">
     <div class="avatar" id="user-initial">A</div>
@@ -223,6 +228,7 @@
   <button class="logout-btn" id="logout-btn">Sign out</button>
 </div>
 
+<script src="../shared-sync.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

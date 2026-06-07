@@ -4,9 +4,9 @@
 const SUPABASE_URL  = "https://wqgxpouhbwhwpzudrptp.supabase.co";
 const SUPABASE_ANON = "sb_publishable_e-3KMudaL-iXf5GGsuiQaA_VW21ZZFA";
 
-// Write to the isolated `neuroagi` schema — the SAME schema the app reads from
-// (src/supabase.js sets db.schema = 'neuroagi'). Both sides MUST match or synced
-// data (and login, which reads the users table) is invisible. (not public.* — Vincent's.)
+// Use the `public` schema — the app was unified onto public on main (cee437b),
+// where the real users + data live. Both sides MUST match or synced data (and
+// login, which reads the users table) is invisible to the app.
 const SB_PROFILE = { "Accept-Profile": "public", "Content-Profile": "public" };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -97,13 +97,18 @@ async function loadCaptureScreen(user) {
 }
 
 function renderSteps(captures) {
-  STEPS.forEach((_, i) => {
+  // Mark a step "done" only when a capture for THAT step actually exists — so we
+  // never green-light a step whose data never synced (honest progress).
+  const doneSteps = new Set(captures.map(c => c.step));
+  STEPS.forEach((name, i) => {
     const el = document.getElementById(`step-${i}`);
     el.className = "step";
-    if (i < captures.length)  el.classList.add("done");
-    else if (i === captures.length) el.classList.add("active");
+    if (doneSteps.has(name)) el.classList.add("done");
   });
-  const allDone = captures.length >= STEPS.length;
+  const firstPending = STEPS.findIndex(n => !doneSteps.has(n));
+  if (firstPending >= 0) document.getElementById(`step-${firstPending}`).classList.add("active");
+
+  const allDone = STEPS.every(n => doneSteps.has(n));
   document.getElementById("reset-btn").style.display = allDone ? "block" : "none";
   document.getElementById("status-msg").textContent = allDone
     ? "All pages captured — data synced to NeuroAgi ✓"
@@ -144,15 +149,29 @@ async function captureCurrentPage(user) {
     } catch { /* injection blocked → fall through to scrape */ }
 
     if (api?.lms && (api.courses?.length || api.assignments?.length)) {
-      setProcessing(true, `Syncing ${api.courses.length} courses via ${api.lms}…`);
+      const nCourses = api.courses?.length || 0;
+      const nAssign  = api.assignments?.length || 0;
+      const nGraded  = (api.courses || []).filter(c => c.current_score != null).length;
+      console.log(`[NeuroAgi] ${api.lms} API → ${nCourses} courses, ${nAssign} assignments, ${nGraded} graded courses`);
+
+      setProcessing(true, `Syncing ${nCourses} courses via ${api.lms}…`);
       const res = await chrome.runtime.sendMessage({ type: "NEUROAGI_API_INGEST", userId: user.id, data: api });
       if (!res?.ok) throw new Error(res?.error ?? "Sync failed");
-      const allCaptures = ["courses", "assignments", "grades"].map(step => ({ step, auto: true, timestamp: Date.now() }));
-      await chrome.storage.local.set({ neuroagi_captures: allCaptures, neuroagi_stats: res.stats });
-      renderSteps(allCaptures);
+
+      // Honest gating: only green-light a step that actually returned data.
+      const caps = [{ step: "courses", auto: true, timestamp: Date.now() }];
+      if (nAssign) caps.push({ step: "assignments", auto: true, timestamp: Date.now() });
+      if (nGraded) caps.push({ step: "grades",      auto: true, timestamp: Date.now() });
+      await chrome.storage.local.set({ neuroagi_captures: caps, neuroagi_stats: res.stats });
+      renderSteps(caps);
       renderStats(res.stats);
-      document.getElementById("status-msg").textContent =
-        `Synced ✓ — ${res.counts.courses} courses, ${res.counts.assignments} assignments, ${res.counts.grades} grades (${api.lms} API)`;
+
+      const missing = [];
+      if (!nAssign) missing.push("assignments");
+      if (!nGraded) missing.push("grades");
+      document.getElementById("status-msg").textContent = missing.length
+        ? `${api.lms.toUpperCase()}: ${res.counts.courses} courses synced, but no ${missing.join(" or ")} found — open the page's console (F12) and send the logs.`
+        : `Synced ✓ — ${res.counts.courses} courses, ${res.counts.assignments} assignments, ${res.counts.grades} grades (${api.lms} API)`;
       return;
     }
 
@@ -233,245 +252,15 @@ async function captureCurrentPage(user) {
   }
 }
 
-// Injected into the page's MAIN world — talks to the LMS's own API using the
-// student's existing login session (cookies). Returns normalized courses +
-// assignments + grades, or { lms: null } if no supported API → caller scrapes.
-// Must be fully self-contained (no outside references — it is serialized + injected).
-async function lmsApiSync() {
-  const origin = location.origin;
-  const D = (...a) => { try { console.log("[NeuroAgi]", ...a); } catch {} };
-  D("sync start — Canvas:", !!(window.ENV && window.ENV.current_user_id),
-    "Moodle:", !!(window.M && window.M.cfg && window.M.cfg.sesskey),
-    "D2L:", !!(window.D2L || localStorage.getItem("XSRF.Token")));
-  const getJSON = async (url, opts = {}) => {
-    const r = await fetch(url, {
-      credentials: opts.credentials || "same-origin",
-      headers: { Accept: "application/json", ...(opts.headers || {}) },
-      method: opts.method || "GET",
-      body: opts.body,
-    });
-    if (!r.ok) throw new Error(url + " -> " + r.status);
-    return { r, data: await r.json() };
-  };
-
-  // ── CANVAS ──────────────────────────────────────────────────────────────
-  try {
-    if (window.ENV && window.ENV.current_user_id) {
-      const pageAll = async (path) => {
-        let url = origin + "/api/v1" + path + (path.includes("?") ? "&" : "?") + "per_page=100";
-        const out = [];
-        for (let i = 0; i < 25 && url; i++) {
-          const { r, data } = await getJSON(url);
-          if (Array.isArray(data)) out.push(...data); else break;
-          const m = (r.headers.get("Link") || "").match(/<([^>]+)>;\s*rel="next"/);
-          url = m ? m[1] : null;
-        }
-        return out;
-      };
-      let rawCourses = await pageAll("/courses?enrollment_state=active&enrollment_type=student&include[]=total_scores");
-      if (!rawCourses.length) rawCourses = await pageAll("/courses?include[]=total_scores");
-      const courses = rawCourses
-        .filter(c => c.name && !c.access_restricted_by_date)
-        .map(c => {
-          const es = Array.isArray(c.enrollments) ? c.enrollments : [];
-          const e = es.find(x => x.type === "student" || x.role === "StudentEnrollment") || es[0] || null;
-          return { id: String(c.id), name: c.name || "", course_code: c.course_code || "",
-                   current_score: e?.computed_current_score ?? null, final_score: e?.computed_final_score ?? null };
-        });
-      const assignments = [];
-      await Promise.all(courses.map(async (c) => {
-        try {
-          const raw = await pageAll(`/courses/${c.id}/assignments?include[]=submission`);
-          for (const a of raw) {
-            const s = a.submission || {};
-            assignments.push({ course_ref: c.id, id: String(a.id), title: a.name || "Assignment",
-              due_at: a.due_at || null, points_possible: a.points_possible ?? null,
-              score: s.score ?? null, submitted_at: s.submitted_at || null,
-              missing: Boolean(s.missing) || s.workflow_state === "unsubmitted" });
-          }
-        } catch { /* skip course */ }
-      }));
-      D("Canvas synced — courses", courses.length, "| assignments", assignments.length, "| graded courses", courses.filter(c => c.current_score != null).length);
-      return { lms: "canvas", courses, assignments };
-    }
-  } catch (e) { D("adapter error:", e && e.message); }
-
-  // ── MOODLE (internal AJAX, needs M.cfg.sesskey) ──────────────────────────
-  try {
-    if (window.M && window.M.cfg && window.M.cfg.sesskey) {
-      const sesskey = window.M.cfg.sesskey;
-      const call = async (methodname, args) => {
-        const { data } = await getJSON(`${origin}/lib/ajax/service.php?sesskey=${encodeURIComponent(sesskey)}&info=${methodname}`,
-          { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify([{ index: 0, methodname, args }]) });
-        if (Array.isArray(data) && data[0] && !data[0].error) return data[0].data;
-        throw new Error("moodle " + methodname);
-      };
-      const cres = await call("core_course_get_enrolled_courses_by_timeline_classification",
-        { classification: "all", limit: 0, offset: 0, sort: "fullname" });
-      const mc = (cres && cres.courses) || [];
-      const gradeBy = {};
-      try { (((await call("gradereport_overview_get_course_grades", {})) || {}).grades || [])
-        .forEach(x => { gradeBy[x.courseid] = parseFloat(String(x.grade).replace(/[^\d.]/g, "")) || null; }); } catch {}
-      const courses = mc.map(c => ({ id: String(c.id), name: c.fullname || "", course_code: c.shortname || "",
-        current_score: gradeBy[c.id] ?? null, final_score: null }));
-      const assignments = [];
-      await Promise.all(courses.map(async (c) => {
-        try {
-          const ar = await call("mod_assign_get_assignments", { courseids: [Number(c.id)] });
-          for (const a of ((ar && ar.courses && ar.courses[0] && ar.courses[0].assignments) || [])) {
-            assignments.push({ course_ref: c.id, id: String(a.id), title: a.name || "Assignment",
-              due_at: a.duedate ? new Date(a.duedate * 1000).toISOString() : null,
-              points_possible: a.grade > 0 ? a.grade : null, score: null, submitted_at: null, missing: false });
-          }
-        } catch { /* skip */ }
-      }));
-      return { lms: "moodle", courses, assignments };
-    }
-  } catch (e) { D("adapter error:", e && e.message); }
-
-  // ── BRIGHTSPACE / D2L (Valence via session + XSRF token) ─────────────────
-  try {
-    if (window.D2L || localStorage.getItem("XSRF.Token")) {
-      const xsrf = localStorage.getItem("XSRF.Token") || "";
-      const dget = async (path) => (await getJSON(origin + path,
-        { credentials: "include", headers: { "X-Csrf-Token": xsrf } })).data;
-
-      // Tenants run different API versions — discover them, fall back to known-good.
-      let lpV = "1.30", leV = "1.50";
-      try {
-        const vers = await dget("/d2l/api/versions/");
-        const pick = (code) => (vers.find(v => v.ProductCode === code) || {}).LatestVersion;
-        lpV = pick("lp") || lpV; leV = pick("le") || leV;
-      } catch {}
-
-      const courses = [];
-      let bookmark = "";
-      for (let i = 0; i < 20; i++) {
-        const ps = await dget(`/d2l/api/lp/${lpV}/enrollments/myenrollments/?orgUnitTypeId=3&isActive=true${bookmark ? `&bookmark=${encodeURIComponent(bookmark)}` : ""}`);
-        for (const it of (ps.Items || [])) { const o = it.OrgUnit || {}; courses.push({ id: String(o.Id), name: o.Name || "", course_code: o.Code || "", current_score: null, final_score: null }); }
-        if (ps.PagingInfo && ps.PagingInfo.HasMoreItems) bookmark = ps.PagingInfo.Bookmark; else break;
-      }
-      const assignments = [];
-      await Promise.all(courses.map(async (c) => {
-        const courseAssigns = [];
-        // Assignment folders (Dropbox)
-        try {
-          for (const f of (await dget(`/d2l/api/le/${leV}/${c.id}/dropbox/folders/`) || []))
-            courseAssigns.push({ course_ref: c.id, id: String(f.Id), title: f.Name || "Assignment", due_at: f.DueDate || null, points_possible: null, score: null, submitted_at: null, missing: false });
-        } catch {}
-        // Grades: per-item values give us assignment scores AND a computed course %
-        try {
-          const items = (await dget(`/d2l/api/le/${leV}/${c.id}/grades/values/myGradeValues/`)) || [];
-          let num = 0, den = 0; const scoreByName = {};
-          for (const it of items) {
-            if (it.PointsNumerator != null && it.PointsDenominator) {
-              num += it.PointsNumerator; den += it.PointsDenominator;
-              scoreByName[(it.GradeObjectName || "").toLowerCase()] = { score: it.PointsNumerator, max: it.PointsDenominator };
-            }
-          }
-          for (const a of courseAssigns) {
-            const m = scoreByName[(a.title || "").toLowerCase()];
-            if (m) { a.score = m.score; if (a.points_possible == null) a.points_possible = m.max; }
-          }
-          if (den > 0) c.current_score = Math.round((num / den) * 1000) / 10;
-        } catch {}
-        // Released final grade overrides the computed one when present
-        try {
-          const gv = await dget(`/d2l/api/le/${leV}/${c.id}/grades/final/values/myGradeValue/`);
-          if (gv && gv.PointsNumerator != null && gv.PointsDenominator)
-            c.current_score = Math.round((gv.PointsNumerator / gv.PointsDenominator) * 1000) / 10;
-        } catch {}
-        assignments.push(...courseAssigns);
-      }));
-      D("D2L synced — versions", lpV, leV, "| courses", courses.length, "| assignments", assignments.length, "| graded courses", courses.filter(c => c.current_score != null).length);
-      return { lms: "d2l", courses, assignments };
-    }
-  } catch (e) { D("adapter error:", e && e.message); }
-
-  D("no supported LMS API detected → falling back to scrape");
-  return { lms: null };  // Blackboard / unknown → caller falls back to scraping
-}
-
-// Injected into the page via scripting API — runs in page context
-function extractPageContent() {
-  function deepText(root) {
-    let out = "";
-    const skip = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "SVG"]);
-    function walk(node) {
-      if (!node) return;
-      if (node.nodeType === Node.TEXT_NODE) {
-        const t = node.textContent.replace(/\s+/g, " ").trim();
-        if (t) out += t + " ";
-        return;
-      }
-      if (node.nodeType !== Node.ELEMENT_NODE) return;
-      if (skip.has(node.tagName)) return;
-      if (node.shadowRoot) node.shadowRoot.childNodes.forEach(walk);
-      if (node.tagName === "IFRAME") {
-        try { const doc = node.contentDocument; if (doc?.body) walk(doc.body); } catch {}
-        return;
-      }
-      node.childNodes.forEach(walk);
-    }
-    walk(root);
-    return out;
-  }
-
-  const text = deepText(document.body).replace(/\s{3,}/g, "\n").trim().slice(0, 10000);
-
-  const tables = [];
-  function collectTables(root) {
-    root.querySelectorAll?.("table").forEach(t => {
-      const rows = [];
-      t.querySelectorAll("tr").forEach(row => {
-        const cells = [...row.querySelectorAll("th,td")].map(c => c.innerText.trim());
-        if (cells.some(c => c)) rows.push(cells.join(" | "));
-      });
-      if (rows.length > 1) tables.push(rows.join("\n"));
-    });
-    root.querySelectorAll?.("*").forEach(el => { if (el.shadowRoot) collectTables(el.shadowRoot); });
-  }
-  collectTables(document);
-
-  const courseIds = [];
-  function addId(id) { if (id && !courseIds.includes(id)) courseIds.push(id); }
-  function collectIds(root) {
-    root.querySelectorAll?.("a[href]").forEach(a => {
-      // D2L course links appear as ?ou=123, /d2l/home/123, or /d2l/le/.../123/
-      const patterns = [/[?&]ou=(\d+)/, /\/d2l\/home\/(\d+)/, /\/d2l\/le\/[^/]+\/(\d+)/];
-      for (const p of patterns) { const m = a.href.match(p); if (m) addId(m[1]); }
-    });
-    root.querySelectorAll?.("*").forEach(el => { if (el.shadowRoot) collectIds(el.shadowRoot); });
-  }
-  collectIds(document);
-
-  // Harvest links (text + href) so the background worker can DISCOVER navigation
-  // (courses → assignments → grades) on any portal, instead of hardcoded URLs.
-  const links = [];
-  const seenHref = new Set();
-  function collectLinks(root) {
-    root.querySelectorAll?.("a[href]").forEach(a => {
-      const h = a.href;
-      if (!h || seenHref.has(h) || !h.startsWith(window.location.origin)) return;
-      seenHref.add(h);
-      links.push({ t: (a.textContent || "").replace(/\s+/g, " ").trim().slice(0, 80), h });
-    });
-    root.querySelectorAll?.("*").forEach(el => { if (el.shadowRoot) collectLinks(el.shadowRoot); });
-  }
-  collectLinks(document);
-
-  return {
-    text,
-    tables:    tables.slice(0, 5).join("\n\n"),
-    url:       window.location.href,
-    title:     document.title,
-    courseIds,
-    links:     links.slice(0, 200),
-  };
-}
-
+// lmsApiSync() and extractPageContent() are defined in ../shared-sync.js
+// (loaded before this script in popup.html), shared with the background worker.
 // ── Init ──────────────────────────────────────────────────────────────────────
 async function init() {
+  // Stamp the version (pulled from manifest) on every screen so a reload is verifiable.
+  const ver = `v${chrome.runtime.getManifest().version}`;
+  ["app-version-login", "app-version-signup", "app-version-capture"]
+    .forEach(id => { const el = document.getElementById(id); if (el) el.textContent = ver; });
+
   const user = await getSession();
   user ? await loadCaptureScreen(user) : showScreen("screen-login");
 

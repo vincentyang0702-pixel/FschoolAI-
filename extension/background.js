@@ -3,12 +3,15 @@
 // then writes structured results to Supabase.
 // Files never touch the user's disk — Supabase writes happen in memory.
 
+// Shared with the popup: lmsApiSync() + extractPageContent(), injected into pages.
+importScripts("shared-sync.js");
+
 const SUPABASE_URL  = "https://wqgxpouhbwhwpzudrptp.supabase.co";
 const SUPABASE_ANON = "sb_publishable_e-3KMudaL-iXf5GGsuiQaA_VW21ZZFA";
 
-// Write to the isolated `neuroagi` schema — the SAME schema the app reads from
-// (src/supabase.js sets db.schema = 'neuroagi'). Both sides MUST match or synced
-// data is invisible to the app. (not public.* — that namespace is Vincent's.)
+// Use the `public` schema — the app was unified onto public on main (cee437b),
+// where the real users + data live. Both sides MUST match or synced data is
+// invisible to the app.
 const SB_PROFILE = { "Accept-Profile": "public", "Content-Profile": "public" };
 
 // ── Claude extraction via Vercel proxy ────────────────────────────────────────
@@ -233,21 +236,43 @@ async function ingestApiData(userId, data) {
     (await res.json()).forEach(r => { refToId[String(r.canvas_course_id)] = r.id; });
   } catch { /* leave empty */ }
 
-  // 3. Bulk-upsert assignments.
+  // 3. Bulk-upsert assignments. Dedupe by canvas_assignment_id first: PostgREST
+  //    rejects a batch that tries to upsert the same conflict key twice
+  //    ("ON CONFLICT DO UPDATE cannot affect row a second time", 21000).
   if (assignments.length) {
-    await sbUpsert("assignments", assignments.map(a => ({
-      user_id:              userId,
-      course_id:            refToId[String(a.course_ref)] ?? null,
-      canvas_assignment_id: String(a.id),
-      title:                a.title || "Assignment",
-      due_at:               a.due_at || null,
-      points_possible:      a.points_possible ?? null,
-      score:                a.score ?? null,
-      submitted_at:         a.submitted_at || null,
-      missing:              Boolean(a.missing),
-      source:               "extension",
-      updated_at:           now,
-    })), "user_id,canvas_assignment_id");
+    const rowByKey = new Map();
+    for (const a of assignments) {
+      rowByKey.set(String(a.id), {
+        user_id:              userId,
+        course_id:            refToId[String(a.course_ref)] ?? null,
+        canvas_assignment_id: String(a.id),
+        title:                a.title || "Assignment",
+        due_at:               a.due_at || null,
+        points_possible:      a.points_possible ?? null,
+        score:                a.score ?? null,
+        weight:               a.weight ?? null,
+        weight_achieved:      a.weight_achieved ?? null,
+        submitted_at:         a.submitted_at || null,
+        missing:              Boolean(a.missing),
+        source:               "extension",
+        updated_at:           now,
+      });
+    }
+    await sbUpsert("assignments", [...rowByKey.values()], "user_id,canvas_assignment_id");
+  }
+
+  // 4. Prune stale assignments: rows in these same courses from an earlier sync
+  //    (older updated_at) that we did NOT just write — clears leftovers from
+  //    removed/renamed items or older id schemes, preventing duplicate buildup.
+  const syncedCourseIds = [...new Set(Object.values(refToId))];
+  if (syncedCourseIds.length) {
+    try {
+      await fetch(
+        `${SUPABASE_URL}/rest/v1/assignments?user_id=eq.${userId}&source=eq.extension` +
+        `&course_id=in.(${syncedCourseIds.join(",")})&updated_at=lt.${now}`,
+        { method: "DELETE", headers: { apikey: SUPABASE_ANON, Authorization: `Bearer ${SUPABASE_ANON}`, ...SB_PROFILE } }
+      );
+    } catch (e) { console.warn("[NeuroAgi] assignment prune failed:", e.message); }
   }
 
   return {
@@ -270,15 +295,8 @@ ${text}
 
 ${tables ? `Tables found:\n${tables}` : ""}`;
 
-  // DIAGNOSTIC — show exactly what text we captured from the page
-  console.log("[NeuroAgi] Captured text length:", text?.length ?? 0);
-  console.log("[NeuroAgi] Captured text preview:", (text ?? "").slice(0, 600));
-  console.log("[NeuroAgi] Tables captured:", tables?.slice(0, 300));
-  console.log("[NeuroAgi] Course IDs found:", pageContent.courseIds);
-
   // Call Claude to parse
   const raw = await callClaude(EXTRACT_SYSTEM, userContent);
-  console.log("[NeuroAgi] Claude raw response:", raw);
 
   // Parse JSON from Claude response — robustly extract the JSON object
   let parsed;
@@ -567,12 +585,62 @@ function extractPageContentFn() {
   return { text, tables: tables.slice(0, 5).join("\n\n"), url: location.href, title: document.title, links: links.slice(0, 200) };
 }
 
+// ── Auto-sync (content script trigger) ────────────────────────────────────────
+// Same API-first → scrape-fallback flow as the popup button, but driven by the
+// content script as the student browses. Because it runs the SAME lmsApiSync, it
+// writes the SAME real course ids the popup does — so the upsert merges instead of
+// creating duplicate rows. Scrape only runs when no LMS API is available.
+async function autoSync(userId, tabId) {
+  // Try the LMS API in the page's MAIN world (reads window.ENV / M.cfg / D2L token).
+  let api = null;
+  try {
+    const [inj] = await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", func: lmsApiSync });
+    api = inj?.result ?? null;
+  } catch { /* injection blocked → fall through to scrape */ }
+
+  if (api?.lms && (api.courses?.length || api.assignments?.length)) {
+    await ingestApiData(userId, api);
+    const stats = await getCurrentStats(userId);
+    const caps = [{ step: "courses", auto: true, timestamp: Date.now() }];
+    if (api.assignments?.length) caps.push({ step: "assignments", auto: true, timestamp: Date.now() });
+    if ((api.courses || []).some(c => c.current_score != null)) caps.push({ step: "grades", auto: true, timestamp: Date.now() });
+    await chrome.storage.local.set({ neuroagi_captures: caps, neuroagi_stats: stats });
+    return { ok: true, via: api.lms };
+  }
+
+  // Fallback: scrape the current page + Claude (unsupported portals only).
+  try {
+    const [{ result: pageContent }] = await chrome.scripting.executeScript({ target: { tabId }, func: extractPageContent });
+    if (pageContent?.text) {
+      const { neuroagi_captures = [] } = await chrome.storage.local.get("neuroagi_captures");
+      const steps = ["courses", "assignments", "grades"];
+      const stepHint = steps[Math.min(neuroagi_captures.length, steps.length - 1)];
+      const result = await extract(userId, pageContent, stepHint);
+      if (result.ok) {
+        const updated = [...neuroagi_captures, { step: stepHint, auto: true, timestamp: Date.now() }];
+        await chrome.storage.local.set({ neuroagi_captures: updated, neuroagi_stats: result.stats });
+      }
+      return { ok: true, via: "scrape" };
+    }
+  } catch { /* nothing usable on this page */ }
+  return { ok: false };
+}
+
 // ── Message listener ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg.type === "NEUROAGI_EXTRACT") {
     extract(msg.userId, msg.pageContent, msg.stepHint)
       .then(result => sendResponse(result))
       .catch(err   => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  if (msg.type === "NEUROAGI_AUTO_SYNC") {
+    const tabId = _sender.tab?.id;
+    if (!tabId) { sendResponse({ ok: false, error: "no tab" }); return true; }
+    autoSync(msg.userId, tabId)
+      .then(r => sendResponse(r))
+      .catch(err => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 
