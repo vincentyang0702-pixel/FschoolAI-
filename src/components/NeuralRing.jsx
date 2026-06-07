@@ -114,6 +114,7 @@ function renderStreamingHTML(text) {
     .replace(/</g,  "&lt;")
     .replace(/>/g,  "&gt;");
   s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/^(\d+)\.\s+(.+)$/gm, '<p style="margin:2px 0">$1. $2</p>');
   s = s.replace(/\n/g, "<br/>");
   return s;
 }
@@ -126,6 +127,8 @@ function renderMessageHTML(text) {
     .replace(/>/g,  "&gt;");
   // Bold
   s = s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  // Numbered list items
+  s = s.replace(/^(\d+)\.\s+(.+)$/gm, '<p style="margin:3px 0;padding-left:2px">$1. $2</p>');
   // Bullet items
   s = s.replace(/^[-•] (.+)$/gm, "<li>$1</li>");
   // Wrap runs of <li> in <ul>
@@ -270,6 +273,14 @@ CRITICAL — quiz content rules:
 - If no course is specified, quiz on the course with the nearest upcoming deadline.
 - If you have no course content in context at all, do NOT generate a quiz. Instead reply: "I need your Canvas synced to quiz you on real material — head to the Canvas page to connect."
 
+STRESS SUPPORT: If the student says they're stressed, overwhelmed, or anxious: respond calmly and warmly FIRST (1-2 sentences of genuine acknowledgment, no toxic positivity), THEN offer ONE small concrete next step based on their actual workload — the single easiest or most urgent item, framed as "just this one thing for now". Never dump their full list when they're stressed. Keep it under 4 sentences. If they express serious distress beyond schoolwork, gently suggest they talk to someone they trust or their campus support services.
+
+PLAN REQUESTS: When the student asks what to do / to plan their day / what's next, respond with a SHORT ranked list in this exact format (max 3 items):
+1. **[item]** — [one short reason]
+2. **[item]** — [one short reason]
+3. **[item]** — [one short reason]
+Rank by: overdue first, then nearest deadline, then highest points_possible. End with: "Start with #1?"
+
 RESPONSE STYLE — CRITICAL:
 - Keep responses SHORT. 2–4 sentences for most answers. Max 6 sentences unless the student explicitly asks for detail.
 - One thing at a time. If multiple assignments are urgent, name the TOP ONE only, then ask if they want the rest.
@@ -334,11 +345,11 @@ function sanitizeForTTS(text) {
 
 // Returns { duration: seconds, play: fn }
 // Caller decodes audio first, gets duration, then starts typewriter, then plays.
-async function fetchAndDecodeAudio(text) {
+async function fetchAndDecodeAudio(text, voiceId) {
   const res = await fetch("/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: sanitizeForTTS(text) }),
+    body: JSON.stringify({ text: sanitizeForTTS(text), ...(voiceId ? { voiceId } : {}) }),
   });
   if (!res.ok) throw new Error(`TTS ${res.status}`);
   const { audio } = await res.json();
@@ -470,6 +481,7 @@ function buildSmartChips(assignments, courses, userData) {
     : { label: "Plan my day",          message: "Help me plan my study schedule for today based on my assignments and deadlines." }
   );
 
+  chips.push({ label: "I'm stressed",   message: "I'm feeling stressed about my workload." });
   chips.push({ label: "How's my GPA?",  message: "What's my current GPA and grade breakdown?" });
   chips.push({ label: "Open toolkit",   message: "Open toolkit" });
 
@@ -1166,7 +1178,7 @@ export default function NeuralRing() {
     try {
       setSpeaking(true);
       // Decode audio first so we have the real duration
-      const { duration, play } = await fetchAndDecodeAudio(plain);
+      const { duration, play } = await fetchAndDecodeAudio(plain, userData?.preferred_voice_id || null);
       // Now start both simultaneously — typewriter matches actual audio length
       await Promise.all([
         play((src) => { audioSourceRef.current = src; }).finally(() => {

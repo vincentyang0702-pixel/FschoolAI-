@@ -35,6 +35,11 @@ function fmtEventDate(iso) {
   return d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
+function fmtVoiceLabel(labels) {
+  const parts = [labels?.accent, labels?.gender, labels?.age].filter(Boolean);
+  return parts.slice(0, 2).join(" · ");
+}
+
 export default function Identity() {
   const { userData, courses, assignments, canvasToken, updateUserField, tokenSummary } = useApp();
 
@@ -42,6 +47,51 @@ export default function Identity() {
   const currentName = userData?.name || localStorage.getItem("fschool_name") || "";
   const [editingName, setEditingName] = useState(false);
   const [nameInput,   setNameInput]   = useState(currentName);
+
+  // Voice picker state
+  const [voices,      setVoices]      = useState([]);
+  const [voiceLoad,   setVoiceLoad]   = useState(false);
+  const [voiceErr,    setVoiceErr]    = useState(false);
+  const [selectedVoice, setSelectedVoice] = useState(userData?.preferred_voice_id ?? null);
+  const [voiceSaving,  setVoiceSaving]  = useState(false);
+  const [voiceSaved,   setVoiceSaved]   = useState(false);
+  const audioRef = useState(() => typeof Audio !== "undefined" ? new Audio() : null)[0];
+
+  // Sync selectedVoice from userData once loaded
+  const [voiceInitDone, setVoiceInitDone] = useState(false);
+  if (!voiceInitDone && userData?.preferred_voice_id) {
+    setSelectedVoice(userData.preferred_voice_id);
+    setVoiceInitDone(true);
+  }
+
+  useEffect(() => {
+    if (voices.length > 0 || voiceLoad) return;
+    setVoiceLoad(true);
+    fetch("/api/tts?action=voices")
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(data => setVoices(data.slice(0, 8)))
+      .catch(() => setVoiceErr(true))
+      .finally(() => setVoiceLoad(false));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function pickVoice(voiceId) {
+    if (voiceSaving) return;
+    setSelectedVoice(voiceId);
+    setVoiceSaving(true);
+    try {
+      await updateUserField("preferred_voice_id", voiceId);
+      setVoiceSaved(true);
+      setTimeout(() => setVoiceSaved(false), 2000);
+    } catch { /* non-fatal */ }
+    setVoiceSaving(false);
+  }
+
+  function previewVoice(previewUrl) {
+    if (!audioRef || !previewUrl) return;
+    audioRef.pause();
+    audioRef.src = previewUrl;
+    audioRef.play().catch(() => {});
+  }
 
   const commitName = useCallback(async () => {
     setEditingName(false);
@@ -189,6 +239,61 @@ export default function Identity() {
             </div>
           );
         })}
+      </div>
+
+      {/* Tutor voice picker */}
+      <div style={{ marginBottom: "32px" }}>
+        <p style={{ fontSize: "11px", color: "var(--text-dim)", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "14px" }}>
+          Tutor voice
+          {voiceSaved && <span style={{ color: "#C49A3C", marginLeft: "10px", letterSpacing: "0.5px", textTransform: "none", fontSize: "11px" }}>✓ Saved</span>}
+        </p>
+        {voiceLoad && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+            {[1,2,3].map(i => <div key={i} style={{ height: "44px", background: "rgba(255,255,255,0.04)", borderRadius: "10px", animation: "nrMsgIn .4s ease both" }} />)}
+          </div>
+        )}
+        {voiceErr && (
+          <p style={{ color: "var(--text-dim)", fontSize: "13px" }}>Couldn't load voices — try again later.</p>
+        )}
+        {!voiceLoad && !voiceErr && voices.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+            {voices.map(v => {
+              const isSelected = selectedVoice === v.voice_id;
+              return (
+                <div
+                  key={v.voice_id}
+                  onClick={() => pickVoice(v.voice_id)}
+                  style={{
+                    display: "flex", alignItems: "center", gap: "12px",
+                    padding: "10px 14px",
+                    borderRadius: "10px",
+                    background: isSelected ? "rgba(196,154,60,0.07)" : "rgba(255,255,255,0.02)",
+                    border: `1px solid ${isSelected ? "rgba(196,154,60,0.3)" : "rgba(255,255,255,0.06)"}`,
+                    cursor: "pointer",
+                    transition: "all 0.15s",
+                  }}
+                >
+                  <div style={{ width: 8, height: 8, borderRadius: "50%", flexShrink: 0, background: isSelected ? "#C49A3C" : "rgba(255,255,255,0.15)", transition: "background 0.15s" }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p style={{ color: isSelected ? "#C49A3C" : "var(--text-primary)", fontSize: "13px", fontWeight: isSelected ? "600" : "400" }}>{v.name}</p>
+                    {fmtVoiceLabel(v.labels) && (
+                      <p style={{ color: "var(--text-dim)", fontSize: "11px", marginTop: "1px" }}>{fmtVoiceLabel(v.labels)}</p>
+                    )}
+                  </div>
+                  {v.preview_url && (
+                    <button
+                      onClick={e => { e.stopPropagation(); previewVoice(v.preview_url); }}
+                      style={{ background: "none", border: "none", color: "rgba(255,255,255,0.3)", cursor: "pointer", padding: "4px 8px", borderRadius: "6px", fontSize: "13px", fontFamily: "inherit", flexShrink: 0, transition: "color 0.15s" }}
+                      onMouseEnter={e => e.currentTarget.style.color = "rgba(255,255,255,0.7)"}
+                      onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.3)"}
+                      title="Preview voice"
+                    >▶</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Token activity */}

@@ -35,9 +35,9 @@ const SORTS = ["Tokens", "GPA", "Streak", "Study Time"]; // Tokens first = defau
 
 const SORT_COL = { GPA: "gpa", Streak: "streak", "Study Time": "study_time", Tokens: "points" };
 const SORT_FMT = {
-  gpa:        v => v?.toFixed(2) ?? "—",
-  streak:     v => v != null ? `${v}d` : "—",
-  study_time: v => v != null ? `${v}h` : "—",
+  gpa:        v => v != null ? Number(v).toFixed(2) : "—",
+  streak:     v => v != null ? `${v} day${v !== 1 ? "s" : ""}` : "—",
+  study_time: v => v != null ? `${v} hrs` : "—",
   points:     v => v != null ? `${v} pts` : "—",
 };
 
@@ -70,6 +70,26 @@ const TAB_SUBLABEL = {
   Global:     r => r.school ?? null,
 };
 
+// SVG progress ring around avatar (Tokens tab only)
+function TierRing({ points, tier, size }) {
+  const { pct } = tierProgress(points ?? 0, tier ?? "Basic");
+  const r    = (size - 5) / 2;
+  const circ = 2 * Math.PI * r;
+  const dash = pct * circ;
+  return (
+    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}
+      style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+      <circle cx={size/2} cy={size/2} r={r} fill="none"
+        stroke="rgba(196,154,60,0.12)" strokeWidth="2.5" />
+      <circle cx={size/2} cy={size/2} r={r} fill="none"
+        stroke="#C49A3C" strokeWidth="2.5"
+        strokeDasharray={`${dash} ${circ}`} strokeLinecap="round"
+        transform={`rotate(-90 ${size/2} ${size/2})`}
+        style={{ transition: "stroke-dasharray 0.6s ease-out" }} />
+    </svg>
+  );
+}
+
 const DEFAULT_LOCATION = {
   school:    "University of Toronto",
   city:      "Toronto",
@@ -99,53 +119,7 @@ function avatarHue(name = "") {
   return AVATAR_HUE[n % AVATAR_HUE.length];
 }
 
-// ── 35-student placeholder roster ────────────────────────────────────────────
-const ALL_PLACEHOLDER_STUDENTS = [
-  // University of Toronto (10)
-  { id:"p01", name:"Aisha Kamara",      school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.94, streak:31, study_time:312 },
-  { id:"p02", name:"Mei Lin",           school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.90, streak:8,  study_time:385 },
-  { id:"p03", name:"Fatima Al-Rashid",  school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.88, streak:22, study_time:290 },
-  { id:"p04", name:"David Chen",        school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.87, streak:45, study_time:180 },
-  { id:"p05", name:"Raj Patel",         school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.83, streak:28, study_time:220 },
-  { id:"p06", name:"Sarah MacLeod",     school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.79, streak:12, study_time:340 },
-  { id:"p07", name:"Omar Hassan",       school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.76, streak:38, study_time:165 },
-  { id:"p08", name:"Emma Walsh",        school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.71, streak:52, study_time:195 },
-  { id:"p09", name:"Tyler Brooks",      school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.65, streak:19, study_time:258 },
-  { id:"p10", name:"Lucas Silva",       school:"University of Toronto",            city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.62, streak:41, study_time:210 },
-  // Other Toronto universities (4)
-  { id:"p11", name:"Jordan Kim",        school:"York University",                  city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.89, streak:27, study_time:305 },
-  { id:"p12", name:"Priya Singh",       school:"Toronto Metropolitan University",  city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.75, streak:35, study_time:240 },
-  { id:"p13", name:"Marcus Thompson",   school:"OCAD University",                  city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.60, streak:18, study_time:175 },
-  { id:"p14", name:"Chloe Dubois",      school:"Humber College",                   city:"Toronto",       country:"Canada",    continent:"North America", gpa:3.55, streak:43, study_time:155 },
-  // Other Canadian cities (5)
-  { id:"p15", name:"Sophie Tremblay",   school:"McGill University",                city:"Montreal",      country:"Canada",    continent:"North America", gpa:3.92, streak:15, study_time:350 },
-  { id:"p16", name:"Jake Wilson",       school:"University of British Columbia",   city:"Vancouver",     country:"Canada",    continent:"North America", gpa:3.85, streak:48, study_time:200 },
-  { id:"p17", name:"Zara Ahmed",        school:"University of Alberta",            city:"Edmonton",      country:"Canada",    continent:"North America", gpa:3.78, streak:33, study_time:265 },
-  { id:"p18", name:"Nathan LeBlanc",    school:"Dalhousie University",             city:"Halifax",       country:"Canada",    continent:"North America", gpa:3.68, streak:26, study_time:195 },
-  { id:"p19", name:"Amelia Park",       school:"University of Waterloo",           city:"Waterloo",      country:"Canada",    continent:"North America", gpa:3.96, streak:9,  study_time:420 },
-  // USA & Mexico (5)
-  { id:"p20", name:"Isabella Rodriguez",school:"MIT",                              city:"Cambridge",     country:"USA",       continent:"North America", gpa:3.98, streak:14, study_time:460 },
-  { id:"p21", name:"Ethan Johnson",     school:"Harvard University",               city:"Boston",        country:"USA",       continent:"North America", gpa:3.93, streak:55, study_time:210 },
-  { id:"p22", name:"Alex Murphy",       school:"Stanford University",              city:"Palo Alto",     country:"USA",       continent:"North America", gpa:3.86, streak:42, study_time:285 },
-  { id:"p23", name:"Naomi Williams",    school:"Johns Hopkins University",         city:"Baltimore",     country:"USA",       continent:"North America", gpa:3.80, streak:21, study_time:330 },
-  { id:"p24", name:"Gabriela Flores",   school:"UNAM",                             city:"Mexico City",   country:"Mexico",    continent:"North America", gpa:3.72, streak:29, study_time:245 },
-  // Europe (4)
-  { id:"p25", name:"Felix Müller",      school:"TU Munich",                        city:"Munich",        country:"Germany",   continent:"Europe",        gpa:3.95, streak:37, study_time:315 },
-  { id:"p26", name:"Chiara Romano",     school:"Politecnico di Milano",            city:"Milan",         country:"Italy",     continent:"Europe",        gpa:3.82, streak:50, study_time:270 },
-  { id:"p27", name:"Luca Moretti",      school:"Università di Bologna",            city:"Bologna",       country:"Italy",     continent:"Europe",        gpa:3.88, streak:24, study_time:288 },
-  { id:"p28", name:"Sofia Andersson",   school:"KTH Royal Institute",              city:"Stockholm",     country:"Sweden",    continent:"Europe",        gpa:3.71, streak:12, study_time:198 },
-  // Asia (4)
-  { id:"p29", name:"Yuki Tanaka",       school:"University of Tokyo",              city:"Tokyo",         country:"Japan",     continent:"Asia",          gpa:3.97, streak:40, study_time:400 },
-  { id:"p30", name:"Li Wei",            school:"Peking University",                city:"Beijing",       country:"China",     continent:"Asia",          gpa:3.91, streak:17, study_time:370 },
-  { id:"p31", name:"Arjun Sharma",      school:"National University of Singapore", city:"Singapore",     country:"Singapore", continent:"Asia",          gpa:3.84, streak:62, study_time:230 },
-  { id:"p32", name:"Priya Nair",        school:"IIT Bombay",                       city:"Mumbai",        country:"India",     continent:"Asia",          gpa:3.82, streak:19, study_time:256 },
-  // Oceania (1)
-  { id:"p33", name:"Marcus Webb",       school:"University of Melbourne",          city:"Melbourne",     country:"Australia", continent:"Oceania",        gpa:3.76, streak:15, study_time:224 },
-  // Africa (1)
-  { id:"p34", name:"Amara Osei",        school:"University of Ghana",              city:"Accra",         country:"Ghana",     continent:"Africa",        gpa:3.65, streak:9,  study_time:172 },
-  // South America (1)
-  { id:"p35", name:"Diego Fernández",   school:"Universidad de Buenos Aires",      city:"Buenos Aires",  country:"Argentina", continent:"South America", gpa:3.78, streak:32, study_time:295 },
-];
+// Placeholder data removed — all tabs now use real Supabase leaderboard data
 
 export default function Leaderboard() {
   const { userId, userData, tokenSummary } = useApp();
@@ -157,26 +131,35 @@ export default function Leaderboard() {
 
   useEffect(() => { const t = setTimeout(() => setMounted(true), 30); return () => clearTimeout(t); }, []);
 
-  // Fetch real leaderboard data joined with user info
+  // Fetch real leaderboard data — all tabs use this, no placeholders
   useEffect(() => {
     async function fetchLb() {
       setLbLoading(true);
       try {
         const { data } = await supabase
           .from("leaderboard")
-          .select("user_id, points, tier, users ( name, school, city, country, continent, leaderboard_opt_in )")
+          .select(`
+            user_id, points, tier,
+            users ( name, school, city, country, continent,
+                    leaderboard_opt_in, gpa, streak, study_time )
+          `)
           .order("points", { ascending: false })
           .limit(50);
         if (data?.length) {
           setRealRows(data.map(r => ({
-            id:        r.user_id,
-            name:      r.users?.leaderboard_opt_in === false ? "Anonymous Scholar" : (r.users?.name ?? "Anonymous"),
-            school:    r.users?.school    ?? "",
-            city:      r.users?.city      ?? "",
-            country:   r.users?.country   ?? "",
-            continent: r.users?.continent ?? "",
-            points:    r.points ?? 0,
-            tier:      r.tier   ?? "Basic",
+            id:         r.user_id,
+            name:       r.users?.leaderboard_opt_in === false
+                          ? "Anonymous Scholar"
+                          : (r.users?.name ?? "Anonymous"),
+            school:     r.users?.school     ?? "",
+            city:       r.users?.city       ?? "",
+            country:    r.users?.country    ?? "",
+            continent:  r.users?.continent  ?? "",
+            points:     r.points            ?? 0,
+            tier:       r.tier              ?? "Basic",
+            gpa:        r.users?.gpa        ?? null,
+            streak:     r.users?.streak     ?? null,
+            study_time: r.users?.study_time ?? null,
           })));
         }
       } catch { /* table may not exist yet */ }
@@ -196,32 +179,36 @@ export default function Leaderboard() {
     continent: userData?.continent ?? DEFAULT_LOCATION.continent,
   };
 
-  // Tokens tab: use real leaderboard rows filtered by tab
-  const filterReal = filterCol
-    ? realRows.filter(r => r[filterCol] === loc[filterCol])
-    : realRows;
-
-  // Legacy tabs (GPA/Streak/Study Time): keep placeholder + meEntry
+  // Merge current user into realRows if not already present
   const meEntry = userId ? {
     id:         userId,
     name:       userData?.name       ?? "You",
-    school:     loc.school,
-    city:       loc.city,
-    country:    loc.country,
-    continent:  loc.continent,
-    gpa:        userData?.gpa        ?? null,
-    streak:     userData?.streak     ?? 0,
-    study_time: userData?.study_time ?? 0,
+    school:     userData?.school     ?? loc.school,
+    city:       userData?.city       ?? loc.city,
+    country:    userData?.country    ?? loc.country,
+    continent:  userData?.continent  ?? loc.continent,
     points:     tokenSummary?.points ?? 0,
     tier:       tokenSummary?.tier   ?? "Basic",
+    gpa:        userData?.gpa        ?? null,
+    streak:     userData?.streak     ?? null,
+    study_time: userData?.study_time ?? null,
   } : null;
 
-  const legacyBase  = filterCol ? ALL_PLACEHOLDER_STUDENTS.filter(r => r[filterCol] === loc[filterCol]) : ALL_PLACEHOLDER_STUDENTS;
-  const legacyCombined = meEntry ? [...legacyBase, meEntry] : legacyBase;
-  const legacyRows  = [...legacyCombined].sort((a, b) => (b[sortCol] ?? 0) - (a[sortCol] ?? 0));
+  const baseRows = realRows.some(r => r.id === userId)
+    ? realRows
+    : meEntry ? [...realRows, meEntry] : realRows;
 
-  const rows   = sort === "Tokens" ? filterReal : legacyRows;
-  const maxVal = (rows[0]?.[sortCol] ?? rows[0]?.points ?? 1) || 1;
+  // Filter by geographic tab
+  const filteredRows = filterCol && loc[filterCol]
+    ? baseRows.filter(r => r[filterCol] && r[filterCol] === loc[filterCol])
+    : baseRows;
+
+  // Sort by current tab, exclude null values for GPA tab
+  const rows = [...filteredRows]
+    .filter(r => sort === "GPA" ? r.gpa != null : true)
+    .sort((a, b) => ((b[sortCol] ?? -1) - (a[sortCol] ?? -1)));
+
+  const maxVal = Math.max(rows[0]?.[sortCol] ?? 1, 1);
 
   const scopeLabel = tabName === "Global" ? "Global" : `${tabName}: ${loc[TAB_FILTER_COL[tabName]] ?? "—"}`;
 
@@ -327,11 +314,15 @@ export default function Leaderboard() {
         </div>
       )}
 
-      {/* Empty state for Tokens tab when not enough real data */}
-      {sort === "Tokens" && !lbLoading && rows.length < 3 && (
+      {/* Empty state — not enough real data for this tab */}
+      {!lbLoading && rows.length < 3 && (
         <div style={{ textAlign: "center", padding: "48px 24px", background: "rgba(255,255,255,0.02)", borderRadius: "var(--radius-card)", border: "1px solid rgba(255,255,255,0.05)", marginBottom: "16px" }}>
-          <p style={{ color: "rgba(196,154,60,0.6)", fontSize: "14px", fontWeight: "600", marginBottom: "6px" }}>The leaderboard is warming up</p>
-          <p style={{ color: "var(--text-dim)", fontSize: "13px" }}>Earn tokens to claim an early spot.</p>
+          <p style={{ color: "rgba(196,154,60,0.6)", fontSize: "14px", fontWeight: "600", marginBottom: "6px" }}>
+            {sort === "GPA" ? "Not enough GPA data yet" : sort === "Tokens" ? "The leaderboard is warming up" : "Not enough data yet"}
+          </p>
+          <p style={{ color: "var(--text-dim)", fontSize: "13px" }}>
+            {sort === "GPA" ? "Sync Canvas to join this board" : "Earn tokens to claim an early spot."}
+          </p>
         </div>
       )}
 
@@ -406,13 +397,15 @@ export default function Leaderboard() {
                   </span>
                 )}
 
-                {/* Avatar with initial */}
+                {/* Avatar with initial + optional tier ring */}
+                <div style={{ position: "relative", flexShrink: 0, width: isTop3 ? 36 : 30, height: isTop3 ? 36 : 30 }}>
+                  {sort === "Tokens" && <TierRing points={row.points} tier={row.tier} size={isTop3 ? 36 : 30} />}
                 <div style={{
                   width:        isTop3 ? 36 : 30,
                   height:       isTop3 ? 36 : 30,
                   borderRadius: "50%",
                   background:   `radial-gradient(circle at 35% 35%, ${hue}, rgba(0,0,0,0.25))`,
-                  border:       `1px solid ${hue}`,
+                  border:       sort === "Tokens" ? "none" : `1px solid ${hue}`,
                   display:      "flex",
                   alignItems:   "center",
                   justifyContent: "center",
@@ -426,6 +419,7 @@ export default function Leaderboard() {
                     {initial}
                   </span>
                 </div>
+                </div>{/* end avatar wrapper */}
 
                 {/* Name + sublabel */}
                 <div style={{ flex: 1, minWidth: 0 }}>
