@@ -6,13 +6,14 @@
 const SUPABASE_URL  = "https://wqgxpouhbwhwpzudrptp.supabase.co";
 const SUPABASE_ANON = "sb_publishable_e-3KMudaL-iXf5GGsuiQaA_VW21ZZFA";
 
-// Use public schema so extension data is visible in the main app.
-const SB_PROFILE = { "Accept-Profile": "public", "Content-Profile": "public" };
+// All app tables live in the isolated `neuroagi` schema (not public.* —
+// that namespace is Vincent's). PostgREST routes there via these headers.
+const SB_PROFILE = { "Accept-Profile": "neuroagi", "Content-Profile": "neuroagi" };
 
 // ── Claude extraction via Vercel proxy ────────────────────────────────────────
 // We route through our own API to keep ANTHROPIC_API_KEY server-side.
 async function callClaude(system, userContent) {
-  const res = await fetch("https://neuro-agi-topaz.vercel.app/api/claude", {
+  const res = await fetch("https://neuro-agi.vercel.app/api/claude", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
