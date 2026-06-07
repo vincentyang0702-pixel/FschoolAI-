@@ -9,10 +9,10 @@ importScripts("shared-sync.js");
 const SUPABASE_URL  = "https://wqgxpouhbwhwpzudrptp.supabase.co";
 const SUPABASE_ANON = "sb_publishable_e-3KMudaL-iXf5GGsuiQaA_VW21ZZFA";
 
-// Write to the isolated `neuroagi` schema — the SAME schema the app reads from
-// (src/supabase.js sets db.schema = 'neuroagi'). Both sides MUST match or synced
-// data is invisible to the app. (not public.* — that namespace is Vincent's.)
-const SB_PROFILE = { "Accept-Profile": "neuroagi", "Content-Profile": "neuroagi" };
+// Use the `public` schema — the app was unified onto public on main (cee437b),
+// where the real users + data live. Both sides MUST match or synced data is
+// invisible to the app.
+const SB_PROFILE = { "Accept-Profile": "public", "Content-Profile": "public" };
 
 // ── Claude extraction via Vercel proxy ────────────────────────────────────────
 // We route through our own API to keep ANTHROPIC_API_KEY server-side.
