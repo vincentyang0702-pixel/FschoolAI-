@@ -1,6 +1,6 @@
 // Identity.jsx — Student profile with live Supabase data, GradeGraph, and ShareCard.
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 
 // Deterministic fallback grade (72–97) derived from the course code string.
 // Same course always produces the same number so it doesn't flicker on re-render.
