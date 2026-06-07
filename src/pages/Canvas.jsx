@@ -53,6 +53,35 @@ function SyncBadge({ status }) {
   );
 }
 
+/* ─── RefreshButton ───────────────────────────────────────── */
+
+function RefreshButton({ syncStatus, onClick, style }) {
+  const busy = syncStatus === "syncing";
+  return (
+    <button
+      onClick={onClick}
+      disabled={busy}
+      style={{
+        background: "none",
+        border: "1px solid rgba(255,255,255,0.1)",
+        borderRadius: "20px",
+        padding: "4px 12px",
+        color: busy ? "var(--text-dim)" : "var(--text-secondary)",
+        fontSize: "11px",
+        fontWeight: "500",
+        cursor: busy ? "not-allowed" : "pointer",
+        fontFamily: "inherit",
+        transition: "border-color 0.15s, color 0.15s",
+        ...style,
+      }}
+      onMouseEnter={e => { if (!busy) e.currentTarget.style.borderColor = "rgba(255,255,255,0.25)"; }}
+      onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
+    >
+      {busy ? "Syncing…" : "↻ Refresh"}
+    </button>
+  );
+}
+
 /* ─── ConnectCanvas ───────────────────────────────────────── */
 
 function ConnectCanvas({ onConnect }) {
@@ -156,9 +185,18 @@ function AnnouncementsSection({ announcements }) {
 
 const TABS = ["Assignments", "Modules", "Grade Weights"];
 
-function CourseCard({ course, assignments, modules, assignmentGroups }) {
+function CourseCard({ course, assignments, modules, assignmentGroups, changes, onSeen }) {
   const [expanded, setExpanded] = useState(false);
   const [tab, setTab]           = useState("Assignments");
+
+  // Expanding the card means the user has seen what changed → dismiss its badge.
+  function toggleExpanded() {
+    setExpanded(e => {
+      const next = !e;
+      if (next && changes && onSeen) onSeen(course.id);
+      return next;
+    });
+  }
 
   const score = course.current_score ?? course.currentScore ?? course.final_score ?? course.finalScore;
   const code  = course.course_code   ?? course.courseCode;
@@ -170,6 +208,14 @@ function CourseCard({ course, assignments, modules, assignmentGroups }) {
   const cid = String(course.id);
   const courseModules = (modules ?? []).find(m => String(m.courseId) === cid)?.modules ?? [];
   const courseGroups  = (assignmentGroups ?? []).find(g => String(g.courseId) === cid)?.groups ?? [];
+
+  // Per-assignment grade weights (public schema: assignments.weight / weight_achieved).
+  // Preferred source for the Grade Weights tab; the group blob is a fallback.
+  const weighted = courseAssignments
+    .filter(a => a.weight != null)
+    .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+  const totalWeight   = weighted.reduce((s, a) => s + (a.weight ?? 0), 0);
+  const totalAchieved = weighted.reduce((s, a) => s + (a.weightAchieved ?? 0), 0);
 
   // sort assignments: missing first, then by due date
   const sorted = [...courseAssignments].sort((a, b) => {
@@ -184,7 +230,7 @@ function CourseCard({ course, assignments, modules, assignmentGroups }) {
     <div style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius-card)", boxShadow: "var(--depth-line)", overflow: "hidden" }}>
 
       {/* ── row ── */}
-      <button onClick={() => setExpanded(e => !e)}
+      <button onClick={toggleExpanded}
         style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center",
           padding: "18px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
 
@@ -211,6 +257,18 @@ function CourseCard({ course, assignments, modules, assignmentGroups }) {
           {missing > 0 && (
             <span style={{ fontSize: "10px", fontWeight: "600", padding: "2px 7px", borderRadius: "12px", background: "rgba(255,59,48,0.12)", color: "rgba(255,100,90,0.85)" }}>
               {missing} missing
+            </span>
+          )}
+          {changes?.newAssignments > 0 && (
+            <span style={{ fontSize: "10px", fontWeight: "600", padding: "2px 7px", borderRadius: "12px", background: "rgba(10,132,255,0.15)", color: "rgba(90,170,255,0.95)" }}>
+              {changes.newAssignments} new
+            </span>
+          )}
+          {(changes?.scoreChanged || changes?.gradedAssignments > 0) && (
+            <span style={{ fontSize: "10px", fontWeight: "600", padding: "2px 7px", borderRadius: "12px", background: "rgba(52,199,89,0.12)", color: "rgba(100,220,130,0.9)" }}>
+              {changes.scoreDelta != null && changes.scoreDelta !== 0
+                ? `${changes.scoreDelta > 0 ? "▲" : "▼"} ${Math.abs(changes.scoreDelta)}%`
+                : "Grade updated"}
             </span>
           )}
           <span style={{ color: "var(--text-dim)", fontSize: "11px" }}>{expanded ? "▲" : "▼"}</span>
@@ -320,7 +378,40 @@ function CourseCard({ course, assignments, modules, assignmentGroups }) {
           {/* ── Grade Weights tab ── */}
           {tab === "Grade Weights" && (
             <div>
-              {courseGroups.length === 0 ? (
+              {weighted.length > 0 ? (
+                /* Per-assignment weighting (public schema). Each row shows the
+                   weight earned vs. the weight the assignment is worth. */
+                <>
+                  {weighted.map((a, i) => {
+                    const earned = a.weightAchieved;
+                    const pct = a.weight > 0 && earned != null ? (earned / a.weight) * 100 : null;
+                    return (
+                      <div key={a.id ?? i}
+                        style={{ padding: "12px 18px", borderBottom: i < weighted.length - 1 ? "1px solid rgba(255,255,255,0.04)" : "none",
+                          display: "flex", justifyContent: "space-between", alignItems: "center", gap: "12px" }}>
+                        <p style={{ color: "var(--text-primary)", fontSize: "13px", fontWeight: "500", minWidth: 0, flex: 1,
+                          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {a.name}
+                        </p>
+                        <div style={{ display: "flex", gap: "12px", alignItems: "center", flexShrink: 0 }}>
+                          <span style={{ fontSize: "13px", fontWeight: "600", color: pct != null ? scoreColor(pct) : "var(--text-dim)" }}>
+                            {earned != null ? Math.round(earned * 100) / 100 : "—"}
+                            <span style={{ color: "var(--text-dim)", fontWeight: "400" }}> / {a.weight}</span>
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  <div style={{ padding: "10px 18px", borderTop: "1px solid var(--color-border)", display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ color: "var(--text-dim)", fontSize: "12px", fontWeight: "600" }}>
+                      Earned {Math.round(totalAchieved * 10) / 10} of {Math.round(totalWeight * 10) / 10}%
+                    </span>
+                    <span style={{ color: "var(--text-primary)", fontSize: "12px", fontWeight: "700" }}>
+                      {totalWeight > 0 ? `${Math.round((totalAchieved / totalWeight) * 1000) / 10}%` : "—"}
+                    </span>
+                  </div>
+                </>
+              ) : courseGroups.length === 0 ? (
                 <p style={{ padding: "16px 18px", color: "var(--text-dim)", fontSize: "13px" }}>No grade weights found.</p>
               ) : (
                 <>
@@ -511,7 +602,8 @@ export default function Canvas() {
     modules, assignmentGroups,
     setModules, setAssignments,
     canvasToken, canvasBaseUrl, syncStatus, saveCanvasCredentials,
-    userId, addManualCourse, forceSync,
+    userId, addManualCourse, refreshFromSupabase,
+    cardChanges, markCardSeen,
     pastCourses,
   } = useApp();
 
@@ -612,9 +704,12 @@ export default function Canvas() {
   if (!canvasToken) {
     return (
       <div>
-        <h1 style={{ fontSize: "26px", fontWeight: "600", color: "var(--text-primary)", marginBottom: "4px", letterSpacing: "-0.3px" }}>
-          Canvas
-        </h1>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "4px" }}>
+          <h1 style={{ fontSize: "26px", fontWeight: "600", color: "var(--text-primary)", letterSpacing: "-0.3px" }}>
+            Canvas
+          </h1>
+          <RefreshButton syncStatus={syncStatus} onClick={refreshFromSupabase} style={{ marginLeft: "auto" }} />
+        </div>
         <p style={{ color: "var(--text-dim)", fontSize: "14px", marginBottom: "4px" }}>Not connected</p>
         <ConnectCanvas onConnect={saveCanvasCredentials} />
         <div style={{ marginTop: "20px", padding: "14px 16px", background: "rgba(255,204,0,0.05)", border: "1px solid rgba(255,204,0,0.12)", borderRadius: "12px" }}>
@@ -635,6 +730,8 @@ export default function Canvas() {
               assignments={assignments}
               modules={modules}
               assignmentGroups={assignmentGroups}
+              changes={cardChanges[String(c.id)]}
+              onSeen={markCardSeen}
             />
           ))}
 
@@ -687,31 +784,7 @@ export default function Canvas() {
           {courses.length > 0 ? `${courses.length} course${courses.length !== 1 ? "s" : ""}` : "Syncing courses…"}
         </p>
         <SyncBadge status={syncStatus} />
-        <button
-          onClick={forceSync}
-          disabled={syncStatus === "syncing"}
-          style={{
-            marginLeft: "auto",
-            background: "none",
-            border: "1px solid rgba(255,255,255,0.1)",
-            borderRadius: "20px",
-            padding: "4px 12px",
-            color: syncStatus === "syncing" ? "var(--text-dim)" : "var(--text-secondary)",
-            fontSize: "11px",
-            fontWeight: "500",
-            cursor: syncStatus === "syncing" ? "not-allowed" : "pointer",
-            fontFamily: "inherit",
-            transition: "border-color 0.15s, color 0.15s",
-          }}
-          onMouseEnter={e => {
-            if (syncStatus !== "syncing") e.currentTarget.style.borderColor = "rgba(255,255,255,0.25)";
-          }}
-          onMouseLeave={e => {
-            e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)";
-          }}
-        >
-          {syncStatus === "syncing" ? "Syncing…" : "↻ Refresh"}
-        </button>
+        <RefreshButton syncStatus={syncStatus} onClick={refreshFromSupabase} style={{ marginLeft: "auto" }} />
       </div>
 
       {syncStatus === "cors-error" && (
@@ -738,6 +811,8 @@ export default function Canvas() {
             assignments={assignments}
             modules={modules}
             assignmentGroups={assignmentGroups}
+            changes={cardChanges[String(c.id)]}
+            onSeen={markCardSeen}
           />
         ))}
 

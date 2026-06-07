@@ -477,6 +477,11 @@ export async function loadCanvasData(userId) {
       description:    a.description,
       dueAt:          a.due_at,
       pointsPossible: a.points_possible,
+      // Per-assignment grade weighting (public schema columns).
+      // weight = % of final grade this assignment is worth.
+      // weightAchieved = portion of that weight the student earned.
+      weight:         a.weight,
+      weightAchieved: a.weight_achieved,
       courseId,
       courseCode:     a.courses?.course_code ?? '',
       courseName:     a.courses?.name        ?? '',

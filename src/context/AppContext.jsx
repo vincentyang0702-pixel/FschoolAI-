@@ -8,6 +8,68 @@ import { getTokenSummary, onTokenAwarded } from "../api/tokens";
 
 const AppContext = createContext(null);
 
+/* ─── Per-course-card change detection ────────────────────────────────
+ * We keep a lightweight snapshot (score + per-assignment score) per course
+ * in localStorage. On a Supabase re-read we diff the fresh data against the
+ * last snapshot to surface "N new assignments" / "grade updated" badges. */
+
+const SNAPSHOT_KEY = uid => `fschool_card_snapshot_${uid}`;
+
+/** Reduce courses + assignments to { [courseId]: { score, assignments:{id:score} } } */
+function buildCardSnapshot(courses, assignments) {
+  const snap = {};
+  for (const c of courses) {
+    const cid = String(c.id);
+    const courseAssignments = (assignments ?? []).filter(a => String(a.courseId) === cid);
+    snap[cid] = {
+      score: c.currentScore ?? c.finalScore ?? null,
+      assignments: Object.fromEntries(
+        courseAssignments.map(a => [String(a.id), a.submission?.score ?? null])
+      ),
+    };
+  }
+  return snap;
+}
+
+/** Diff two snapshots → { [courseId]: { newAssignments, gradedAssignments, scoreChanged, scoreDelta } } */
+function diffCardSnapshots(prev, next) {
+  const changes = {};
+  if (!prev) return changes; // no baseline yet → nothing to flag
+  for (const cid of Object.keys(next)) {
+    const before = prev[cid];
+    const after  = next[cid];
+    if (!before) continue; // brand-new course — don't flag every assignment as "new"
+
+    let newAssignments    = 0;
+    let gradedAssignments = 0;
+    for (const [aid, score] of Object.entries(after.assignments)) {
+      if (!(aid in before.assignments)) newAssignments++;
+      else if (before.assignments[aid] !== score && score != null) gradedAssignments++;
+    }
+    const scoreChanged = before.score !== after.score;
+
+    if (newAssignments || gradedAssignments || scoreChanged) {
+      changes[cid] = {
+        newAssignments,
+        gradedAssignments,
+        scoreChanged,
+        scoreDelta: (after.score != null && before.score != null)
+          ? Math.round((after.score - before.score) * 10) / 10
+          : null,
+      };
+    }
+  }
+  return changes;
+}
+
+function readSnapshot(uid) {
+  try { return JSON.parse(localStorage.getItem(SNAPSHOT_KEY(uid)) || "null"); }
+  catch { return null; }
+}
+function writeSnapshot(uid, snap) {
+  try { localStorage.setItem(SNAPSHOT_KEY(uid), JSON.stringify(snap)); } catch { /* quota */ }
+}
+
 function getOrCreateUserId() {
   let uid = localStorage.getItem("fschool_uid");
   if (!uid) {
@@ -41,6 +103,8 @@ export function AppProvider({ children }) {
   const [studyConfig, setStudyConfig] = useState(null);
   // Token economy
   const [tokenSummary, setTokenSummary] = useState(null);
+  // Per-course-card change badges: { [courseId]: { newAssignments, gradedAssignments, scoreChanged, scoreDelta } }
+  const [cardChanges, setCardChanges] = useState({});
 
   // Helper — apply any result object (from loadCanvasData or syncCanvasData)
   // to the relevant state setters. Only overwrites when the array is non-empty
@@ -97,6 +161,13 @@ export function AppProvider({ children }) {
 
       const cached = await loadCanvasData(userId);
       applyCanvasResult(cached);
+
+      // Establish a baseline snapshot if none exists yet, so the first manual
+      // refresh doesn't flag every existing assignment as "new". We don't show
+      // badges on mount — only on an explicit refresh.
+      if (!readSnapshot(userId)) {
+        writeSnapshot(userId, buildCardSnapshot(cached.courses ?? [], cached.assignments ?? []));
+      }
     }
     init();
   }, [userId]);
@@ -286,6 +357,40 @@ export function AppProvider({ children }) {
     }
   }, [userId, canvasToken, canvasBaseUrl]);
 
+  /** Re-read all Canvas data from Supabase (cheap, no Canvas API hit) and diff
+   *  it against the last snapshot to surface per-course-card change badges.
+   *  This is what the Canvas "Refresh" button calls — it picks up rows written
+   *  by other sources (e.g. the browser extension) since the last load. */
+  const refreshFromSupabase = useCallback(async () => {
+    setSyncStatus("syncing");
+    try {
+      const fresh = await loadCanvasData(userId);
+
+      const prevSnap = readSnapshot(userId);
+      const nextSnap = buildCardSnapshot(fresh.courses ?? [], fresh.assignments ?? []);
+      const changes  = diffCardSnapshots(prevSnap, nextSnap);
+
+      applyCanvasResult(fresh);
+      setCardChanges(changes);
+      writeSnapshot(userId, nextSnap);
+      setSyncStatus("synced");
+    } catch (err) {
+      setSyncStatus("error");
+      console.error("Supabase refresh failed:", err);
+    }
+  }, [userId]);
+
+  /** Dismiss the change badge for one course (e.g. when the user expands it). */
+  const markCardSeen = useCallback((courseId) => {
+    setCardChanges(prev => {
+      const key = String(courseId);
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+  }, []);
+
   /** Upsert one field (field, value) or multiple fields (object) on the users table. */
   const updateUserField = useCallback(async (fieldOrPatch, value) => {
     const patch = typeof fieldOrPatch === "object"
@@ -319,6 +424,9 @@ export function AppProvider({ children }) {
       updateUserField,
       addManualCourse,
       forceSync,
+      refreshFromSupabase,
+      cardChanges,
+      markCardSeen,
       flashcardMap,
       syllabus,
       pastCourses,
