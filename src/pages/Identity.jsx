@@ -159,14 +159,14 @@ export default function Identity() {
         <GradeGraph
           courses={courses}
           assignments={assignments}
-          connected={Boolean(canvasToken && courses.length > 0)}
+          connected={courses.length > 0}
         />
       </div>
 
       {/* Course performance bars */}
       <p style={{ fontSize: "11px", color: "var(--text-dim)", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "16px" }}>
         Course Performance
-        {!canvasToken && <span style={{ color: "rgba(255,255,255,0.18)", marginLeft: "8px", letterSpacing: "1px" }}>placeholder</span>}
+        {!canvasToken && courses.length === 0 && <span style={{ color: "rgba(255,255,255,0.18)", marginLeft: "8px", letterSpacing: "1px" }}>placeholder</span>}
       </p>
 
       <div style={{ display: "flex", flexDirection: "column", gap: "16px", marginBottom: "8px" }}>

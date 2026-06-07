@@ -131,7 +131,9 @@ export default function Work() {
     .slice(0, 5); // show top 5
 
   const completedCount = assignments.filter(a => a.submission?.submittedAt).length;
-  const hasToken = Boolean(canvasToken);
+  // "Connected" = has a Canvas OAuth token OR has any synced data (e.g. from the
+  // browser extension, which syncs via the LMS session and sets no canvas_token).
+  const hasToken = Boolean(canvasToken) || assignments.length > 0;
 
   const STATS = [
     { label: "GPA",       value: userData?.gpa != null ? Number(userData.gpa).toFixed(2) : "—" },

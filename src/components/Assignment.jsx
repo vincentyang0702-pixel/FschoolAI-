@@ -60,7 +60,9 @@ export default function Assignment() {
 
   // Real assignments only — sorted by due date, unsubmitted
   const assignments = useMemo(() => {
-    if (!canvasToken || !liveAssignments.length) return [];
+    // Show synced assignments whenever they exist — extension-synced users have
+    // no canvas_token, so don't gate on it (only on whether data is present).
+    if (!liveAssignments.length) return [];
     return [...liveAssignments]
       .filter(a => !a.submission?.submittedAt)
       .sort((a, b) => {
@@ -335,18 +337,14 @@ export default function Assignment() {
         Assignments
       </h1>
       <p style={{ color: "var(--text-dim)", fontSize: "14px", marginBottom: "28px" }}>
-        {!canvasToken
-          ? "Connect Canvas to see your assignments"
-          : assignments.length > 0
+        {assignments.length > 0
           ? `${assignments.length} pending assignment${assignments.length !== 1 ? "s" : ""}`
+          : !canvasToken
+          ? "Connect Canvas or sync with the extension to see your assignments"
           : "You're all caught up"}
       </p>
 
-      {!canvasToken ? (
-        <NoCanvasState />
-      ) : assignments.length === 0 ? (
-        <AllDoneState />
-      ) : (
+      {assignments.length > 0 ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
           {assignments.map((a) => {
             const due = formatDue(a.dueAt);
@@ -377,6 +375,10 @@ export default function Assignment() {
             );
           })}
         </div>
+      ) : !canvasToken ? (
+        <NoCanvasState />
+      ) : (
+        <AllDoneState />
       )}
     </div>
   );
