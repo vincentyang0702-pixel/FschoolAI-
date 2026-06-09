@@ -34,6 +34,40 @@ export default async function handler(req, res) {
     body.system = system.trim();
   }
 
+  // ── Streaming path — forward SSE directly to client ──────────────────────
+  if (req.body?.stream) {
+    body.stream = true;
+    let anthropicRes;
+    try {
+      anthropicRes = await fetch("https://api.anthropic.com/v1/messages", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01" },
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      return res.status(502).json({ error: err.message });
+    }
+    if (!anthropicRes.ok) {
+      const errText = await anthropicRes.text();
+      return res.status(502).json({ error: `Anthropic ${anthropicRes.status}`, detail: errText.slice(0, 300) });
+    }
+    res.setHeader("Content-Type", "text/event-stream");
+    res.setHeader("Cache-Control", "no-cache");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    const reader = anthropicRes.body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        res.write(value);
+      }
+    } finally {
+      res.end();
+    }
+    return;
+  }
+
   try {
     const response = await fetch("https://api.anthropic.com/v1/messages", {
       method:  "POST",

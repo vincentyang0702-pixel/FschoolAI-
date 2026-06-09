@@ -1086,12 +1086,24 @@ export default function NeuralRing() {
     return () => cancelAnimationFrame(rafRef.current);
   }, []);
 
-  // ── Voice canvas: same sphere but VOICE_SIZE, centered hero in voice mode ────
+  // ── Voice canvas: DPR-scaled sphere with depth rendering + glow ─────────────
   useEffect(() => {
     if (!voiceMode) { cancelAnimationFrame(voiceRafRef.current); return; }
     const canvas = voiceCanvasRef.current;
     if (!canvas) return;
+
+    // DPR scaling — sharpest single fix for blurry canvas on retina/HiDPI displays
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width  = Math.round(VOICE_SIZE * dpr);
+    canvas.height = Math.round(VOICE_SIZE * dpr);
+    canvas.style.width  = VOICE_SIZE + "px";
+    canvas.style.height = VOICE_SIZE + "px";
     const ctx = canvas.getContext("2d");
+    ctx.scale(dpr, dpr);
+    ctx.imageSmoothingEnabled = true;
+
+    const cx = VOICE_SIZE / 2;
+    const cy = VOICE_SIZE / 2;
 
     const drawVoice = () => {
       ctx.clearRect(0, 0, VOICE_SIZE, VOICE_SIZE);
@@ -1104,37 +1116,68 @@ export default function NeuralRing() {
         ? Math.sin(pulseSineRef.current) * 0.06 : 0;
       const R    = VOICE_RADIUS * (1 + pulse);
 
+      // Radial gradient body — warm depth glow at sphere center
+      const grad = ctx.createRadialGradient(cx, cy, R * 0.15, cx, cy, R * 1.4);
+      grad.addColorStop(0,   `rgba(${cr},${cg},${cb},0.08)`);
+      grad.addColorStop(0.5, `rgba(${cr},${cg},${cb},0.03)`);
+      grad.addColorStop(1,   "rgba(0,0,0,0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(cx, cy, R * 1.4, 0, Math.PI * 2);
+      ctx.fill();
+
       const projected = NODES.map(({ x, y, z }) => {
         const rx = x * Math.cos(rot) + z * Math.sin(rot);
         const rz = -x * Math.sin(rot) + z * Math.cos(rot);
-        return { sx: rx * R + VOICE_SIZE / 2, sy: y * R + VOICE_SIZE / 2, sz: rz, depth: (rz + 1) * 0.5 };
+        return { sx: rx * R + cx, sy: y * R + cy, sz: rz, depth: (rz + 1) * 0.5 };
       });
 
-      ctx.lineWidth = 1.0;
+      // Neural connections — depth-aware alpha
+      ctx.shadowBlur = 0;
+      ctx.lineWidth = 0.9;
       for (let i = 0; i < projected.length; i++) {
         for (let j = i + 1; j < projected.length; j++) {
           const ri = projected[i], rj = projected[j];
           const da = { x: ri.sx - rj.sx, y: ri.sy - rj.sy, z: ri.sz - rj.sz };
           const d3 = Math.sqrt(da.x*da.x + da.y*da.y + da.z*da.z);
           if (d3 < VOICE_RADIUS * 2 * EDGE_THRESHOLD) {
-            const alpha = 0.05 + (ri.depth + rj.depth) * 0.07;
+            const alpha = 0.04 + Math.min(ri.depth, rj.depth) * 0.12;
             ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(2)})`;
             ctx.beginPath(); ctx.moveTo(ri.sx, ri.sy); ctx.lineTo(rj.sx, rj.sy); ctx.stroke();
           }
         }
       }
-      for (const { sx, sy, depth } of projected) {
+
+      // Points — depth-sorted (painter's algorithm) with glow on foreground nodes
+      const sorted = [...projected].sort((a, b) => a.sz - b.sz);
+      for (const { sx, sy, depth } of sorted) {
+        const r = 1.2 + depth * 1.5;
+        const alpha = 0.3 + depth * 0.6;
+        if (depth > 0.55) {
+          ctx.shadowBlur  = 5 + depth * 8;
+          ctx.shadowColor = `rgba(${cr},${cg},${cb},0.55)`;
+        } else {
+          ctx.shadowBlur = 0;
+        }
         ctx.beginPath();
-        ctx.arc(sx, sy, 1.2 + depth * 1.1, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(${cr},${cg},${cb},${(0.5 + depth * 0.4).toFixed(2)})`;
+        ctx.arc(sx, sy, r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(2)})`;
         ctx.fill();
       }
+      ctx.shadowBlur = 0;
+
+      // Soft halo ring — always present, very faint
+      ctx.beginPath();
+      ctx.arc(cx, cy, R + 14, 0, Math.PI * 2);
+      ctx.strokeStyle = `rgba(${cr},${cg},${cb},0.04)`;
+      ctx.lineWidth = 10;
+      ctx.stroke();
 
       // Gold RMS rim — reacts to live mic input
       const rms = voiceRmsRef.current;
       if (rms > 0.04) {
         ctx.beginPath();
-        ctx.arc(VOICE_SIZE / 2, VOICE_SIZE / 2, VOICE_RADIUS + 5 + rms * 8, 0, Math.PI * 2);
+        ctx.arc(cx, cy, R + 5 + rms * 8, 0, Math.PI * 2);
         ctx.strokeStyle = `rgba(196,154,60,${Math.min(rms * 0.9, 0.6).toFixed(2)})`;
         ctx.lineWidth = 1.5 + rms * 2;
         ctx.stroke();
@@ -1398,7 +1441,9 @@ export default function NeuralRing() {
       // Silence + barge-in detection loop
       const data = new Float32Array(analyser.fftSize);
       const SPEECH_THRESH  = 0.012;
-      const SILENCE_MS     = 1200;
+      const SILENCE_MS     = 600;   // time of silence before auto-stop
+      const MIN_SPEECH_MS  = 400;   // min speech duration before silence timer arms
+      let   speechStartTime = null; // when speech first crossed threshold this utterance
 
       function silenceTick() {
         if (!analyserRef.current) return;
@@ -1412,14 +1457,21 @@ export default function NeuralRing() {
         }
 
         if (rms > SPEECH_THRESH) {
-          speechDetectedRef.current = true;
+          if (!speechDetectedRef.current) {
+            speechDetectedRef.current = true;
+            speechStartTime = Date.now();
+          }
           clearTimeout(silenceTimerRef.current);
           silenceTimerRef.current = null;
         } else if (speechDetectedRef.current && !silenceTimerRef.current
                    && mr.state === "recording") {
-          silenceTimerRef.current = setTimeout(() => {
-            if (mr.state === "recording") mr.stop();
-          }, SILENCE_MS);
+          // Only arm once speech has lasted long enough to be real speech
+          const speechDuration = Date.now() - (speechStartTime ?? 0);
+          if (speechDuration >= MIN_SPEECH_MS) {
+            silenceTimerRef.current = setTimeout(() => {
+              if (mr.state === "recording") mr.stop();
+            }, SILENCE_MS);
+          }
         }
         silenceRafRef.current = requestAnimationFrame(silenceTick);
       }
@@ -1533,7 +1585,7 @@ export default function NeuralRing() {
         courseOptions, userData, assignments,
         flashcardMap, syllabus, impressions, lastSession, livingMind,
         messages.length === 0,  // isFirstMessage — no prior exchanges yet
-        availableVoices.slice(0, 8)   // full objects so labels are injected
+        availableVoices   // full list so Claude can match any voice by description
       );
 
       // Wait briefly for context fetch (max 1.2s) — if still pending, proceed without it
@@ -1548,10 +1600,93 @@ export default function NeuralRing() {
       // Strip UI-only props (hasArtifact) so they don't reach the Anthropic/Groq API
       const apiMessages = [...messages, userMsg].map(({ role, content }) => ({ role, content }));
       let raw;
-      try {
-        raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
-      } catch {
-        raw = await groq(apiMessages, finalSystem);
+      let voiceTTSDone = null; // resolves when all sentence-chunked TTS finishes
+
+      if (voiceModeRef.current && !muted) {
+        // ── Streaming voice: sentence-chunked TTS pipeline ───────────────────
+        // Each sentence is sent to TTS the moment Claude generates it,
+        // so audio starts before the full response arrives.
+        try {
+          const streamRes = await fetch("/api/claude", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ messages: apiMessages, system: finalSystem, max_tokens: 400, stream: true }),
+            signal: abortCtrlRef.current?.signal,
+          });
+          if (!streamRes.ok) throw new Error(`Stream ${streamRes.status}`);
+
+          const reader  = streamRes.body.getReader();
+          const decoder = new TextDecoder();
+          let sseBuffer = "", pendingSentence = "", fullText = "";
+          let ttsChain  = Promise.resolve();
+
+          const enqueueTTS = (text) => {
+            const clean = sanitizeForTTS(text.trim());
+            if (!clean) return;
+            ttsChain = ttsChain.then(async () => {
+              if (abortCtrlRef.current?.signal?.aborted) return;
+              setSpeaking(true); speakingRef.current = true;
+              sphereStateRef.current = "speaking";
+              const tone = TONE_PRESETS[toneRef.current] ?? TONE_PRESETS.neutral;
+              try {
+                const { play } = await fetchAndDecodeAudio(clean, voiceIdRef.current, speedRef.current, tone);
+                await play(src => { audioSourceRef.current = src; });
+              } catch (e) { console.warn("[voice chunk]", e.message); }
+            });
+          };
+
+          try {
+            while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              sseBuffer += decoder.decode(value, { stream: true });
+              const lines = sseBuffer.split("\n");
+              sseBuffer = lines.pop() ?? "";
+              for (const line of lines) {
+                if (!line.startsWith("data: ")) continue;
+                const data = line.slice(6).trim();
+                if (!data || data === "[DONE]") continue;
+                try {
+                  const evt = JSON.parse(data);
+                  if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta") {
+                    const chunk = evt.delta.text ?? "";
+                    fullText += chunk;
+                    pendingSentence += chunk;
+                    setStreamingMsg(fullText);
+                    // Flush on sentence boundary (.!? followed by space/newline)
+                    const sm = /[.!?][ \n]/.exec(pendingSentence);
+                    if (sm) {
+                      const sent = pendingSentence.slice(0, sm.index + 1);
+                      pendingSentence = pendingSentence.slice(sm.index + 2).trimStart();
+                      enqueueTTS(sent);
+                    }
+                  }
+                } catch (_) {}
+              }
+            }
+          } catch (err) {
+            if (err?.name !== "AbortError") throw err;
+          }
+
+          if (abortCtrlRef.current?.signal?.aborted) throw new DOMException("Aborted", "AbortError");
+          if (pendingSentence.trim()) enqueueTTS(pendingSentence.trim());
+
+          raw = fullText;
+          voiceTTSDone = ttsChain.then(() => {
+            setSpeaking(false); speakingRef.current = false;
+            sphereStateRef.current = "idle"; audioSourceRef.current = null;
+          });
+        } catch (err) {
+          if (err?.name === "AbortError") throw err;
+          console.warn("[voice stream] falling back to non-streaming:", err.message);
+          raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
+        }
+      } else {
+        try {
+          raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
+        } catch {
+          raw = await groq(apiMessages, finalSystem);
+        }
       }
 
       // ── Voice intent tag extraction (strip before display/quiz/nav parsing) ──
@@ -1636,7 +1771,14 @@ export default function NeuralRing() {
       }
 
       setLoading(false);
-      await speakAndType(cleanText);
+      if (voiceTTSDone) {
+        // Streaming voice path: TTS already queued — add message now, wait for audio
+        setMessages(m => [...m, { role: "assistant", content: cleanText }]);
+        setStreamingMsg("");
+        await voiceTTSDone;
+      } else {
+        await speakAndType(cleanText);
+      }
       // Auto-restart listening after reply ends, if still in voice mode
       if (voiceModeRef.current && !micDenied) {
         await startAutoListen();
@@ -2047,38 +2189,24 @@ export default function NeuralRing() {
                   />
                 </div>
 
-                {/* Status — Fraunces, calm, cream */}
+                {/* Tiny small-caps Fraunces caption — crossfades, orb carries the state */}
                 <p style={{
                   fontFamily: "'Fraunces',Georgia,serif",
-                  fontSize: "14px", fontWeight: "400",
-                  color: micDenied ? "rgba(255,100,90,0.65)" : "rgba(246,242,233,0.38)",
-                  letterSpacing: "0.1px", marginBottom: "32px",
-                  animation: "nrVoiceIn 0.45s ease 0.1s both",
+                  fontSize: "11px", fontWeight: "300",
+                  fontVariant: "small-caps",
+                  letterSpacing: "0.14em",
+                  marginBottom: "32px",
+                  minHeight: "1em",
+                  color: micDenied ? "rgba(255,100,90,0.5)" : "rgba(246,242,233,0.22)",
+                  transition: "opacity 0.35s ease, color 0.35s ease",
+                  opacity: (micDenied || speaking || loading || isRecording) ? 1 : 0,
                 }}>
-                  {micDenied       ? "Allow mic access in browser settings"
-                  : speaking       ? "Speaking…"
-                  : loading        ? "Thinking…"
-                  : isRecording    ? "Listening…"
-                  : "Tap to speak"}
+                  {micDenied    ? "allow microphone access"
+                  : speaking    ? "speaking"
+                  : loading     ? "thinking"
+                  : isRecording ? "listening"
+                  : ""}
                 </p>
-
-                {/* Tap-to-speak fallback (mic denied or manual trigger) */}
-                {!isRecording && !loading && !speaking && !micDenied && (
-                  <button
-                    onClick={() => { getAudioContext(); startAutoListen(); }}
-                    style={{
-                      background: "rgba(196,154,60,0.07)", border: "1px solid rgba(196,154,60,0.2)",
-                      borderRadius: "28px", padding: "9px 22px", marginBottom: "16px",
-                      color: "rgba(196,154,60,0.65)", fontSize: "12px", cursor: "pointer",
-                      fontFamily: "inherit", letterSpacing: "0.3px",
-                      transition: "all 0.15s",
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.background = "rgba(196,154,60,0.12)"; e.currentTarget.style.color = "#C49A3C"; }}
-                    onMouseLeave={e => { e.currentTarget.style.background = "rgba(196,154,60,0.07)"; e.currentTarget.style.color = "rgba(196,154,60,0.65)"; }}
-                  >
-                    Tap to speak
-                  </button>
-                )}
 
                 {/* Inline voice chip strip — slim, horizontal, scrollable */}
                 {availableVoices.length > 0 && (
