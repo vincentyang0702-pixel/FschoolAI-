@@ -531,3 +531,183 @@ The extension should be dumb and fast. The backend and brain should be smart and
 | Performance compounding | Snapshot only | Trajectory tracked per assignment over time |
 | Professor intelligence | None | Built from shared rubric analysis + graded feedback |
 | Network effect | None | Library grows with every student |
+
+
+---
+
+## The Agent Pipeline: How the Extension Connects to Every Agent
+
+The extension is not just a data pipe. Every piece of content it captures and every signal it emits flows into a specific agent. This section maps the full pipeline so Aryan understands what happens downstream of every extension action.
+
+### The Full Pipeline
+
+```
+EXTENSION
+  │
+  ├── Behavioral signals ──────────────────────────────────────────────────────►  BRAIN SIGNAL INGESTION
+  │   (assignment_viewed, procrastination_loop,                                    brain.signals table
+  │    late_night_session, grade_anxiety_check)                                    │
+  │                                                                                ▼
+  │                                                                         PATTERN RECOGNITION SERVICE
+  │                                                                         (detects behavioral patterns)
+  │                                                                                │
+  │                                                                                ▼
+  │                                                                         INTERVENTION ENGINE
+  │                                                                         (decides when to nudge)
+  │
+  ├── Assignment/grade sync ───────────────────────────────────────────────►  CANVAS AGENT
+  │   (courses, assignments, grades, due dates)                               (reads fschool.assignments,
+  │                                                                            answers deadline questions)
+  │                                                                                │
+  │                                                                                ▼
+  │                                                                         ASSIGNMENT AGENT
+  │                                                                         (uses rubric from library
+  │                                                                          to scaffold student work)
+  │
+  └── Course content ──────────────────────────────────────────────────────►  LIBRARY ORGANIZER AGENT (new)
+      (syllabus, lecture slides, rubrics,                                     (extracts concepts,
+       announcements, professor feedback)                                      tags content, writes
+                                                                               to brain.knowledge)
+                                                                                    │
+                                                                    ┌───────────────┼───────────────────┐
+                                                                    │               │                   │
+                                                                    ▼               ▼                   ▼
+                                                           PROFESSOR          LESSON              CROSS-COURSE
+                                                           INTELLIGENCE       GENERATOR           CONNECTOR
+                                                           (builds prof       (turns library      (links concepts
+                                                            profile from       content into        across enrolled
+                                                            rubrics +          personalized        courses)
+                                                            feedback)          lessons)
+```
+
+### Agent Responsibilities: What Each Agent Does With Extension Data
+
+#### Library Organizer Agent (New — Must Be Built)
+
+**Trigger:** New item added to `course_content` table.
+
+**What it does:**
+1. Reads the raw text from the new library item
+2. Calls Claude to extract: concepts covered, difficulty level, topic tags, week number
+3. Writes structured knowledge to `brain.knowledge` as shared course intelligence
+4. If `content_type = 'rubric'` or `content_type = 'feedback'` → triggers Professor Intelligence Agent
+5. Triggers Cross-Course Connector to find concept overlaps with other courses
+
+**File to create:** `backend/server/services/library-organizer.ts`
+
+**Writes to:** `brain.knowledge` (shared, course-scoped), `brain.signals` (type: `library_item_processed`)
+
+---
+
+#### Professor Intelligence Agent (Specced, Not Yet Built)
+
+**Trigger:** Library Organizer detects `content_type = 'rubric'` or `content_type = 'feedback'`.
+
+**What it does:**
+1. Reads the rubric or feedback text from the library
+2. Extracts: grading criteria, what the professor penalizes, what they reward, format preferences
+3. Aggregates patterns across multiple students in the same course (with consent)
+4. Builds/updates a professor profile in `brain.reflections` (type: `professor_insight`)
+
+**Key insight:** This agent gets smarter with every student. The first student who submits an assignment and gets feedback contributes one data point. The 50th student contributes the 50th data point — and by then the professor profile is highly accurate.
+
+**File to create:** `backend/server/agents/professor-intelligence-agent.ts`
+
+**Reads from:** `course_content` (rubrics, feedback), `brain.reflections` (existing professor profiles)
+
+**Writes to:** `brain.reflections` (type: `professor_insight`), `brain.knowledge` (professor grading patterns)
+
+---
+
+#### Canvas Agent (Exists — Needs Expansion)
+
+**Current state:** Passive — only answers questions about data already synced. Reads from `fschool.assignments`.
+
+**What it needs to become:** Active fetcher that:
+- Detects when a new assignment has been posted (compare Canvas API response vs stored data)
+- Proactively notifies the student via the intervention engine
+- Runs nightly to catch anything the extension missed
+- Fills the gap between what the extension captured and what Canvas API knows exists
+
+**File to update:** `backend/server/agents/canvas-agent.ts`
+
+**New capability:** `detectNewAssignments(personId)` — compares `fschool.assignments` vs Canvas API, emits `new_assignment_posted` signal for anything not yet in the DB.
+
+---
+
+#### Assignment Agent (Exists — Needs Library Connection)
+
+**Current state:** Has a `rubric` field in its context but no code to populate it. The rubric is always `undefined`.
+
+**What it needs:** When triggered for a specific assignment, query the library:
+```typescript
+const rubric = await supabase
+  .from('course_content')
+  .select('text')
+  .eq('course_id', assignment.course_id)
+  .eq('content_type', 'rubric')
+  .ilike('text', `%${assignment.title}%`)
+  .single();
+```
+
+Then pass `rubric.text` into the agent context. Now the agent can actually tie feedback to rubric criteria.
+
+**File to update:** `backend/server/agents/assignment-agent.ts`
+
+---
+
+#### Lesson Generator Agent (Specced, Not Yet Built)
+
+**Trigger:** Brain detects a knowledge gap (pattern confidence < 0.5 for a concept that appears in an upcoming assignment).
+
+**What it does:**
+1. Reads the relevant library items for the concept (lecture slides, module text)
+2. Reads the student's learning style from `neuro.patterns`
+3. Generates a personalized lesson using the actual course content — not generic explanations
+4. Calibrates difficulty based on the student's current mastery level
+
+**Why the library is essential here:** Without the library, the Lesson Generator gives generic explanations. With the library, it says "In your PSYC 201 Week 3 lecture, Professor Chen explained regression this way..." — using the student's actual course language.
+
+**File to create:** `backend/server/agents/lesson-generator-agent.ts`
+
+**Reads from:** `course_content` (lectures, modules), `neuro.patterns` (knowledge gaps, learning style), `brain.knowledge` (concept map)
+
+**Writes to:** `brain.signals` (lesson_generated, lesson_completed, lesson_score)
+
+---
+
+#### Cross-Course Connector (New — Must Be Built)
+
+**Trigger:** Library Organizer adds a new lecture or module to the library.
+
+**What it does:**
+1. Extracts concepts from the new content
+2. Searches the library for the same concepts in other courses this student is enrolled in
+3. Stores the connection in `brain.knowledge`
+
+**Example output:** `{ concept: "regression analysis", course_a: "PSYC201", course_b: "STATS101", chapter_b: 4, confidence: 0.87 }`
+
+**File to create:** `backend/server/services/cross-course-connector.ts`
+
+**Reads from:** `course_content` (all courses for this student), `brain.knowledge` (existing concept map)
+
+**Writes to:** `brain.knowledge` (type: `cross_course_connection`)
+
+---
+
+### The Rule for Every Agent
+
+> Every agent either reads from the library, writes to the brain, or both. No agent reads directly from the extension. No agent writes directly to the extension. The extension → library → brain → agent pipeline is one-way and non-negotiable.
+
+---
+
+## What Aryan Does Not Need to Build
+
+The agents above are backend (Johan's responsibility). Aryan's job is to make sure the extension sends the right data to the right endpoints so the agents have something to work with. Specifically:
+
+- Send content to `/api/extension/content` with correct `content_type` tags (`syllabus`, `rubric`, `lecture`, `feedback`, `announcement`)
+- Include `university_id` derived from the LMS URL on every request
+- Include `professor_name` when capturing rubrics or graded feedback (extract from page)
+- Emit behavioral signals to `/api/extension/signal` for every meaningful LMS action
+
+The rest is Johan's pipeline.
