@@ -185,7 +185,7 @@ function getUrgentAssignments(assignments) {
   });
 }
 
-function buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, isFirstMessage = false, voiceNames = []) {
+function buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, isFirstMessage = false, voicesForContext = []) {
   const courseList = courseOptions.length
     ? courseOptions.join("\n- ")
     : "No courses loaded yet";
@@ -273,14 +273,20 @@ CRITICAL — quiz content rules:
 - If no course is specified, quiz on the course with the nearest upcoming deadline.
 - If you have no course content in context at all, do NOT generate a quiz. Instead reply: "I need your Canvas synced to quiz you on real material — head to the Canvas page to connect."
 
-VOICE CONTROL: When the student asks you to change how you sound or to perform a voice action, include ONE hidden tag at the very end of your reply (the student never sees tags — they're stripped before display):
-  [VOICE:<name>]     when they ask for a different voice (match by name or description to the available voices listed below)
-  [SPEED:<0.7-1.3>]  when they ask to speak faster/slower (slower≈0.8, faster≈1.2)
+VOICE CONTROL: When the student asks you to change how you sound or perform a voice action, include ONE hidden tag at the very end of your reply (stripped before display):
+  [VOICE:<exactName>]  when they ask for a different voice — pick the BEST match from available voices below by scoring accent, gender, age, descriptive labels. Confirm in speech which voice and why.
+  [SPEED:<0.7-1.3>]    when they ask to speak faster/slower (slower≈0.8, faster≈1.2)
   [TONE:<calm|energetic|neutral|serious>]  when they ask for a mood/persona
-  [READ:assignments]  when they ask you to read their assignments or what's due
-  [QUIZ:<course>]     when they ask to be quizzed out loud (course optional)
-Still reply naturally in words too (e.g. 'Sure — switching to a British voice now.'). Only ONE tag per reply. If no voice action is requested, emit no tag.
-${voiceNames.length > 0 ? `Available voices: ${voiceNames.join(", ")}` : ""}
+  [READ:assignments]   when they ask you to read their assignments or what's due
+  [QUIZ:<course>]      when they ask to be quizzed out loud (course optional)
+If no strong match exists, ask ONE short clarifying question instead of guessing.
+Still reply naturally in words too (e.g. 'Switching to Daniel — a British broadcaster.'). Only ONE tag per reply.
+${voicesForContext.length > 0
+  ? `Available voices (name [accent/gender/age/style]):\n${voicesForContext.slice(0,8).map(v => {
+      const lbls = Object.values(v.labels ?? {}).filter(Boolean).join("/");
+      return `- ${v.name}${lbls ? ` [${lbls}]` : ""}`;
+    }).join("\n")}`
+  : ""}
 
 STRESS SUPPORT: If the student says they're stressed, overwhelmed, or anxious: respond calmly and warmly FIRST (1-2 sentences of genuine acknowledgment, no toxic positivity), THEN offer ONE small concrete next step based on their actual workload — the single easiest or most urgent item, framed as "just this one thing for now". Never dump their full list when they're stressed. Keep it under 4 sentences. If they express serious distress beyond schoolwork, gently suggest they talk to someone they trust or their campus support services.
 
@@ -669,6 +675,8 @@ function InlineQuiz({ cards, userId, courseId }) {
 
 const SIZE           = 68;
 const RADIUS         = 24;
+const VOICE_SIZE     = 156;  // larger sphere for centered voice-mode hero
+const VOICE_RADIUS   = 54;
 const N              = 28;
 const EDGE_THRESHOLD = 0.72;
 
@@ -807,6 +815,17 @@ export default function NeuralRing() {
   const [availableVoices,  setAvailableVoices]  = useState([]);
   const mediaRecorderRef   = useRef(null);
   const audioChunksRef     = useRef([]);
+  // Voice mode — auto-listen engine
+  const voiceCanvasRef     = useRef(null);   // larger centered sphere in voice mode
+  const voiceRafRef        = useRef(null);   // RAF for voice canvas
+  const analyserRef        = useRef(null);   // WebAudio AnalyserNode
+  const micStreamRef       = useRef(null);   // mic MediaStream (kept open during listen)
+  const silenceRafRef      = useRef(null);   // RAF for silence detection tick
+  const silenceTimerRef    = useRef(null);   // setTimeout for auto-stop
+  const speechDetectedRef  = useRef(false);  // has speech started this utterance?
+  const voiceRmsRef        = useRef(0);      // current RMS level 0–1 (no re-render)
+  const voiceModeRef       = useRef(false);  // mirrors voiceMode state for async closures
+  const speakingRef        = useRef(false);  // mirrors speaking state for RAF barge-in
 
   const canvasRef      = useRef(null);
   const rafRef         = useRef(null);
@@ -879,10 +898,12 @@ export default function NeuralRing() {
     setRingNameInput(name);
   }, [userData?.ring_name]);
 
-  // Keep preference refs current — voiceId, speed, tone
-  useEffect(() => { voiceIdRef.current = userData?.preferred_voice_id ?? null; }, [userData?.preferred_voice_id]);
-  useEffect(() => { speedRef.current   = userData?.preferred_speed    ?? 1.0;  }, [userData?.preferred_speed]);
-  useEffect(() => { toneRef.current    = userData?.preferred_tone     ?? "neutral"; }, [userData?.preferred_tone]);
+  // Keep preference + mode refs current
+  useEffect(() => { voiceIdRef.current   = userData?.preferred_voice_id ?? null;      }, [userData?.preferred_voice_id]);
+  useEffect(() => { speedRef.current     = userData?.preferred_speed    ?? 1.0;       }, [userData?.preferred_speed]);
+  useEffect(() => { toneRef.current      = userData?.preferred_tone     ?? "neutral"; }, [userData?.preferred_tone]);
+  useEffect(() => { voiceModeRef.current = voiceMode;  }, [voiceMode]);
+  useEffect(() => { speakingRef.current  = speaking;   }, [speaking]);
 
   // Fetch voice list once — needed for Claude context + [VOICE:x] tag resolution
   useEffect(() => {
@@ -959,6 +980,8 @@ export default function NeuralRing() {
       }
       .nr-speaking { animation: neuralSpeak 0.8s ease-in-out infinite; }
       @keyframes blink { 0%, 100% { opacity: 0.4; } 50% { opacity: 0; } }
+      @keyframes nrVoiceIn { from{opacity:0;transform:translateY(12px)} to{opacity:1;transform:none} }
+      @keyframes nrVoicePulse { 0%,100%{opacity:0.35;transform:scale(1)} 50%{opacity:0.55;transform:scale(1.03)} }
 
       /* ── Message entrance + thinking dots ── */
       @media (prefers-reduced-motion: no-preference) {
@@ -1062,6 +1085,66 @@ export default function NeuralRing() {
     draw();
     return () => cancelAnimationFrame(rafRef.current);
   }, []);
+
+  // ── Voice canvas: same sphere but VOICE_SIZE, centered hero in voice mode ────
+  useEffect(() => {
+    if (!voiceMode) { cancelAnimationFrame(voiceRafRef.current); return; }
+    const canvas = voiceCanvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+
+    const drawVoice = () => {
+      ctx.clearRect(0, 0, VOICE_SIZE, VOICE_SIZE);
+      const rot  = rotRef.current;
+      const mix  = colorMixRef.current;
+      const cr   = Math.round(255 + (196 - 255) * mix);
+      const cg   = Math.round(255 + (154 - 255) * mix);
+      const cb   = Math.round(255 + (60  - 255) * mix);
+      const pulse = sphereStateRef.current === "speaking"
+        ? Math.sin(pulseSineRef.current) * 0.06 : 0;
+      const R    = VOICE_RADIUS * (1 + pulse);
+
+      const projected = NODES.map(({ x, y, z }) => {
+        const rx = x * Math.cos(rot) + z * Math.sin(rot);
+        const rz = -x * Math.sin(rot) + z * Math.cos(rot);
+        return { sx: rx * R + VOICE_SIZE / 2, sy: y * R + VOICE_SIZE / 2, sz: rz, depth: (rz + 1) * 0.5 };
+      });
+
+      ctx.lineWidth = 1.0;
+      for (let i = 0; i < projected.length; i++) {
+        for (let j = i + 1; j < projected.length; j++) {
+          const ri = projected[i], rj = projected[j];
+          const da = { x: ri.sx - rj.sx, y: ri.sy - rj.sy, z: ri.sz - rj.sz };
+          const d3 = Math.sqrt(da.x*da.x + da.y*da.y + da.z*da.z);
+          if (d3 < VOICE_RADIUS * 2 * EDGE_THRESHOLD) {
+            const alpha = 0.05 + (ri.depth + rj.depth) * 0.07;
+            ctx.strokeStyle = `rgba(${cr},${cg},${cb},${alpha.toFixed(2)})`;
+            ctx.beginPath(); ctx.moveTo(ri.sx, ri.sy); ctx.lineTo(rj.sx, rj.sy); ctx.stroke();
+          }
+        }
+      }
+      for (const { sx, sy, depth } of projected) {
+        ctx.beginPath();
+        ctx.arc(sx, sy, 1.2 + depth * 1.1, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${cr},${cg},${cb},${(0.5 + depth * 0.4).toFixed(2)})`;
+        ctx.fill();
+      }
+
+      // Gold RMS rim — reacts to live mic input
+      const rms = voiceRmsRef.current;
+      if (rms > 0.04) {
+        ctx.beginPath();
+        ctx.arc(VOICE_SIZE / 2, VOICE_SIZE / 2, VOICE_RADIUS + 5 + rms * 8, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(196,154,60,${Math.min(rms * 0.9, 0.6).toFixed(2)})`;
+        ctx.lineWidth = 1.5 + rms * 2;
+        ctx.stroke();
+      }
+
+      voiceRafRef.current = requestAnimationFrame(drawVoice);
+    };
+    drawVoice();
+    return () => cancelAnimationFrame(voiceRafRef.current);
+  }, [voiceMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -1273,26 +1356,75 @@ export default function NeuralRing() {
     { re: /go to identity|open identity|my profile/i,                page: "identity"    },
   ];
 
-  // ── Voice mode: STT via Groq Whisper ────────────────────────────────────────
-  async function startVoiceRecording() {
-    if (isRecording) return;
+  // ── Voice mode: auto-listen + silence detection + barge-in ──────────────────
+  async function startAutoListen() {
+    if (isRecording || micDenied) return;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      audioChunksRef.current = [];
+      micStreamRef.current    = stream;
+      speechDetectedRef.current = false;
+      audioChunksRef.current  = [];
+
+      // WebAudio analyser for live RMS (silence detection + barge-in)
+      const audCtx   = getAudioContext();
+      const analyser = audCtx.createAnalyser();
+      analyser.fftSize = 512;
+      const src = audCtx.createMediaStreamSource(stream);
+      src.connect(analyser);
+      analyserRef.current = analyser;
+
       const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus" : "audio/webm";
       const mr = new MediaRecorder(stream, { mimeType });
       mr.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
       mr.onstop = async () => {
         stream.getTracks().forEach(t => t.stop());
+        micStreamRef.current = null;
+        analyserRef.current  = null;
+        cancelAnimationFrame(silenceRafRef.current);
+        clearTimeout(silenceTimerRef.current);
+        silenceTimerRef.current = null;
         setIsRecording(false);
-        if (audioChunksRef.current.length === 0) return;
+        voiceRmsRef.current = 0;
+        if (!audioChunksRef.current.length) return;
         const blob = new Blob(audioChunksRef.current, { type: mimeType });
         await _transcribeAndSend(blob, mimeType);
       };
       mediaRecorderRef.current = mr;
       mr.start();
       setIsRecording(true);
+      sphereStateRef.current = "listening";
+
+      // Silence + barge-in detection loop
+      const data = new Float32Array(analyser.fftSize);
+      const SPEECH_THRESH  = 0.012;
+      const SILENCE_MS     = 1200;
+
+      function silenceTick() {
+        if (!analyserRef.current) return;
+        analyser.getFloatTimeDomainData(data);
+        const rms = Math.sqrt(data.reduce((s, v) => s + v * v, 0) / data.length);
+        voiceRmsRef.current = Math.min(rms * 14, 1);
+
+        // Barge-in: user speaks while tutor is speaking → interrupt
+        if (speakingRef.current && rms > SPEECH_THRESH * 2.5) {
+          stopResponse();
+        }
+
+        if (rms > SPEECH_THRESH) {
+          speechDetectedRef.current = true;
+          clearTimeout(silenceTimerRef.current);
+          silenceTimerRef.current = null;
+        } else if (speechDetectedRef.current && !silenceTimerRef.current
+                   && mr.state === "recording") {
+          silenceTimerRef.current = setTimeout(() => {
+            if (mr.state === "recording") mr.stop();
+          }, SILENCE_MS);
+        }
+        silenceRafRef.current = requestAnimationFrame(silenceTick);
+      }
+      silenceTick();
+
     } catch (err) {
       if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
         setMicDenied(true);
@@ -1301,10 +1433,19 @@ export default function NeuralRing() {
     }
   }
 
-  function stopVoiceRecording() {
-    if (mediaRecorderRef.current?.state === "recording") {
-      mediaRecorderRef.current.stop();
-    }
+  function exitVoiceMode() {
+    if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
+    micStreamRef.current?.getTracks().forEach(t => t.stop());
+    micStreamRef.current = null;
+    analyserRef.current  = null;
+    cancelAnimationFrame(silenceRafRef.current);
+    clearTimeout(silenceTimerRef.current);
+    cancelAnimationFrame(voiceRafRef.current);
+    voiceRmsRef.current = 0;
+    setIsRecording(false);
+    setVoiceMode(false);
+    setMicDenied(false);
+    sphereStateRef.current = "idle";
   }
 
   async function _transcribeAndSend(blob, mimeType) {
@@ -1392,7 +1533,7 @@ export default function NeuralRing() {
         courseOptions, userData, assignments,
         flashcardMap, syllabus, impressions, lastSession, livingMind,
         messages.length === 0,  // isFirstMessage — no prior exchanges yet
-        availableVoices.slice(0, 8).map(v => v.name)
+        availableVoices.slice(0, 8)   // full objects so labels are injected
       );
 
       // Wait briefly for context fetch (max 1.2s) — if still pending, proceed without it
@@ -1418,13 +1559,21 @@ export default function NeuralRing() {
 
       // Apply VOICE tag — match by name, persist + apply immediately
       if (voiceTags.VOICE) {
-        const match = availableVoices.find(v =>
-          v.name.toLowerCase().includes(voiceTags.VOICE.toLowerCase())
-        );
-        const newVoiceId = match?.voice_id ?? null;
-        if (newVoiceId) {
-          voiceIdRef.current = newVoiceId;
-          updateUserField("preferred_voice_id", newVoiceId).catch(() => {});
+        const query  = voiceTags.VOICE.toLowerCase().trim();
+        const words  = query.split(/\s+/).filter(w => w.length > 2);
+        // Score each voice: exact name > partial name > label words coverage
+        const scored = availableVoices.map(v => {
+          const name   = v.name.toLowerCase();
+          const labels = Object.values(v.labels ?? {}).join(" ").toLowerCase();
+          const all    = name + " " + labels;
+          if (name === query) return { v, score: 100 };
+          const hits = words.filter(w => all.includes(w)).length;
+          return { v, score: hits };
+        }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
+        const match = scored[0]?.v;
+        if (match) {
+          voiceIdRef.current = match.voice_id;
+          updateUserField("preferred_voice_id", match.voice_id).catch(() => {});
         }
       }
       // Apply SPEED tag
@@ -1488,6 +1637,10 @@ export default function NeuralRing() {
 
       setLoading(false);
       await speakAndType(cleanText);
+      // Auto-restart listening after reply ends, if still in voice mode
+      if (voiceModeRef.current && !micDenied) {
+        await startAutoListen();
+      }
     } catch (err) {
       console.error("[NeuralRing] sendMessage error:", err?.message ?? err);
       // Only add error message if not aborted by stop button
@@ -1800,92 +1953,184 @@ export default function NeuralRing() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Input + voice mode */}
-            <div style={{ padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
+            {/* Input row (text mode) */}
+            {!voiceMode && (
+              <div style={{ display: "flex", gap: "10px", padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
+                {/* Subtle waveform glyph — enters voice mode */}
+                <button
+                  onClick={() => { getAudioContext(); setVoiceMode(true); startAutoListen(); }}
+                  title="Voice mode"
+                  style={{
+                    background: "none", border: "none", padding: "8px 6px",
+                    cursor: "pointer", flexShrink: 0, color: "rgba(255,255,255,0.28)",
+                    transition: "color 0.15s", outline: "none",
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.color = "#C49A3C"}
+                  onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.28)"}
+                >
+                  {/* Waveform glyph — three bars of different heights */}
+                  <svg width="16" height="14" viewBox="0 0 16 14" fill="currentColor">
+                    <rect x="0"  y="4" width="2.5" height="6"  rx="1.25"/>
+                    <rect x="4.5" y="1" width="2.5" height="12" rx="1.25"/>
+                    <rect x="9"  y="3" width="2.5" height="8"  rx="1.25"/>
+                    <rect x="13.5" y="5" width="2.5" height="4" rx="1.25"/>
+                  </svg>
+                </button>
+                <input
+                  value={input}
+                  onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); getAudioContext(); sendMessage(); } }}
+                  placeholder="Ask about assignments, navigate…"
+                  style={{
+                    flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
+                    borderRadius: "var(--radius-btn)", padding: "11px 14px", color: "var(--text-primary)",
+                    fontSize: "14px", outline: "none", fontFamily: "inherit",
+                    transition: "border-color var(--dur-base) var(--ease-apple)",
+                  }}
+                  onFocus={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.22)")}
+                  onBlur={e  => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)")}
+                />
+                {(loading || speaking) ? (
+                  <button onClick={stopResponse} style={{ background: "rgba(255,80,80,0.15)", color: "rgba(255,120,100,0.9)", border: "1px solid rgba(255,80,80,0.25)", borderRadius: "var(--radius-btn)", padding: "11px 16px", fontSize: "14px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+                    Stop
+                  </button>
+                ) : (
+                  <button onClick={() => { getAudioContext(); sendMessage(); }} disabled={!input.trim()}
+                    style={{ background: !input.trim() ? "rgba(255,255,255,0.18)" : "var(--color-accent)", color: "#111", border: "none", borderRadius: "var(--radius-btn)", padding: "11px 18px", fontSize: "14px", fontWeight: "600", cursor: !input.trim() ? "not-allowed" : "pointer", fontFamily: "inherit", flexShrink: 0, transition: "background var(--dur-base) var(--ease-apple)" }}>
+                    Send
+                  </button>
+                )}
+              </div>
+            )}
 
-              {/* Mic-denied warning */}
-              {micDenied && (
-                <p style={{ color: "rgba(255,100,90,0.8)", fontSize: "12px", marginBottom: "8px", textAlign: "center" }}>
-                  Microphone access denied — allow it in browser settings to use voice mode.
+            {/* ── Voice mode overlay: centered sphere hero ── */}
+            {voiceMode && (
+              <div style={{
+                position: "absolute", top: "58px", bottom: 0, left: 0, right: 0,
+                display: "flex", flexDirection: "column",
+                alignItems: "center", justifyContent: "center",
+                background: "rgba(14,14,14,0.97)",
+                animation: "nrVoiceIn 0.32s cubic-bezier(0.22,1,0.36,1) both",
+                zIndex: 5,
+              }}>
+                {/* Exit — top-right ghost × */}
+                <button
+                  onClick={exitVoiceMode}
+                  style={{
+                    position: "absolute", top: "12px", right: "16px",
+                    background: "none", border: "none", color: "rgba(255,255,255,0.22)",
+                    fontSize: "22px", lineHeight: 1, cursor: "pointer", padding: "4px 6px",
+                    transition: "color 0.15s",
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.color = "rgba(255,255,255,0.6)"}
+                  onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.22)"}
+                  aria-label="Exit voice mode"
+                >×</button>
+
+                {/* Existing neural sphere — just larger and centered */}
+                <div style={{ position: "relative", marginBottom: "26px" }}>
+                  {/* RMS rim — reacts to live mic */}
+                  <div style={{
+                    position: "absolute",
+                    inset: `-${8 + Math.round((voiceRmsRef.current ?? 0) * 10)}px`,
+                    borderRadius: "50%",
+                    border: `1.5px solid rgba(196,154,60,${Math.min((voiceRmsRef.current ?? 0) * 0.75, 0.5).toFixed(2)})`,
+                    pointerEvents: "none",
+                    transition: "inset 0.06s linear, border-color 0.06s linear",
+                  }} />
+                  <canvas
+                    ref={voiceCanvasRef}
+                    width={VOICE_SIZE}
+                    height={VOICE_SIZE}
+                    className={isRecording && !speaking ? "nr-speaking" : "nr-idle"}
+                    style={{ display: "block", borderRadius: "50%" }}
+                  />
+                </div>
+
+                {/* Status — Fraunces, calm, cream */}
+                <p style={{
+                  fontFamily: "'Fraunces',Georgia,serif",
+                  fontSize: "14px", fontWeight: "400",
+                  color: micDenied ? "rgba(255,100,90,0.65)" : "rgba(246,242,233,0.38)",
+                  letterSpacing: "0.1px", marginBottom: "32px",
+                  animation: "nrVoiceIn 0.45s ease 0.1s both",
+                }}>
+                  {micDenied       ? "Allow mic access in browser settings"
+                  : speaking       ? "Speaking…"
+                  : loading        ? "Thinking…"
+                  : isRecording    ? "Listening…"
+                  : "Tap to speak"}
                 </p>
-              )}
 
-              {voiceMode ? (
-                /* ── Voice mode: tap-to-talk ── */
-                <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                {/* Tap-to-speak fallback (mic denied or manual trigger) */}
+                {!isRecording && !loading && !speaking && !micDenied && (
                   <button
-                    onPointerDown={e => { e.preventDefault(); getAudioContext(); startVoiceRecording(); }}
-                    onPointerUp={stopVoiceRecording}
-                    onPointerCancel={stopVoiceRecording}
+                    onClick={() => { getAudioContext(); startAutoListen(); }}
                     style={{
-                      flex: 1, padding: "14px",
-                      background: isRecording ? "rgba(255,59,48,0.18)" : "rgba(196,154,60,0.1)",
-                      border: `1px solid ${isRecording ? "rgba(255,59,48,0.4)" : "rgba(196,154,60,0.3)"}`,
-                      borderRadius: "var(--radius-btn)", color: isRecording ? "rgba(255,100,90,0.9)" : "#C49A3C",
-                      fontSize: "14px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit",
+                      background: "rgba(196,154,60,0.07)", border: "1px solid rgba(196,154,60,0.2)",
+                      borderRadius: "28px", padding: "9px 22px", marginBottom: "16px",
+                      color: "rgba(196,154,60,0.65)", fontSize: "12px", cursor: "pointer",
+                      fontFamily: "inherit", letterSpacing: "0.3px",
                       transition: "all 0.15s",
                     }}
+                    onMouseEnter={e => { e.currentTarget.style.background = "rgba(196,154,60,0.12)"; e.currentTarget.style.color = "#C49A3C"; }}
+                    onMouseLeave={e => { e.currentTarget.style.background = "rgba(196,154,60,0.07)"; e.currentTarget.style.color = "rgba(196,154,60,0.65)"; }}
                   >
-                    {isRecording ? "● Recording — release to send" : "Hold to speak"}
+                    Tap to speak
                   </button>
-                  {/* Exit voice mode */}
-                  <button
-                    onClick={() => { stopVoiceRecording(); setVoiceMode(false); setMicDenied(false); }}
-                    style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "var(--radius-btn)", padding: "11px 14px", color: "rgba(255,255,255,0.5)", fontSize: "12px", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}
-                  >
-                    Text
-                  </button>
-                </div>
-              ) : (
-                /* ── Text mode (default) ── */
-                <div style={{ display: "flex", gap: "10px" }}>
-                  {/* Mic button — enters voice mode */}
-                  <button
-                    onClick={() => { getAudioContext(); setVoiceMode(true); }}
-                    title="Voice mode"
-                    style={{
-                      background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
-                      borderRadius: "var(--radius-btn)", padding: "11px 13px",
-                      cursor: "pointer", flexShrink: 0, color: "rgba(255,255,255,0.45)",
-                      transition: "all 0.15s", outline: "none",
-                    }}
-                    onMouseEnter={e => e.currentTarget.style.color = "#C49A3C"}
-                    onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.45)"}
-                  >
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
-                      <line x1="12" y1="19" x2="12" y2="23"/>
-                      <line x1="8"  y1="23" x2="16" y2="23"/>
-                    </svg>
-                  </button>
-                  <input
-                    value={input}
-                    onChange={e => setInput(e.target.value)}
-                    onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); getAudioContext(); sendMessage(); } }}
-                    placeholder="Ask about assignments, navigate…"
-                    style={{
-                      flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
-                      borderRadius: "var(--radius-btn)", padding: "11px 14px", color: "var(--text-primary)",
-                      fontSize: "14px", outline: "none", fontFamily: "inherit",
-                      transition: "border-color var(--dur-base) var(--ease-apple)",
-                    }}
-                    onFocus={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.22)")}
-                    onBlur={e  => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)")}
-                  />
-                  {(loading || speaking) ? (
-                    <button onClick={stopResponse} style={{ background: "rgba(255,80,80,0.15)", color: "rgba(255,120,100,0.9)", border: "1px solid rgba(255,80,80,0.25)", borderRadius: "var(--radius-btn)", padding: "11px 16px", fontSize: "14px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
-                      Stop
-                    </button>
-                  ) : (
-                    <button onClick={() => { getAudioContext(); sendMessage(); }} disabled={!input.trim()}
-                      style={{ background: !input.trim() ? "rgba(255,255,255,0.18)" : "var(--color-accent)", color: "#111", border: "none", borderRadius: "var(--radius-btn)", padding: "11px 18px", fontSize: "14px", fontWeight: "600", cursor: !input.trim() ? "not-allowed" : "pointer", fontFamily: "inherit", flexShrink: 0, transition: "background var(--dur-base) var(--ease-apple)" }}>
-                      Send
-                    </button>
-                  )}
-                </div>
-              )}
-            </div>
+                )}
+
+                {/* Inline voice chip strip — slim, horizontal, scrollable */}
+                {availableVoices.length > 0 && (
+                  <div style={{
+                    position: "absolute", bottom: "24px", left: 0, right: 0,
+                    overflowX: "auto", display: "flex", gap: "7px",
+                    padding: "0 20px",
+                    scrollbarWidth: "none", msOverflowStyle: "none",
+                  }}>
+                    {availableVoices.slice(0, 8).map(v => {
+                      const isActive = (voiceIdRef.current ?? userData?.preferred_voice_id) === v.voice_id;
+                      const lbls = [v.labels?.accent, v.labels?.gender].filter(Boolean).join("/");
+                      return (
+                        <button
+                          key={v.voice_id}
+                          onClick={() => {
+                            voiceIdRef.current = v.voice_id;
+                            updateUserField("preferred_voice_id", v.voice_id).catch(() => {});
+                          }}
+                          style={{
+                            flexShrink: 0,
+                            background: isActive ? "rgba(196,154,60,0.1)" : "rgba(255,255,255,0.04)",
+                            border: `1px solid ${isActive ? "rgba(196,154,60,0.35)" : "rgba(255,255,255,0.07)"}`,
+                            borderRadius: "20px", padding: "5px 11px",
+                            color: isActive ? "#C49A3C" : "rgba(255,255,255,0.3)",
+                            fontSize: "11px", fontWeight: isActive ? "600" : "400",
+                            cursor: "pointer", fontFamily: "inherit",
+                            display: "flex", alignItems: "center", gap: "5px",
+                            transition: "all 0.15s",
+                          }}
+                        >
+                          <span>{v.name}</span>
+                          {lbls && <span style={{ opacity: 0.5, fontSize: "9px" }}>{lbls}</span>}
+                          {/* ▶ mini preview */}
+                          <span
+                            onClick={e => {
+                              e.stopPropagation();
+                              if (v.preview_url) {
+                                const a = new Audio(v.preview_url);
+                                a.play().catch(() => {});
+                              }
+                            }}
+                            style={{ opacity: 0.45, cursor: "pointer", fontSize: "10px" }}
+                            title="Preview"
+                          >▶</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </>
       )}

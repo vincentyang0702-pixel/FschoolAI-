@@ -2,7 +2,7 @@
 // Queues awards and shows them 1 at a time, 2.5s each.
 // prefers-reduced-motion: instant appear/hide, no slide.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { onTokenAwarded } from "../api/tokens";
 
 const ACTION_LABELS = {
@@ -24,20 +24,39 @@ export default function TokenToast() {
   const [current, setCurrent] = useState(null);
   const [visible, setVisible] = useState(false);
 
+  // Timer refs — stored in refs so queue changes don't cancel running timers
+  const hideTimerRef  = useRef(null);
+  const clearTimerRef = useRef(null);
+
   useEffect(() => onTokenAwarded(data => {
     setQueue(q => [...q, { ...data, _id: Date.now() + Math.random() }]);
   }), []);
 
+  // Dequeue: only fires when we have queue items and no active toast
   useEffect(() => {
     if (current || queue.length === 0) return;
     const [next, ...rest] = queue;
     setQueue(rest);
     setCurrent(next);
-    requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
-    const hide  = setTimeout(() => setVisible(false), 2200);
-    const clear = setTimeout(() => setCurrent(null),   2700);
-    return () => { clearTimeout(hide); clearTimeout(clear); };
   }, [queue, current]);
+
+  // Dismiss timer: only fires when `current` changes to a new value
+  useEffect(() => {
+    if (!current) {
+      setVisible(false);
+      return;
+    }
+    // Small delay before showing so CSS transition has a start point
+    requestAnimationFrame(() => requestAnimationFrame(() => setVisible(true)));
+
+    hideTimerRef.current  = setTimeout(() => setVisible(false), 2200);
+    clearTimerRef.current = setTimeout(() => setCurrent(null),   2700);
+
+    return () => {
+      clearTimeout(hideTimerRef.current);
+      clearTimeout(clearTimerRef.current);
+    };
+  }, [current]); // queue intentionally NOT in deps — timers must survive queue updates
 
   if (!current) return null;
 
