@@ -1789,6 +1789,8 @@ export default function NeuralRing() {
     setInput("");
     setLoading(true);
     logChat(userId, "user", userMsg.content, null);
+    // ── DIAGNOSTIC LOGS — remove after confirming voice gates ───────────────
+    console.log("[vdiag] sendMessage | voiceModeRef.current:", voiceModeRef.current, "| muted:", muted, "| text:", text.slice(0, 40));
 
     // ── Instant nav shortcut (pre-API) ────────────────────────────────────────
     const navMatch = NAV_INTENTS.find(n => n.re.test(text));
@@ -1845,6 +1847,7 @@ export default function NeuralRing() {
         .then(d => { dynamicContext = d?.context ?? null; })
         .catch(() => {});
 
+      console.log("[vdiag] system-prompt gate | voiceModeRef.current:", voiceModeRef.current, "→ using:", voiceModeRef.current ? "buildVoiceSystem" : "buildChatSystem");
       const system = voiceModeRef.current
         ? buildVoiceSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, availableVoices, leaderboardRank)
         : buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, messages.length === 0, availableVoices);
@@ -1870,6 +1873,7 @@ export default function NeuralRing() {
       let raw;
       let voiceTTSDone = null; // resolves when all sentence-chunked TTS finishes
 
+      console.log("[vdiag] TTS-path gate | voiceModeRef.current:", voiceModeRef.current, "| muted:", muted, "→", (voiceModeRef.current && !muted) ? "STREAMING VOICE" : "NON-VOICE fallback");
       if (voiceModeRef.current && !muted) {
         // ── Streaming voice: sentence-chunked TTS pipeline ───────────────────
         // Each sentence is sent to TTS the moment Claude generates it,
@@ -1946,13 +1950,15 @@ export default function NeuralRing() {
           });
         } catch (err) {
           if (err?.name === "AbortError") throw err;
-          console.warn("[voice stream] falling back to non-streaming:", err.message);
+          console.warn("[vdiag] STREAM FAILED → non-streaming fallback | error:", err.message);
           raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
         }
       } else {
+        console.log("[vdiag] non-voice else branch | voiceModeRef.current:", voiceModeRef.current, "muted:", muted);
         try {
           raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
-        } catch {
+        } catch (claudeErr) {
+          console.warn("[vdiag] Claude failed, using Groq fallback | error:", claudeErr?.message);
           raw = await groq(apiMessages, finalSystem);
         }
       }
@@ -1962,6 +1968,7 @@ export default function NeuralRing() {
 
       // Apply VOICE tag — match by name, persist + apply immediately
       if (voiceTags.VOICE) {
+        console.log("[vdiag] VOICE tag:", voiceTags.VOICE, "| availableVoices.length:", availableVoices.length);
         const query  = voiceTags.VOICE.toLowerCase().trim();
         const words  = query.split(/\s+/).filter(w => w.length > 2);
         // Score each voice: exact name > partial name > label words coverage
@@ -1974,6 +1981,7 @@ export default function NeuralRing() {
           return { v, score: hits };
         }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
         const match = scored[0]?.v;
+        console.log("[vdiag] VOICE match:", match?.name ?? "NO MATCH", "| top-3:", scored.slice(0,3).map(x=>`${x.v.name}:${x.score}`).join(", "));
         if (match) {
           voiceIdRef.current = match.voice_id;         // sync — next TTS chunk uses this
           setActiveVoiceId(match.voice_id);             // instant chip highlight
@@ -2003,6 +2011,7 @@ export default function NeuralRing() {
       // ── Quiz detection (before parseNav so tags don't confuse nav parser) ───
       const quizCards = parseQuiz(rawClean);
       if (quizCards) {
+        console.log("[vdiag] quiz detected | voiceModeRef.current:", voiceModeRef.current, "→", voiceModeRef.current ? "VOICE one-at-a-time" : "TEXT card dump");
         if (voiceModeRef.current) {
           // ── Voice quiz: one question at a time, spoken ───────────────────
           voiceQuizRef.current = { questions: quizCards, idx: 0, score: 0 };
