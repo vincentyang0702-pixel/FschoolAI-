@@ -51,11 +51,15 @@ export default async function handler(req, res) {
 
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { text, voiceId } = req.body ?? {};
+  const { text, voiceId, speed, voiceSettings } = req.body ?? {};
   if (!text || typeof text !== "string") return res.status(400).json({ error: "text is required" });
 
-  const voice = voiceId || DEFAULT_VOICE_ID;
+  const voice    = voiceId || DEFAULT_VOICE_ID;
   const safeText = text.slice(0, action === "stream" ? 2000 : 500);
+  // speed: 0.7-1.3; pass to ElevenLabs where supported; client uses audio.playbackRate as fallback
+  const spd = (typeof speed === "number" && speed >= 0.7 && speed <= 1.3) ? speed : 1.0;
+  // voiceSettings: caller can override (e.g. TONE_PRESETS); fall back to sensible defaults
+  const vs = voiceSettings ?? { stability: 0.42, similarity_boost: 0.82, style: 0.18, use_speaker_boost: true };
 
   const elevenRes = await fetch(
     `https://api.elevenlabs.io/v1/text-to-speech/${voice}${action === "stream" ? "/stream" : ""}?output_format=mp3_44100_128`,
@@ -65,7 +69,9 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         text: safeText,
         model_id: "eleven_turbo_v2_5",
-        voice_settings: { stability: 0.42, similarity_boost: 0.82, style: 0.18, use_speaker_boost: true },
+        voice_settings: { ...vs, use_speaker_boost: true },
+        // speed param — honoured by eleven_turbo_v2_5+ if supported; ignored otherwise
+        ...(spd !== 1.0 ? { speed: spd } : {}),
       }),
     }
   );

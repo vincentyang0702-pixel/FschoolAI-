@@ -185,7 +185,7 @@ function getUrgentAssignments(assignments) {
   });
 }
 
-function buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, isFirstMessage = false) {
+function buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, isFirstMessage = false, voiceNames = []) {
   const courseList = courseOptions.length
     ? courseOptions.join("\n- ")
     : "No courses loaded yet";
@@ -273,6 +273,15 @@ CRITICAL — quiz content rules:
 - If no course is specified, quiz on the course with the nearest upcoming deadline.
 - If you have no course content in context at all, do NOT generate a quiz. Instead reply: "I need your Canvas synced to quiz you on real material — head to the Canvas page to connect."
 
+VOICE CONTROL: When the student asks you to change how you sound or to perform a voice action, include ONE hidden tag at the very end of your reply (the student never sees tags — they're stripped before display):
+  [VOICE:<name>]     when they ask for a different voice (match by name or description to the available voices listed below)
+  [SPEED:<0.7-1.3>]  when they ask to speak faster/slower (slower≈0.8, faster≈1.2)
+  [TONE:<calm|energetic|neutral|serious>]  when they ask for a mood/persona
+  [READ:assignments]  when they ask you to read their assignments or what's due
+  [QUIZ:<course>]     when they ask to be quizzed out loud (course optional)
+Still reply naturally in words too (e.g. 'Sure — switching to a British voice now.'). Only ONE tag per reply. If no voice action is requested, emit no tag.
+${voiceNames.length > 0 ? `Available voices: ${voiceNames.join(", ")}` : ""}
+
 STRESS SUPPORT: If the student says they're stressed, overwhelmed, or anxious: respond calmly and warmly FIRST (1-2 sentences of genuine acknowledgment, no toxic positivity), THEN offer ONE small concrete next step based on their actual workload — the single easiest or most urgent item, framed as "just this one thing for now". Never dump their full list when they're stressed. Keep it under 4 sentences. If they express serious distress beyond schoolwork, gently suggest they talk to someone they trust or their campus support services.
 
 PLAN REQUESTS: When the student asks what to do / to plan their day / what's next, respond with a SHORT ranked list in this exact format (max 3 items):
@@ -320,6 +329,28 @@ function parseNav(raw) {
   return { cmd: null, text: raw.replace(NAV_STRIP_REGEX, "").trim() };
 }
 
+// ── Tone presets — map intent tag values to ElevenLabs voice_settings ───────
+const TONE_PRESETS = {
+  calm:      { stability: 0.8, similarity_boost: 0.75, style: 0.1 },
+  energetic: { stability: 0.3, similarity_boost: 0.8,  style: 0.6 },
+  neutral:   { stability: 0.5, similarity_boost: 0.75, style: 0.3 },
+  serious:   { stability: 0.7, similarity_boost: 0.7,  style: 0.2 },
+};
+
+// ── Voice intent tag parser ──────────────────────────────────────────────────
+// Extracts [VOICE:x], [SPEED:x], [TONE:x], [READ:x], [QUIZ:x] from Claude reply
+function parseVoiceTags(raw) {
+  const tags = {};
+  let cleaned = raw;
+  const re = /\[(VOICE|SPEED|TONE|READ|QUIZ):?([^\]]*)\]/gi;
+  let m;
+  while ((m = re.exec(raw)) !== null) {
+    tags[m[1].toUpperCase()] = m[2].trim();
+    cleaned = cleaned.replace(m[0], "");
+  }
+  return { tags, cleaned: cleaned.trim() };
+}
+
 // ── ElevenLabs TTS ─────────────────────────────────────────────────────────
 // AudioContext bypasses iOS Safari autoplay restrictions.
 let _audioCtx = null;
@@ -345,11 +376,17 @@ function sanitizeForTTS(text) {
 
 // Returns { duration: seconds, play: fn }
 // Caller decodes audio first, gets duration, then starts typewriter, then plays.
-async function fetchAndDecodeAudio(text, voiceId) {
+async function fetchAndDecodeAudio(text, voiceId, speed = 1.0, voiceSettings) {
+  const body = {
+    text: sanitizeForTTS(text),
+    ...(voiceId ? { voiceId } : {}),
+    ...(speed !== 1.0 ? { speed } : {}),
+    ...(voiceSettings ? { voiceSettings } : {}),
+  };
   const res = await fetch("/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text: sanitizeForTTS(text), ...(voiceId ? { voiceId } : {}) }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`TTS ${res.status}`);
   const { audio } = await res.json();
@@ -358,15 +395,15 @@ async function fetchAndDecodeAudio(text, voiceId) {
   const bytes = new Uint8Array(binaryStr.length);
   for (let i = 0; i < binaryStr.length; i++) bytes[i] = binaryStr.charCodeAt(i);
   const ctx = getAudioContext();
-  // Mobile suspends AudioContext after inactivity — resume before use
   if (ctx.state === "suspended") { try { await ctx.resume(); } catch (_) {} }
   const audioBuffer = await ctx.decodeAudioData(bytes.buffer);
+  const effectiveDuration = audioBuffer.duration / Math.max(speed, 0.1);
   return {
-    duration: audioBuffer.duration, // actual audio duration in seconds
-    // onSourceCreated lets the caller store the source for abort
+    duration: effectiveDuration,
     play: (onSourceCreated) => new Promise((resolve) => {
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
+      source.playbackRate.value = speed; // client-side speed fallback
       source.connect(ctx.destination);
       source.onended = resolve;
       onSourceCreated?.(source);
@@ -758,9 +795,18 @@ export default function NeuralRing() {
   const sessionStartedAt  = useRef(null);
   const exchangeCountRef  = useRef(0); // increments each AI response
 
-  // Ref so speakAndType always reads the LATEST preferred voice without
-  // needing to re-memoize the callback every time userData changes.
+  // Refs — always hold latest prefs without stale closure in speakAndType
   const voiceIdRef     = useRef(userData?.preferred_voice_id ?? null);
+  const speedRef       = useRef(userData?.preferred_speed ?? 1.0);
+  const toneRef        = useRef(userData?.preferred_tone  ?? "neutral");
+
+  // Voice mode state
+  const [voiceMode,        setVoiceMode]        = useState(false);
+  const [isRecording,      setIsRecording]      = useState(false);
+  const [micDenied,        setMicDenied]        = useState(false);
+  const [availableVoices,  setAvailableVoices]  = useState([]);
+  const mediaRecorderRef   = useRef(null);
+  const audioChunksRef     = useRef([]);
 
   const canvasRef      = useRef(null);
   const rafRef         = useRef(null);
@@ -833,10 +879,18 @@ export default function NeuralRing() {
     setRingNameInput(name);
   }, [userData?.ring_name]);
 
-  // Keep voiceIdRef current so speakAndType always uses the latest preference
+  // Keep preference refs current — voiceId, speed, tone
+  useEffect(() => { voiceIdRef.current = userData?.preferred_voice_id ?? null; }, [userData?.preferred_voice_id]);
+  useEffect(() => { speedRef.current   = userData?.preferred_speed    ?? 1.0;  }, [userData?.preferred_speed]);
+  useEffect(() => { toneRef.current    = userData?.preferred_tone     ?? "neutral"; }, [userData?.preferred_tone]);
+
+  // Fetch voice list once — needed for Claude context + [VOICE:x] tag resolution
   useEffect(() => {
-    voiceIdRef.current = userData?.preferred_voice_id ?? null;
-  }, [userData?.preferred_voice_id]);
+    fetch("/api/tts?action=voices")
+      .then(r => r.ok ? r.json() : [])
+      .then(vs => setAvailableVoices(vs ?? []))
+      .catch(() => {});
+  }, []);
 
   // ── Load impressions + last session from Supabase on mount ──────────────────
   useEffect(() => {
@@ -1187,7 +1241,8 @@ export default function NeuralRing() {
     try {
       setSpeaking(true);
       // Decode audio first so we have the real duration
-      const { duration, play } = await fetchAndDecodeAudio(plain, voiceIdRef.current);
+      const tone = TONE_PRESETS[toneRef.current] ?? TONE_PRESETS.neutral;
+      const { duration, play } = await fetchAndDecodeAudio(plain, voiceIdRef.current, speedRef.current, tone);
       // Now start both simultaneously — typewriter matches actual audio length
       await Promise.all([
         play((src) => { audioSourceRef.current = src; }).finally(() => {
@@ -1217,6 +1272,66 @@ export default function NeuralRing() {
     { re: /go to courses|open courses|my courses/i,                  page: "courses"     },
     { re: /go to identity|open identity|my profile/i,                page: "identity"    },
   ];
+
+  // ── Voice mode: STT via Groq Whisper ────────────────────────────────────────
+  async function startVoiceRecording() {
+    if (isRecording) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunksRef.current = [];
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus" : "audio/webm";
+      const mr = new MediaRecorder(stream, { mimeType });
+      mr.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
+      mr.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        setIsRecording(false);
+        if (audioChunksRef.current.length === 0) return;
+        const blob = new Blob(audioChunksRef.current, { type: mimeType });
+        await _transcribeAndSend(blob, mimeType);
+      };
+      mediaRecorderRef.current = mr;
+      mr.start();
+      setIsRecording(true);
+    } catch (err) {
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        setMicDenied(true);
+      }
+      console.warn("[voice] mic error:", err.message);
+    }
+  }
+
+  function stopVoiceRecording() {
+    if (mediaRecorderRef.current?.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+  }
+
+  async function _transcribeAndSend(blob, mimeType) {
+    sphereStateRef.current = "thinking";
+    try {
+      // Convert blob → base64 JSON for /api/stt
+      const base64 = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(fr.result.split(",")[1]);
+        fr.onerror = rej;
+        fr.readAsDataURL(blob);
+      });
+      const sttRes = await fetch("/api/stt", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ audio: base64, mimeType }),
+      });
+      if (!sttRes.ok) throw new Error(`STT ${sttRes.status}`);
+      const { text } = await sttRes.json();
+      if (!text?.trim()) { sphereStateRef.current = "idle"; return; }
+      // Inject into chat exactly like a typed message
+      await sendMessage(text.trim());
+    } catch (err) {
+      console.warn("[voice] STT error:", err.message);
+      sphereStateRef.current = "idle";
+    }
+  }
 
   // ── Chat ──────────────────────────────────────────────────────────────────────────
   const sendMessage = async (overrideText) => {
@@ -1276,7 +1391,8 @@ export default function NeuralRing() {
       const system = buildChatSystem(
         courseOptions, userData, assignments,
         flashcardMap, syllabus, impressions, lastSession, livingMind,
-        messages.length === 0  // isFirstMessage — no prior exchanges yet
+        messages.length === 0,  // isFirstMessage — no prior exchanges yet
+        availableVoices.slice(0, 8).map(v => v.name)
       );
 
       // Wait briefly for context fetch (max 1.2s) — if still pending, proceed without it
@@ -1297,10 +1413,44 @@ export default function NeuralRing() {
         raw = await groq(apiMessages, finalSystem);
       }
 
+      // ── Voice intent tag extraction (strip before display/quiz/nav parsing) ──
+      const { tags: voiceTags, cleaned: rawNoVoice } = parseVoiceTags(raw);
+
+      // Apply VOICE tag — match by name, persist + apply immediately
+      if (voiceTags.VOICE) {
+        const match = availableVoices.find(v =>
+          v.name.toLowerCase().includes(voiceTags.VOICE.toLowerCase())
+        );
+        const newVoiceId = match?.voice_id ?? null;
+        if (newVoiceId) {
+          voiceIdRef.current = newVoiceId;
+          updateUserField("preferred_voice_id", newVoiceId).catch(() => {});
+        }
+      }
+      // Apply SPEED tag
+      if (voiceTags.SPEED) {
+        const s = Math.min(1.3, Math.max(0.7, parseFloat(voiceTags.SPEED) || 1.0));
+        speedRef.current = s;
+        updateUserField("preferred_speed", s).catch(() => {});
+      }
+      // Apply TONE tag
+      if (voiceTags.TONE) {
+        const t = voiceTags.TONE.toLowerCase();
+        if (TONE_PRESETS[t]) {
+          toneRef.current = t;
+          updateUserField("preferred_tone", t).catch(() => {});
+        }
+      }
+      // [READ:assignments] — Claude's text response IS the reading; tag is stripped
+      // [QUIZ:*] — Claude will emit [QUIZ_START]..[QUIZ_END] which is handled below
+
+      // Use cleaned (tag-stripped) response for all downstream processing
+      const rawClean = rawNoVoice;
+
       // ── Quiz detection (before parseNav so tags don't confuse nav parser) ───
-      const quizCards = parseQuiz(raw);
+      const quizCards = parseQuiz(rawClean);
       if (quizCards) {
-        const preText = raw.replace(/\[QUIZ_START\][\s\S]*?\[QUIZ_END\]/, "").trim();
+        const preText = rawClean.replace(/\[QUIZ_START\][\s\S]*?\[QUIZ_END\]/, "").trim();
         const display = preText || "Here's your quiz:";
         logChat(userId, "assistant", display, null);
         setMessages(m => [...m, { role: "assistant", content: display, quiz: quizCards }]);
@@ -1308,7 +1458,7 @@ export default function NeuralRing() {
         return; // don't TTS the quiz block
       }
 
-      const { cmd, text: displayText } = parseNav(raw);
+      const { cmd, text: displayText } = parseNav(rawClean);
       const cleanText = displayText.replace(/<[^>]+>/g, "").trim();
 
       if (cmd?.page) {
@@ -1650,49 +1800,90 @@ export default function NeuralRing() {
               <div ref={messagesEndRef} />
             </div>
 
-            {/* Input */}
-            <div style={{ display: "flex", gap: "10px", padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
-              <input
-                value={input}
-                onChange={e => setInput(e.target.value)}
-                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); getAudioContext(); sendMessage(); } }}
-                placeholder="Ask about assignments, navigate…"
-                style={{
-                  flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
-                  borderRadius: "var(--radius-btn)", padding: "11px 14px", color: "var(--text-primary)",
-                  fontSize: "14px", outline: "none", fontFamily: "inherit",
-                  transition: "border-color var(--dur-base) var(--ease-apple)",
-                }}
-                onFocus={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.22)")}
-                onBlur={e  => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)")}
-              />
-              {(loading || speaking) ? (
-                <button
-                  onClick={stopResponse}
-                  style={{
-                    background: "rgba(255,80,80,0.15)", color: "rgba(255,120,100,0.9)",
-                    border: "1px solid rgba(255,80,80,0.25)", borderRadius: "var(--radius-btn)",
-                    padding: "11px 16px", fontSize: "14px", fontWeight: "600",
-                    cursor: "pointer", fontFamily: "inherit", flexShrink: 0,
-                  }}
-                >
-                  Stop
-                </button>
+            {/* Input + voice mode */}
+            <div style={{ padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
+
+              {/* Mic-denied warning */}
+              {micDenied && (
+                <p style={{ color: "rgba(255,100,90,0.8)", fontSize: "12px", marginBottom: "8px", textAlign: "center" }}>
+                  Microphone access denied — allow it in browser settings to use voice mode.
+                </p>
+              )}
+
+              {voiceMode ? (
+                /* ── Voice mode: tap-to-talk ── */
+                <div style={{ display: "flex", gap: "10px", alignItems: "center" }}>
+                  <button
+                    onPointerDown={e => { e.preventDefault(); getAudioContext(); startVoiceRecording(); }}
+                    onPointerUp={stopVoiceRecording}
+                    onPointerCancel={stopVoiceRecording}
+                    style={{
+                      flex: 1, padding: "14px",
+                      background: isRecording ? "rgba(255,59,48,0.18)" : "rgba(196,154,60,0.1)",
+                      border: `1px solid ${isRecording ? "rgba(255,59,48,0.4)" : "rgba(196,154,60,0.3)"}`,
+                      borderRadius: "var(--radius-btn)", color: isRecording ? "rgba(255,100,90,0.9)" : "#C49A3C",
+                      fontSize: "14px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit",
+                      transition: "all 0.15s",
+                    }}
+                  >
+                    {isRecording ? "● Recording — release to send" : "Hold to speak"}
+                  </button>
+                  {/* Exit voice mode */}
+                  <button
+                    onClick={() => { stopVoiceRecording(); setVoiceMode(false); setMicDenied(false); }}
+                    style={{ background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "var(--radius-btn)", padding: "11px 14px", color: "rgba(255,255,255,0.5)", fontSize: "12px", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}
+                  >
+                    Text
+                  </button>
+                </div>
               ) : (
-                <button
-                  onClick={() => { getAudioContext(); sendMessage(); }}
-                  disabled={!input.trim()}
-                  style={{
-                    background: !input.trim() ? "rgba(255,255,255,0.18)" : "var(--color-accent)",
-                    color: "#111", border: "none", borderRadius: "var(--radius-btn)",
-                    padding: "11px 18px", fontSize: "14px", fontWeight: "600",
-                    cursor: !input.trim() ? "not-allowed" : "pointer",
-                    fontFamily: "inherit", flexShrink: 0,
-                    transition: "background var(--dur-base) var(--ease-apple)",
-                  }}
-                >
-                  Send
-                </button>
+                /* ── Text mode (default) ── */
+                <div style={{ display: "flex", gap: "10px" }}>
+                  {/* Mic button — enters voice mode */}
+                  <button
+                    onClick={() => { getAudioContext(); setVoiceMode(true); }}
+                    title="Voice mode"
+                    style={{
+                      background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
+                      borderRadius: "var(--radius-btn)", padding: "11px 13px",
+                      cursor: "pointer", flexShrink: 0, color: "rgba(255,255,255,0.45)",
+                      transition: "all 0.15s", outline: "none",
+                    }}
+                    onMouseEnter={e => e.currentTarget.style.color = "#C49A3C"}
+                    onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.45)"}
+                  >
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+                      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/>
+                      <line x1="12" y1="19" x2="12" y2="23"/>
+                      <line x1="8"  y1="23" x2="16" y2="23"/>
+                    </svg>
+                  </button>
+                  <input
+                    value={input}
+                    onChange={e => setInput(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); getAudioContext(); sendMessage(); } }}
+                    placeholder="Ask about assignments, navigate…"
+                    style={{
+                      flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
+                      borderRadius: "var(--radius-btn)", padding: "11px 14px", color: "var(--text-primary)",
+                      fontSize: "14px", outline: "none", fontFamily: "inherit",
+                      transition: "border-color var(--dur-base) var(--ease-apple)",
+                    }}
+                    onFocus={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.22)")}
+                    onBlur={e  => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)")}
+                  />
+                  {(loading || speaking) ? (
+                    <button onClick={stopResponse} style={{ background: "rgba(255,80,80,0.15)", color: "rgba(255,120,100,0.9)", border: "1px solid rgba(255,80,80,0.25)", borderRadius: "var(--radius-btn)", padding: "11px 16px", fontSize: "14px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+                      Stop
+                    </button>
+                  ) : (
+                    <button onClick={() => { getAudioContext(); sendMessage(); }} disabled={!input.trim()}
+                      style={{ background: !input.trim() ? "rgba(255,255,255,0.18)" : "var(--color-accent)", color: "#111", border: "none", borderRadius: "var(--radius-btn)", padding: "11px 18px", fontSize: "14px", fontWeight: "600", cursor: !input.trim() ? "not-allowed" : "pointer", fontFamily: "inherit", flexShrink: 0, transition: "background var(--dur-base) var(--ease-apple)" }}>
+                      Send
+                    </button>
+                  )}
+                </div>
               )}
             </div>
           </div>
