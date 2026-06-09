@@ -1,65 +1,55 @@
 // api/discord.js — unified Discord handler (single Vercel function)
 // Routes:
-//   GET  /api/discord?action=login&uid=<fschool_uid>  — start OAuth, redirect user to Discord
-//   GET  /api/discord?action=callback&code=&state=    — exchange code, store discord id, auto-join server
-//   POST /api/discord?action=interactions             — Discord slash-command webhook (/feedback)
+//   GET  /api/discord?action=login&uid=<uid>           — start OAuth
+//   GET  /api/discord?action=callback&code=&state=     — exchange code, award tokens
+//   GET  /api/discord?action=post-feedback-button      — one-time: post embed+button to channel
+//                     &secret=DISCORD_ADMIN_SECRET&channel_id=ID
+//   POST /api/discord?action=interactions              — Discord webhook (PING/slash/button/modal)
 //
 // Env vars required (set in Vercel):
 //   DISCORD_CLIENT_ID, DISCORD_CLIENT_SECRET, DISCORD_BOT_TOKEN,
-//   DISCORD_PUBLIC_KEY        (Developer Portal → General Information → Public Key)
-//   DISCORD_GUILD_ID          (right-click your server → Copy Server ID, with Dev Mode on)
-//   DISCORD_REDIRECT_URI      (EXACTLY: https://neuro-agi-topaz.vercel.app/api/discord?action=callback)
-//   APP_BASE_URL              (https://neuro-agi-topaz.vercel.app — where to send users after connecting)
+//   DISCORD_PUBLIC_KEY     (Developer Portal → General Information → Public Key)
+//   DISCORD_GUILD_ID       (right-click server → Copy Server ID)
+//   DISCORD_REDIRECT_URI   (https://neuro-agi-topaz.vercel.app/api/discord?action=callback)
+//   APP_BASE_URL           (https://neuro-agi-topaz.vercel.app)
+//   DISCORD_ADMIN_SECRET   (any secret string — used to guard post-feedback-button)
 //   SUPABASE_URL, SUPABASE_SERVICE_KEY
-//
-// IMPORTANT: this file uses tweetnacl for interaction signature verification.
-// Run `npm install tweetnacl` and commit the lockfile before deploying.
 
 import { createClient } from "@supabase/supabase-js";
 import nacl from "tweetnacl";
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
-
 const DISCORD_API = "https://discord.com/api/v10";
 
-// Vercel: we need the raw body for signature verification, so disable automatic parsing.
+// Vercel: disable automatic body parsing — raw bytes required for Ed25519 verify.
 export const config = { api: { bodyParser: false } };
 
 // ── Inline token-award helper ─────────────────────────────────────────────────
-// Routes awards through token_events + users.points + leaderboard so they are
-// leaderboard-visible. Token amounts match api/token-engine.js — keep in sync.
+// Mirrors api/token-engine.js. Keeps amounts in sync manually.
 const DISCORD_AWARD_CFG = {
-  discord_connected: { tokens: 5,  lifetimeMax: 1    }, // once per account
-  feedback_given:    { tokens: 1,  lifetimeMax: null }, // every /feedback submission
+  discord_connected: { tokens: 5, lifetimeMax: 1    },
+  feedback_given:    { tokens: 1, lifetimeMax: null },
 };
 
 async function awardPoints(userId, action) {
   const cfg = DISCORD_AWARD_CFG[action];
   if (!cfg) return { awarded: false, reason: "unknown_action" };
 
-  // Lifetime-limit check (discord_connected is once-only)
   if (cfg.lifetimeMax) {
     const { count, error: ltErr } = await supabase
-      .from("token_events")
-      .select("id", { count: "exact", head: true })
-      .eq("user_id", userId)
-      .eq("action", action);
-    if (ltErr) console.error(`[discord/awardPoints] token_events lifetime-check error (${action}):`, ltErr.message);
+      .from("token_events").select("id", { count: "exact", head: true })
+      .eq("user_id", userId).eq("action", action);
+    if (ltErr) console.error(`[discord/awardPoints] lifetime-check error (${action}):`, ltErr.message);
     if ((count ?? 0) >= cfg.lifetimeMax) return { awarded: false, reason: "lifetime_limit" };
   }
 
   const dt = new Date().toISOString().slice(0, 10);
 
-  // 1. Write token event
   const { error: evtErr } = await supabase.from("token_events").insert({
-    user_id:   userId,
-    action,
-    tokens:    cfg.tokens,
-    awarded_on: dt,
+    user_id: userId, action, tokens: cfg.tokens, awarded_on: dt,
   });
   if (evtErr) console.error(`[discord/awardPoints] token_events.insert error (${action}):`, evtErr.message, "| user_id:", userId);
 
-  // 2. Read + increment users.points
   const { data: userRow, error: userReadErr } = await supabase
     .from("users").select("points").eq("id", userId).maybeSingle();
   if (userReadErr) console.error(`[discord/awardPoints] users.select error (${action}):`, userReadErr.message, "| user_id:", userId);
@@ -69,7 +59,6 @@ async function awardPoints(userId, action) {
     .from("users").update({ points: newPoints }).eq("id", userId);
   if (userUpdErr) console.error(`[discord/awardPoints] users.update (points) error (${action}):`, userUpdErr.message, "| user_id:", userId);
 
-  // 3. Sync leaderboard
   const { error: lbErr } = await supabase.from("leaderboard").upsert(
     { user_id: userId, points: newPoints, updated_at: new Date().toISOString() },
     { onConflict: "user_id" }
@@ -79,10 +68,8 @@ async function awardPoints(userId, action) {
   return { awarded: true, tokens: cfg.tokens, newPoints };
 }
 
+// ── Raw body reader — event-based, reliable on Vercel Node 18+ ESM ────────────
 function readRawBody(req) {
-  // Event-based read — more reliable than for-await-of on Vercel's Node 18+ ESM runtime.
-  // for-await-of on IncomingMessage can yield zero chunks when bodyParser:false is active
-  // in certain Vercel configurations, producing an empty buffer that breaks Ed25519 verify.
   return new Promise((resolve, reject) => {
     const chunks = [];
     req.on("data", chunk => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
@@ -91,16 +78,72 @@ function readRawBody(req) {
   });
 }
 
+// ── Feedback modal definition ─────────────────────────────────────────────────
+// type 9 = MODAL response. Sent for both /feedback command and button click.
+const FEEDBACK_MODAL = {
+  type: 9,
+  data: {
+    custom_id: "feedback_modal",
+    title: "FschoolAI Feedback",
+    components: [
+      {
+        type: 1,
+        components: [{
+          type: 4, custom_id: "rating", style: 1,
+          label: "How would you rate FschoolAI? (1–5)",
+          placeholder: "5", required: true, min_length: 1, max_length: 1,
+        }],
+      },
+      {
+        type: 1,
+        components: [{
+          type: 4, custom_id: "working", style: 2,
+          label: "What's working well for you?",
+          required: true, max_length: 500,
+        }],
+      },
+      {
+        type: 1,
+        components: [{
+          type: 4, custom_id: "improve", style: 2,
+          label: "What should we improve?",
+          required: true, max_length: 500,
+        }],
+      },
+      {
+        type: 1,
+        components: [{
+          type: 4, custom_id: "feature", style: 2,
+          label: "A feature you'd love?",
+          required: false, max_length: 300,
+        }],
+      },
+      {
+        type: 1,
+        components: [{
+          type: 4, custom_id: "extra", style: 1,
+          label: "Anything else? (optional)",
+          required: false, max_length: 200,
+        }],
+      },
+    ],
+  },
+};
+
+// ── Helper: extract a field value from modal submit components ────────────────
+function modalField(body, id) {
+  return body.data.components
+    .flatMap(row => row.components)
+    .find(c => c.custom_id === id)?.value?.trim() || null;
+}
+
 export default async function handler(req, res) {
   const action = req.query.action;
 
-  // ── GET ?action=login ─────────────────────────────────────────────
-  // Sends the user to Discord's consent screen. `uid` is the fschool_uid
-  // we round-trip via the OAuth `state` param so the callback knows who connected.
+  // ── GET ?action=login ─────────────────────────────────────────────────────
   if (action === "login") {
     const uid = req.query.uid;
     if (!uid) return res.status(400).send("Missing uid");
-
     const params = new URLSearchParams({
       client_id:     process.env.DISCORD_CLIENT_ID,
       redirect_uri:  process.env.DISCORD_REDIRECT_URI,
@@ -113,90 +156,110 @@ export default async function handler(req, res) {
     return res.end();
   }
 
-  // ── GET ?action=callback ──────────────────────────────────────────
+  // ── GET ?action=callback ──────────────────────────────────────────────────
   if (action === "callback") {
     const { code, state: uid } = req.query;
     const appBase = process.env.APP_BASE_URL || "https://neuro-agi-topaz.vercel.app";
     if (!code || !uid) return res.writeHead(302, { Location: `${appBase}/?discord=error` }).end();
 
     try {
-      // 1. Exchange the code for an access token
       const tokenRes = await fetch(`${DISCORD_API}/oauth2/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: new URLSearchParams({
-          client_id:     process.env.DISCORD_CLIENT_ID,
-          client_secret: process.env.DISCORD_CLIENT_SECRET,
-          grant_type:    "authorization_code",
-          code,
-          redirect_uri:  process.env.DISCORD_REDIRECT_URI,
+          client_id: process.env.DISCORD_CLIENT_ID, client_secret: process.env.DISCORD_CLIENT_SECRET,
+          grant_type: "authorization_code", code, redirect_uri: process.env.DISCORD_REDIRECT_URI,
         }),
       });
       if (!tokenRes.ok) throw new Error(`token exchange ${tokenRes.status}`);
       const token = await tokenRes.json();
 
-      // 2. Identify the Discord user
       const meRes = await fetch(`${DISCORD_API}/users/@me`, {
         headers: { Authorization: `Bearer ${token.access_token}` },
       });
       if (!meRes.ok) throw new Error(`users/@me ${meRes.status}`);
       const me = await meRes.json();
 
-      // 3. Auto-join them to the beta server (requires guilds.join scope + bot in the server)
-      //    PUT returns 201 (added) or 204 (already a member) — both are success.
       const joinRes = await fetch(
         `${DISCORD_API}/guilds/${process.env.DISCORD_GUILD_ID}/members/${me.id}`,
         {
           method: "PUT",
-          headers: {
-            Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}`,
-            "Content-Type": "application/json",
-          },
+          headers: { Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}`, "Content-Type": "application/json" },
           body: JSON.stringify({ access_token: token.access_token }),
         }
       );
       const joined = joinRes.status === 201 || joinRes.status === 204;
 
-      // 4. Check if this account already had Discord linked (for idempotency)
       const { data: existing, error: lookupErr } = await supabase
         .from("users").select("discord_user_id").eq("id", uid).maybeSingle();
       if (lookupErr) console.error("[discord/callback] users.select error:", lookupErr.message, "| uid:", uid);
 
-      // 5. Write discord_user_id to users table
       const { error: linkErr } = await supabase
         .from("users").update({ discord_user_id: me.id }).eq("id", uid);
       if (linkErr) console.error("[discord/callback] users.update (discord_user_id) error:", linkErr.message, "| uid:", uid);
 
-      // 6. Award connection tokens through engine — once per account (lifetimeMax:1),
-      //    hits leaderboard.points + token_events (leaderboard-visible).
-      //    Only fires on first link; awardPoints handles the lifetime check internally.
       if (!existing?.discord_user_id) {
         const award = await awardPoints(uid, "discord_connected");
-        console.log("[discord/callback] discord_connected award result:", award);
+        console.log("[discord/callback] discord_connected award:", award);
       }
 
-      const status = joined ? "connected" : "connected_nojoin";
-      return res.writeHead(302, { Location: `${appBase}/?discord=${status}` }).end();
+      return res.writeHead(302, { Location: `${appBase}/?discord=${joined ? "connected" : "connected_nojoin"}` }).end();
     } catch (err) {
       console.error("[discord/callback] unhandled error:", err.message);
       return res.writeHead(302, { Location: `${appBase}/?discord=error` }).end();
     }
   }
 
-  // ── POST ?action=interactions ─────────────────────────────────────
-  // Discord posts here for the PING verification handshake and for slash commands.
+  // ── GET ?action=post-feedback-button ──────────────────────────────────────
+  // One-time admin call: posts the feedback embed + button to a Discord channel.
+  // Run: GET /api/discord?action=post-feedback-button&secret=SECRET&channel_id=ID
+  if (action === "post-feedback-button") {
+    const secret    = req.query.secret;
+    const channelId = req.query.channel_id;
+    if (!secret || secret !== (process.env.DISCORD_ADMIN_SECRET || "")) {
+      return res.status(401).json({ error: "Unauthorized — set DISCORD_ADMIN_SECRET in Vercel env vars" });
+    }
+    if (!channelId) return res.status(400).json({ error: "channel_id query param required" });
+
+    const msgRes = await fetch(`${DISCORD_API}/channels/${channelId}/messages`, {
+      method: "POST",
+      headers: { Authorization: `Bot ${process.env.DISCORD_BOT_TOKEN}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        embeds: [{
+          title: "FschoolAI Feedback",
+          description: "Help us build the best academic AI — takes 30 seconds.",
+          color: 0xC49A3C,
+        }],
+        components: [{
+          type: 1,
+          components: [{
+            type: 2, style: 1, label: "Share Feedback", custom_id: "open_feedback",
+          }],
+        }],
+      }),
+    });
+
+    if (!msgRes.ok) {
+      const errText = await msgRes.text();
+      console.error("[discord/post-feedback-button] Discord API error:", msgRes.status, errText);
+      return res.status(502).json({ error: `Discord API ${msgRes.status}`, detail: errText.slice(0, 200) });
+    }
+    const msg = await msgRes.json();
+    return res.status(200).json({ ok: true, message_id: msg.id, channel_id: channelId });
+  }
+
+  // ── POST ?action=interactions ─────────────────────────────────────────────
   if (action === "interactions") {
     const signature = req.headers["x-signature-ed25519"];
     const timestamp = req.headers["x-signature-timestamp"];
     const raw = await readRawBody(req);
 
-    // Diagnostic: empty raw body means bodyParser:false is not working
     if (!raw.length) {
-      console.error("[discord/interactions] raw body is EMPTY — bodyParser:false may be ineffective in this runtime");
+      console.error("[discord/interactions] raw body is EMPTY — bodyParser:false may be ineffective");
     }
 
-    // Verify the request really came from Discord (Ed25519).
-    // .trim() guards against Vercel env var editor adding trailing newlines to the key.
+    // Ed25519 signature verify — MUST use raw bytes before any JSON parsing.
+    // .trim() guards against Vercel env var editor appending trailing newlines.
     const verified = signature && timestamp && raw.length > 0 && nacl.sign.detached.verify(
       Buffer.concat([Buffer.from(timestamp.trim()), raw]),
       Buffer.from(signature.trim(), "hex"),
@@ -206,64 +269,109 @@ export default async function handler(req, res) {
 
     const body = JSON.parse(raw.toString("utf8"));
 
-    // PING → PONG (Discord's endpoint verification)
+    // ── type 1: PING → PONG ───────────────────────────────────────────────
     if (body.type === 1) return res.status(200).json({ type: 1 });
 
-    // APPLICATION_COMMAND
+    // ── type 2: APPLICATION_COMMAND (/feedback) → open modal ─────────────
     if (body.type === 2 && body.data?.name === "feedback") {
+      return res.status(200).json(FEEDBACK_MODAL);
+    }
+
+    // ── type 3: MESSAGE_COMPONENT (button click) → open modal ────────────
+    if (body.type === 3 && body.data?.custom_id === "open_feedback") {
+      return res.status(200).json(FEEDBACK_MODAL);
+    }
+
+    // ── type 5: MODAL_SUBMIT → save structured feedback + award token ─────
+    if (body.type === 5 && body.data?.custom_id === "feedback_modal") {
       const discordId = body.member?.user?.id || body.user?.id;
-      const content   = body.data.options?.find(o => o.name === "message")?.value || "";
+
+      // Extract all five fields
+      const ratingRaw = modalField(body, "rating");
+      const working   = modalField(body, "working");
+      const improve   = modalField(body, "improve");
+      const feature   = modalField(body, "feature");
+      const extra     = modalField(body, "extra");
+
+      // Validate rating (1-5); accept feedback regardless, flag invalid as null
+      const ratingNum = parseInt(ratingRaw, 10);
+      const rating    = ratingNum >= 1 && ratingNum <= 5 ? ratingNum : null;
+      if (ratingRaw && rating === null) {
+        console.warn("[discord/modal] invalid rating value:", ratingRaw, "| discordId:", discordId);
+      }
+
+      // Combined content fallback (keeps legacy queries working)
+      const content = [
+        `Rating: ${ratingRaw ?? "—"}`,
+        `Working: ${working ?? "—"}`,
+        `Improve: ${improve ?? "—"}`,
+        ...(feature ? [`Feature: ${feature}`] : []),
+        ...(extra   ? [`Extra: ${extra}`]     : []),
+      ].join("\n");
 
       try {
-        // Look up the fschool user by their Discord ID
+        // Look up fschool user — save regardless, token only if linked
         const { data: user, error: userLookupErr } = await supabase
           .from("users").select("id, feedback_points")
           .eq("discord_user_id", discordId).maybeSingle();
-        if (userLookupErr) console.error("[discord/interactions] users.select error:", userLookupErr.message, "| discordId:", discordId);
+        if (userLookupErr) console.error("[discord/modal] users.select error:", userLookupErr.message, "| discordId:", discordId);
 
+        // Write structured feedback row
+        const { error: fbErr } = await supabase.from("feedback").insert({
+          user_id:         user?.id ?? null,
+          discord_user_id: discordId,
+          content,
+          rating,
+          working,
+          improve,
+          feature,
+          extra,
+          points_awarded:  user ? 1 : 0,
+        });
+        if (fbErr) console.error("[discord/modal] feedback.insert error:", fbErr.message, "| discordId:", discordId);
+
+        // Unlinked user — save feedback but no token
         if (!user) {
           return res.status(200).json({
             type: 4,
             data: {
-              flags: 64, // ephemeral
-              content: "I couldn't find your FSchoolAI account linked to this Discord. Connect it in the app first (Onboarding → Join the community), then try again.",
+              flags: 64,
+              content: "Feedback recorded — link your FSchoolAI account in the app to earn tokens for future submissions.",
             },
           });
         }
 
-        // Write to feedback table (tracks submission history)
-        const { error: fbErr } = await supabase.from("feedback").insert({
-          user_id:         user.id,
-          discord_user_id: discordId,
-          content,
-          points_awarded:  1,
-        });
-        if (fbErr) console.error("[discord/interactions] feedback.insert error:", fbErr.message, "| user_id:", user.id);
-
-        // Increment feedback_points counter (separate tracking field, not leaderboard-visible)
+        // Increment feedback_points tracking counter
         const { error: fpErr } = await supabase
-          .from("users")
-          .update({ feedback_points: (user.feedback_points || 0) + 1 })
-          .eq("id", user.id);
-        if (fpErr) console.error("[discord/interactions] users.update (feedback_points) error:", fpErr.message, "| user_id:", user.id);
+          .from("users").update({ feedback_points: (user.feedback_points || 0) + 1 }).eq("id", user.id);
+        if (fpErr) console.error("[discord/modal] users.update (feedback_points) error:", fpErr.message, "| user_id:", user.id);
 
-        // Award leaderboard-visible token through engine (hits token_events + leaderboard)
+        // Award leaderboard-visible token through engine
         const award = await awardPoints(user.id, "feedback_given");
-        console.log("[discord/interactions] feedback_given award result:", award);
+        console.log("[discord/modal] feedback_given award result:", award);
 
-        const newFeedbackCount = (user.feedback_points || 0) + 1;
+        // Personalised thank-you — names what they gave
+        const ratingLine  = rating ? `Thanks for the ${rating}/5` : "Thanks for your feedback";
+        const improveNote = improve ? " and your notes on what to improve" : "";
         return res.status(200).json({
           type: 4,
-          data: { flags: 64, content: `Thanks — feedback logged (${newFeedbackCount} submitted). +1 token added to your leaderboard. 🙌` },
+          data: {
+            flags: 64,
+            content: `${ratingLine}${improveNote} — recorded. +1 token added to your leaderboard.`,
+          },
         });
       } catch (err) {
-        console.error("[discord/interactions] unhandled error:", err.message);
-        return res.status(200).json({ type: 4, data: { flags: 64, content: "Something went wrong saving that. Try again in a sec." } });
+        console.error("[discord/modal] unhandled error:", err.message);
+        return res.status(200).json({
+          type: 4,
+          data: { flags: 64, content: "Something went wrong saving your feedback. Try again in a moment." },
+        });
       }
     }
 
-    return res.status(200).json({ type: 4, data: { flags: 64, content: "Unknown command." } });
+    // Unknown interaction type — acknowledge silently
+    return res.status(200).json({ type: 1 });
   }
 
-  return res.status(400).json({ error: "Unknown action. Use ?action=login, callback, or interactions" });
+  return res.status(400).json({ error: "Unknown action. Use ?action=login, callback, interactions, or post-feedback-button" });
 }
