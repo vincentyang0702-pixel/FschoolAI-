@@ -88,6 +88,25 @@ create table if not exists neuroagi.canvas_data (
   unique(user_id, data_type)
 );
 
+-- ── files (extension file index — one row per LMS file) ──────
+create table if not exists neuroagi.files (
+  id            uuid primary key default gen_random_uuid(),
+  user_id       text references neuroagi.users(id) on delete cascade,
+  course_id     uuid references neuroagi.courses(id) on delete cascade,
+  assignment_id uuid references neuroagi.assignments(id) on delete set null,
+  lms_file_id   text,
+  name          text,
+  file_type     text,
+  size_bytes    bigint,
+  source_url    text,
+  folder        text,
+  status        text,
+  content_text  text,   -- PHASE 2: extracted text for the AI (null until then)
+  source        text default 'extension',
+  updated_at    timestamptz default now(),
+  unique(user_id, lms_file_id)
+);
+
 -- ── flashcards ───────────────────────────────────────────────
 create table if not exists neuroagi.flashcards (
   id           bigint generated always as identity primary key,
@@ -152,7 +171,7 @@ do $$
 declare t text;
 begin
   foreach t in array array[
-    'users','courses','assignments','canvas_data','flashcards',
+    'users','courses','assignments','files','canvas_data','flashcards',
     'chat_logs','tutor_impressions','tutor_mind','beta_sessions','schools'
   ]
   loop

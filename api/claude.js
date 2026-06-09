@@ -12,15 +12,18 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
   }
 
-  const { messages, system, max_tokens = 400 } = req.body ?? {};
+  const { messages, system, max_tokens = 400, tools } = req.body ?? {};
   if (!messages || !Array.isArray(messages))
     return res.status(400).json({ error: "messages array required" });
 
-  // Sanitize — Anthropic rejects empty content strings
+  // Sanitize — Anthropic rejects empty string content. Array content (tool_use /
+  // tool_result blocks) must pass through untouched (don't stringify it).
   const cleanMessages = messages
-    .filter(m => m?.role && m?.content)
-    .map(m => ({ role: m.role, content: String(m.content).trim() }))
-    .filter(m => m.content.length > 0);
+    .filter(m => m?.role && m?.content != null)
+    .map(m => Array.isArray(m.content)
+      ? { role: m.role, content: m.content }
+      : { role: m.role, content: String(m.content).trim() })
+    .filter(m => Array.isArray(m.content) ? m.content.length > 0 : m.content.length > 0);
 
   if (!cleanMessages.length)
     return res.status(400).json({ error: "No valid messages after sanitization" });
@@ -30,8 +33,15 @@ export default async function handler(req, res) {
     max_tokens: Math.min(Number(max_tokens) || 400, 4096),
     messages:   cleanMessages,
   };
-  if (system && typeof system === "string" && system.trim()) {
+  // system accepts a string OR an array of content blocks (the latter may carry
+  // cache_control breakpoints for prompt caching).
+  if (Array.isArray(system) && system.length) {
+    body.system = system;
+  } else if (system && typeof system === "string" && system.trim()) {
     body.system = system.trim();
+  }
+  if (Array.isArray(tools) && tools.length) {
+    body.tools = tools;
   }
 
   try {
@@ -59,7 +69,14 @@ export default async function handler(req, res) {
 
     const data    = JSON.parse(raw);
     const content = (data.content ?? []).map(b => b.text ?? "").join("");
-    return res.status(200).json({ content });
+    // `content` (joined text) kept for existing callers; `contentBlocks` +
+    // `stop_reason` + `usage` added for the tool-use loop and cache verification.
+    return res.status(200).json({
+      content,
+      contentBlocks: data.content ?? [],
+      stop_reason:   data.stop_reason ?? null,
+      usage:         data.usage ?? null,
+    });
 
   } catch (err) {
     console.error("[claude] proxy error:", err.message);

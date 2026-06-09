@@ -20,6 +20,7 @@ import Assignment  from "./pages/Assignment";
 import Study       from "./pages/Study";
 import Toolkit     from "./pages/Toolkit";
 import Courses     from "./pages/Courses";
+import Files       from "./pages/Files";
 import Identity    from "./pages/Identity";
 import Leaderboard from "./pages/Leaderboard";
 
@@ -30,6 +31,7 @@ const PAGES = {
   study:       Study,
   toolkit:     Toolkit,
   courses:     Courses,
+  files:       Files,
   identity:    Identity,
   leaderboard: Leaderboard,
 };

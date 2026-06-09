@@ -9,10 +9,10 @@ importScripts("shared-sync.js");
 const SUPABASE_URL  = "https://wqgxpouhbwhwpzudrptp.supabase.co";
 const SUPABASE_ANON = "sb_publishable_e-3KMudaL-iXf5GGsuiQaA_VW21ZZFA";
 
-// Use the `public` schema — the app was unified onto public on main (cee437b),
-// where the real users + data live. Both sides MUST match or synced data is
-// invisible to the app.
-const SB_PROFILE = { "Accept-Profile": "public", "Content-Profile": "public" };
+// Write to the isolated `neuroagi` schema — the SAME schema the app reads from
+// (src/supabase.js + every api/* route set schema = 'neuroagi'). Both sides MUST
+// match or synced data is invisible to the app. NOT public.* — that's Vincent's.
+const SB_PROFILE = { "Accept-Profile": "neuroagi", "Content-Profile": "neuroagi" };
 
 // ── Claude extraction via Vercel proxy ────────────────────────────────────────
 // We route through our own API to keep ANTHROPIC_API_KEY server-side.
@@ -211,6 +211,7 @@ async function ingestApiData(userId, data) {
   const now = new Date().toISOString();
   const courses     = data.courses     || [];
   const assignments = data.assignments || [];
+  const files       = data.files       || [];
 
   // 1. Bulk-upsert courses, keyed by the real LMS course id.
   if (courses.length) {
@@ -247,6 +248,7 @@ async function ingestApiData(userId, data) {
         course_id:            refToId[String(a.course_ref)] ?? null,
         canvas_assignment_id: String(a.id),
         title:                a.title || "Assignment",
+        description:          a.description ?? null,   // instructions (stripped HTML) for the tutor
         due_at:               a.due_at || null,
         points_possible:      a.points_possible ?? null,
         score:                a.score ?? null,
@@ -275,9 +277,55 @@ async function ingestApiData(userId, data) {
     } catch (e) { console.warn("[NeuroAgi] assignment prune failed:", e.message); }
   }
 
+  // 5. Files index. Tag each file to its course UUID and (Canvas submissions) its
+  //    assignment UUID, then upsert + prune stale rows exactly like assignments.
+  if (files.length) {
+    const assignRefToId = {};
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/assignments?user_id=eq.${userId}&select=id,canvas_assignment_id`,
+        { headers: { apikey: SUPABASE_ANON, Authorization: `Bearer ${SUPABASE_ANON}`, ...SB_PROFILE } }
+      );
+      (await res.json()).forEach(r => { assignRefToId[String(r.canvas_assignment_id)] = r.id; });
+    } catch { /* leave empty */ }
+
+    const fileByKey = new Map();   // dedupe by lms_file_id (PostgREST rejects dup conflict keys)
+    for (const f of files) {
+      if (!f.id) continue;
+      fileByKey.set(String(f.id), {
+        user_id:       userId,
+        course_id:     refToId[String(f.course_ref)] ?? null,
+        assignment_id: f.assignment_ref != null ? (assignRefToId[String(f.assignment_ref)] ?? null) : null,
+        lms_file_id:   String(f.id),
+        name:          f.name || "file",
+        file_type:     f.file_type || null,
+        size_bytes:    f.size_bytes ?? null,
+        source_url:    f.source_url || null,
+        folder:        f.folder || null,
+        status:        f.status || null,
+        // content_text intentionally left unset — phase 2 extraction fills it.
+        source:        "extension",
+        updated_at:    now,
+      });
+    }
+    await sbUpsert("files", [...fileByKey.values()], "user_id,lms_file_id");
+
+    const syncedCourseIds = [...new Set(Object.values(refToId))];
+    if (syncedCourseIds.length) {
+      try {
+        await fetch(
+          `${SUPABASE_URL}/rest/v1/files?user_id=eq.${userId}&source=eq.extension` +
+          `&course_id=in.(${syncedCourseIds.join(",")})&updated_at=lt.${now}`,
+          { method: "DELETE", headers: { apikey: SUPABASE_ANON, Authorization: `Bearer ${SUPABASE_ANON}`, ...SB_PROFILE } }
+        );
+      } catch (e) { console.warn("[NeuroAgi] file prune failed:", e.message); }
+    }
+  }
+
   return {
     courses:     courses.length,
     assignments: assignments.length,
+    files:       files.length,
     grades:      courses.filter(c => c.current_score != null).length
                  + assignments.filter(a => a.score != null).length,
   };
@@ -344,7 +392,7 @@ ${tables ? `Tables found:\n${tables}` : ""}`;
 
 async function getCurrentStats(userId) {
   // Count rows in the structured tables (HEAD request returns Content-Range count)
-  const stats = { courses: "—", assignments: "—", grades: "—" };
+  const stats = { courses: "—", assignments: "—", grades: "—", files: "—" };
   try {
     const headers = {
       "apikey": SUPABASE_ANON,
@@ -362,6 +410,7 @@ async function getCurrentStats(userId) {
     stats.courses     = await countFrom(`courses?user_id=eq.${userId}&source=eq.extension&select=id`);
     stats.assignments = await countFrom(`assignments?user_id=eq.${userId}&source=eq.extension&select=id`);
     stats.grades      = await countFrom(`assignments?user_id=eq.${userId}&source=eq.extension&score=not.is.null&select=id`);
+    stats.files       = await countFrom(`files?user_id=eq.${userId}&source=eq.extension&select=id`);
   } catch { /* leave dashes */ }
   return stats;
 }
@@ -603,6 +652,7 @@ async function autoSync(userId, tabId) {
     const stats = await getCurrentStats(userId);
     const caps = [{ step: "courses", auto: true, timestamp: Date.now() }];
     if (api.assignments?.length) caps.push({ step: "assignments", auto: true, timestamp: Date.now() });
+    if (api.files?.length) caps.push({ step: "files", auto: true, timestamp: Date.now() });
     if ((api.courses || []).some(c => c.current_score != null)) caps.push({ step: "grades", auto: true, timestamp: Date.now() });
     await chrome.storage.local.set({ neuroagi_captures: caps, neuroagi_stats: stats });
     return { ok: true, via: api.lms };
@@ -625,6 +675,43 @@ async function autoSync(userId, tabId) {
   } catch { /* nothing usable on this page */ }
   return { ok: false };
 }
+
+// ── Always-on background sync (Option C) ──────────────────────────────────────
+// A chrome.alarms timer wakes the service worker on a schedule so data syncs even
+// when the student isn't reloading a portal page. The LMS API calls need a
+// logged-in portal tab's session, so the alarm finds one and runs the SAME
+// autoSync the content script uses — files included. If no portal tab is open it
+// quietly waits for the next tick (nothing to sync against).
+const SYNC_ALARM      = "neuroagi_periodic_sync";
+const SYNC_PERIOD_MIN = 30;
+const PORTAL_RE = [
+  /\/d2l\//i,
+  /instructure\.com/i,
+  /\/course\/view\.php|\/my\/.*moodle|\/moodle\//i,
+  /blackboard\.com|\/ultra\/|\/webapps\/blackboard/i,
+];
+const looksLikePortal = (url) => !!url && PORTAL_RE.some(re => re.test(url));
+
+function ensureSyncAlarm() {
+  chrome.alarms.get(SYNC_ALARM, (a) => {
+    if (!a) chrome.alarms.create(SYNC_ALARM, { periodInMinutes: SYNC_PERIOD_MIN });
+  });
+}
+chrome.runtime.onInstalled.addListener(ensureSyncAlarm);
+chrome.runtime.onStartup.addListener(ensureSyncAlarm);
+
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (alarm.name !== SYNC_ALARM) return;
+  const { neuroagi_user } = await chrome.storage.local.get("neuroagi_user");
+  if (!neuroagi_user?.id) return;                       // not logged in
+  const tabs = await chrome.tabs.query({});
+  const portalTab = tabs.find(t => looksLikePortal(t.url));
+  if (!portalTab) return;                               // no session context right now
+  try {
+    await autoSync(neuroagi_user.id, portalTab.id);
+    await chrome.storage.local.set({ neuroagi_last_autosync: Date.now() });
+  } catch (e) { console.warn("[NeuroAgi] periodic sync failed:", e.message); }
+});
 
 // ── Message listener ──────────────────────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {

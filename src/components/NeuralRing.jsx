@@ -18,17 +18,32 @@ import { supabase } from "../api/supabase";
 import ArtifactPanel from "./ArtifactPanel";
 
 // ── Claude proxy helper (tutor brain — better quality than Groq for conversation) ──
-async function claudeTutor(messages, system, signal) {
+// Returns the full proxy response: { content, contentBlocks, stop_reason, usage }.
+// `tools` is optional; when present the caller drives a tool-use loop.
+async function claudeTutor(messages, system, signal, tools) {
   const res = await fetch("/api/claude", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, system, max_tokens: 400 }),
+    body: JSON.stringify({ messages, system, max_tokens: 400, ...(tools ? { tools } : {}) }),
     signal,  // abort signal from stopResponse()
   });
   if (!res.ok) throw new Error(`Claude proxy ${res.status}`);
-  const { content } = await res.json();
-  return content ?? "";
+  return await res.json();
 }
+
+// The agent's one data-fetch tool. The model calls it only when an answer needs
+// the student's live records; the result is served by /api/tutor-context.
+const RECALL_TOOL = {
+  name: "recall",
+  description: "Look up the student's live academic data — course grades/scores, assignment due dates, missing or late work, synced course files, and flashcards. Call this whenever the answer depends on their actual courses, scores, deadlines, files, or submission status; never guess those. Pass the student's question (or a focused rephrase) as `query`.",
+  input_schema: {
+    type: "object",
+    properties: {
+      query: { type: "string", description: "What to look up, e.g. 'current grades in all courses', 'what's due this week', 'is the HW2 file available'" },
+    },
+    required: ["query"],
+  },
+};
 
 // ── Fire-and-forget impression writer — never awaited in critical path ──
 function writeImpression(userId, userMessage, tutorResponse) {
@@ -830,40 +845,51 @@ export default function NeuralRing() {
         return;
       }
 
-      // ── Dynamic context fetch (chatbot agent upgrade) ─────────────────────
-      // Fires in parallel — if it resolves before Claude, gets injected into prompt
-      let dynamicContext = null;
-      abortCtrlRef.current = new AbortController();
-      const contextFetch = fetch("/api/tutor-context", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, userMessage: userMsg.content }),
-      })
-        .then(r => r.ok ? r.json() : null)
-        .then(d => { dynamicContext = d?.context ?? null; })
-        .catch(() => {});
-
-      const system = buildChatSystem(
+      // ── Stable, cacheable system prefix (no per-query data baked in) ──────
+      const systemText = buildChatSystem(
         courseOptions, userData, assignments,
         flashcardMap, syllabus, impressions, lastSession, livingMind,
         messages.length === 0,  // isFirstMessage — no prior exchanges yet
         courses                  // per-course grades for grade-aware answers
       );
+      // Cache the system prefix; recalled data arrives later as tool results,
+      // which sit AFTER the cache breakpoint and never invalidate it.
+      const system = [{ type: "text", text: systemText, cache_control: { type: "ephemeral" } }];
 
-      // Wait briefly for context fetch (max 1.2s) — if still pending, proceed without it
-      await Promise.race([contextFetch, new Promise(r => setTimeout(r, 1200))]);
+      abortCtrlRef.current = new AbortController();
+      const signal = abortCtrlRef.current.signal;
 
-      // Append dynamic context to system prompt if retrieved
-      const finalSystem = dynamicContext
-        ? `${system}\n\nLIVE DATA (just fetched for this query):\n${dynamicContext}`
-        : system;
-
-      // Use Claude for tutor brain; fall back to Groq if key missing
-      let raw;
+      // ── Tool-use loop ──────────────────────────────────────────────────────
+      // Replaces the old classify→prefetch→6s-race. The model calls `recall` only
+      // when it actually needs live data: simple chat skips the DB entirely, and
+      // recalled context arrives in-loop instead of being raced into the prompt.
+      let raw = "";
       try {
-        raw = await claudeTutor([...messages, userMsg], finalSystem, abortCtrlRef.current?.signal);
+        let convo = [...messages, userMsg];
+        for (let hop = 0; hop < 3; hop++) {
+          const resp = await claudeTutor(convo, system, signal, [RECALL_TOOL]);
+          if (resp.stop_reason !== "tool_use") { raw = resp.content || ""; break; }
+
+          const toolUses = (resp.contentBlocks || []).filter(b => b.type === "tool_use");
+          convo = [...convo, { role: "assistant", content: resp.contentBlocks }];
+          const results = [];
+          for (const tu of toolUses) {
+            let ctx = null;
+            try {
+              const r = await fetch("/api/tutor-context", {
+                method:  "POST",
+                headers: { "Content-Type": "application/json" },
+                body:    JSON.stringify({ userId, userMessage: tu.input?.query ?? userMsg.content }),
+                signal,
+              });
+              ctx = r.ok ? (await r.json()).context : null;
+            } catch { /* recall failed — report empty to the model */ }
+            results.push({ type: "tool_result", tool_use_id: tu.id, content: ctx || "No matching data found in the student's records." });
+          }
+          convo = [...convo, { role: "user", content: results }];
+        }
       } catch {
-        raw = await groq([...messages, userMsg], finalSystem);
+        raw = await groq([...messages, userMsg], systemText);  // fallback — no tools
       }
 
       const { cmd, text: displayText } = parseNav(raw);

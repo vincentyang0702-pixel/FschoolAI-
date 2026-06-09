@@ -21,6 +21,22 @@ async function lmsApiSync() {
     return { r, data: await r.json() };
   };
 
+  // File helpers (shared by every LMS block below). Both are pure so they stay
+  // valid after this function is serialized + injected into the page.
+  const fileType = (name, mime) => {
+    const n = String(name || "");
+    const ext = n.includes(".") ? n.split(".").pop().toLowerCase() : "";
+    if (ext && ext.length <= 5 && /^[a-z0-9]+$/.test(ext)) return ext;
+    if (mime) { const m = String(mime).split("/").pop(); if (m) return m.toLowerCase(); }
+    return "file";
+  };
+  // Short, stable, collision-resistant id from a long key (e.g. a file url).
+  const hashId = (prefix, k) => {
+    let h = 0; const s = String(k);
+    for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+    return prefix + (h >>> 0).toString(36);
+  };
+
   // ── CANVAS ──────────────────────────────────────────────────────────────
   try {
     if (window.ENV && window.ENV.current_user_id) {
@@ -46,6 +62,7 @@ async function lmsApiSync() {
                    current_score: e?.computed_current_score ?? null, final_score: e?.computed_final_score ?? null };
         });
       const assignments = [];
+      const files = [];
       await Promise.all(courses.map(async (c) => {
         try {
           const raw = await pageAll(`/courses/${c.id}/assignments?include[]=submission`);
@@ -54,12 +71,33 @@ async function lmsApiSync() {
             assignments.push({ course_ref: c.id, id: String(a.id), title: a.name || "Assignment",
               due_at: a.due_at || null, points_possible: a.points_possible ?? null,
               score: s.score ?? null, submitted_at: s.submitted_at || null,
+              // Assignment instructions (Canvas returns HTML) — strip tags, cap length.
+              // Lets the tutor answer "what does this assignment actually ask for?".
+              description: a.description ? String(a.description).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 4000) : null,
               missing: Boolean(s.missing) || s.workflow_state === "unsubmitted" });
+            // Submitted attachments → files tagged to this assignment.
+            for (const at of (s.attachments || [])) {
+              files.push({ course_ref: c.id, assignment_ref: String(a.id),
+                id: "canvas_subfile_" + at.id, name: at.display_name || at.filename || ("file_" + at.id),
+                file_type: fileType(at.display_name || at.filename, at["content-type"]),
+                size_bytes: at.size ?? null, source_url: at.url || null,
+                folder: a.name || null, status: "submitted" });
+            }
           }
         } catch { /* skip course */ }
+        // Course materials (Files tab) — may be disabled per course (403).
+        try {
+          for (const f of await pageAll(`/courses/${c.id}/files`)) {
+            files.push({ course_ref: c.id, assignment_ref: null,
+              id: "canvas_file_" + f.id, name: f.display_name || f.filename || ("file_" + f.id),
+              file_type: fileType(f.display_name || f.filename, f["content-type"]),
+              size_bytes: f.size ?? null, source_url: f.url || null,
+              folder: null, status: "course_material" });
+          }
+        } catch { /* files tab disabled for this course */ }
       }));
-      D("Canvas synced — courses", courses.length, "| assignments", assignments.length, "| graded courses", courses.filter(c => c.current_score != null).length);
-      return { lms: "canvas", courses, assignments };
+      D("Canvas synced — courses", courses.length, "| assignments", assignments.length, "| files", files.length, "| graded courses", courses.filter(c => c.current_score != null).length);
+      return { lms: "canvas", courses, assignments, files };
     }
   } catch (e) { D("adapter error:", e && e.message); }
 
@@ -92,7 +130,27 @@ async function lmsApiSync() {
           }
         } catch { /* skip */ }
       }));
-      return { lms: "moodle", courses, assignments };
+      // Course materials → files (downloadable via session pluginfile.php).
+      const files = [];
+      await Promise.all(courses.map(async (c) => {
+        try {
+          const sections = await call("core_course_get_contents", { courseid: Number(c.id) });
+          for (const sec of (sections || [])) {
+            for (const mod of (sec.modules || [])) {
+              for (const ct of (mod.contents || [])) {
+                if (ct.type !== "file" || !ct.fileurl) continue;
+                files.push({ course_ref: c.id, assignment_ref: null,
+                  id: hashId("moodle_file_" + c.id + "_", ct.fileurl),
+                  name: ct.filename || mod.name || "file",
+                  file_type: fileType(ct.filename, ct.mimetype),
+                  size_bytes: ct.filesize ?? null, source_url: ct.fileurl || null,
+                  folder: mod.name || sec.name || null, status: "course_material" });
+              }
+            }
+          }
+        } catch { /* core_course_get_contents not exposed via ajax */ }
+      }));
+      return { lms: "moodle", courses, assignments, files };
     }
   } catch (e) { D("adapter error:", e && e.message); }
 
@@ -250,8 +308,30 @@ async function lmsApiSync() {
 
         assignments.push(...byTitle.values());
       }));
-      D("D2L synced — versions", lpV, leV, "| courses", courses.length, "| assignments", assignments.length, "| graded courses", courses.filter(c => c.current_score != null).length);
-      return { lms: "d2l", courses, assignments };
+      // Content TOC → file topics (course materials). Modules nest, so walk them.
+      const files = [];
+      await Promise.all(courses.map(async (c) => {
+        try {
+          const toc = await dget(`/d2l/api/le/${leV}/${c.id}/content/toc`);
+          const walk = (mod) => {
+            for (const t of (mod.Topics || [])) {
+              if (t.TypeIdentifier === "File" && t.Url) {
+                files.push({ course_ref: c.id, assignment_ref: null,
+                  id: "d2l_file_" + c.id + "_" + t.TopicId,
+                  name: t.Title || ("topic_" + t.TopicId),
+                  file_type: fileType(t.Title || t.Url, null),
+                  size_bytes: null,
+                  source_url: t.Url.startsWith("http") ? t.Url : origin + t.Url,
+                  folder: mod.Title || null, status: "course_material" });
+              }
+            }
+            for (const sub of (mod.Modules || [])) walk(sub);
+          };
+          for (const m of ((toc && toc.Modules) || [])) walk(m);
+        } catch (e) { D("toc fail", c.id, e && e.message); }
+      }));
+      D("D2L synced — versions", lpV, leV, "| courses", courses.length, "| assignments", assignments.length, "| files", files.length, "| graded courses", courses.filter(c => c.current_score != null).length);
+      return { lms: "d2l", courses, assignments, files };
     }
   } catch (e) { D("adapter error:", e && e.message); }
 

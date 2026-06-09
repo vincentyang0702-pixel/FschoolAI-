@@ -23,6 +23,7 @@ export function AppProvider({ children }) {
   const [canvasBaseUrl, setCanvasBaseUrl]     = useState("");
   const [courses, setCourses]                 = useState([]);
   const [assignments, setAssignments]         = useState([]);
+  const [files, setFiles]                     = useState([]);
   // NEW — extra Canvas data types
   const [announcements, setAnnouncements]         = useState([]);
   const [modules, setModules]                     = useState([]);
@@ -69,6 +70,7 @@ export function AppProvider({ children }) {
       }
     }
     if (result.assignments !== undefined) setAssignments(result.assignments);
+    if (result.files       !== undefined) setFiles(result.files);
     if (result.announcements?.length)    setAnnouncements(result.announcements);
     if (result.modules?.length)          setModules(result.modules);
     if (result.assignmentGroups?.length) setAssignmentGroups(result.assignmentGroups);
@@ -250,6 +252,7 @@ export function AppProvider({ children }) {
       canvasBaseUrl,
       courses,
       assignments,
+      files,
       announcements,
       modules,
       assignmentGroups,

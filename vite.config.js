@@ -56,6 +56,7 @@ const canvasProxyPlugin = {
 // Uses GROQ_KEY from .env (no VITE_ prefix → never bundled into the browser).
 import { readFileSync } from "fs";
 import { resolve }      from "path";
+import tutorContextHandler from "./api/tutor-context.js";
 
 function loadEnvKey(key) {
   try {
@@ -129,16 +130,16 @@ const claudeProxyPlugin = {
           res.end(JSON.stringify({ error: "ANTHROPIC_API_KEY not set in .env" })); return;
         }
         try {
-          const { messages, system, max_tokens = 1024 } = JSON.parse(body);
+          const { messages, system, max_tokens = 1024, tools } = JSON.parse(body);
           const upstream = await fetch("https://api.anthropic.com/v1/messages", {
             method: "POST",
             headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-            body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens, ...(system ? { system } : {}), messages }),
+            body: JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens, ...(system ? { system } : {}), ...(Array.isArray(tools) && tools.length ? { tools } : {}), messages }),
           });
           const data = await upstream.json();
           res.statusCode = upstream.ok ? 200 : upstream.status;
           res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify(upstream.ok ? { content: (data.content ?? []).map(b => b.text ?? "").join("") } : { error: data.error?.message }));
+          res.end(JSON.stringify(upstream.ok ? { content: (data.content ?? []).map(b => b.text ?? "").join(""), contentBlocks: data.content ?? [], stop_reason: data.stop_reason ?? null, usage: data.usage ?? null } : { error: data.error?.message }));
         } catch (err) {
           res.statusCode = 502; res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: err.message }));
@@ -222,7 +223,39 @@ const itunesProxyPlugin = {
   },
 };
 
+// Tutor-context proxy — runs the REAL serverless handler (api/tutor-context.js)
+// under the dev server so the agent's live DB lookups (grades, missing work,
+// FILE lookups) work with `npm run dev`, not just on Vercel. The handler reads
+// keys from process.env, so we inject them from .env before invoking it, and
+// shim Node's res into the Vercel-style res.status().json() the handler expects.
+const tutorContextProxyPlugin = {
+  name: "tutor-context-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/tutor-context", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+
+      process.env.ANTHROPIC_API_KEY    = loadEnvKey("ANTHROPIC_API_KEY");
+      process.env.SUPABASE_URL         = loadEnvKey("SUPABASE_URL");
+      process.env.SUPABASE_SERVICE_KEY = loadEnvKey("SUPABASE_SERVICE_KEY");
+
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try { await tutorContextHandler(req, res); }
+        catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ context: null, error: err.message }));
+        }
+      });
+    });
+  },
+};
+
 export default defineConfig({
-  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin],
+  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin],
   server:  { port: 5173 },
 });

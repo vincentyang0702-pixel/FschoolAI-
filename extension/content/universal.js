@@ -23,6 +23,12 @@ function looksLikePortal(url) {
 }
 
 async function tryCapture() {
+  // After an extension reload, content scripts already injected into open tabs
+  // are orphaned — their chrome.* context is invalidated and chrome.storage
+  // becomes undefined. Bail silently instead of throwing; a tab refresh loads
+  // the fresh script.
+  if (!chrome?.storage?.local) return;
+
   const { neuroagi_user, neuroagi_last_autosync = 0 } =
     await chrome.storage.local.get(["neuroagi_user", "neuroagi_last_autosync"]);
   if (!neuroagi_user) return;                       // not logged in

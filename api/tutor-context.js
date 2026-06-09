@@ -58,7 +58,7 @@ export default async function handler(req, res) {
         max_tokens: 40,
         messages:   [{
           role: "user",
-          content: `Classify this student query for a DB lookup. Return JSON only: {"type":"assignment_detail"|"course_grades"|"missing_late"|"flashcard_detail"|"none","keyword":"extracted course/assignment name or null"}
+          content: `Classify this student query for a DB lookup. Return JSON only: {"type":"assignment_detail"|"course_grades"|"missing_late"|"flashcard_detail"|"file_lookup"|"none","keyword":"extracted course/assignment/file name or null"}
 
 Query: "${userMessage.slice(0, 200)}"
 
@@ -67,6 +67,9 @@ Examples:
 "Which assignments am I missing?" → {"type":"missing_late","keyword":null}
 "Show me my Physics flashcards" → {"type":"flashcard_detail","keyword":"Physics"}
 "What's due for Media Studies essay?" → {"type":"assignment_detail","keyword":"Media Studies"}
+"Do you have the Haskell project file?" → {"type":"file_lookup","keyword":"Haskell project"}
+"What files / readings do I have for Linear Algebra?" → {"type":"file_lookup","keyword":"Linear Algebra"}
+"Send me the syllabus" → {"type":"file_lookup","keyword":"syllabus"}
 "How's my GPA?" → {"type":"none","keyword":null}
 "What's up?" → {"type":"none","keyword":null}`,
         }],
@@ -123,22 +126,77 @@ Examples:
     }
 
     else if (queryType === "assignment_detail") {
-      let url = `${supabaseUrl}/rest/v1/assignments?user_id=eq.${userId}&select=title,due_at,score,points_possible,missing,late,submitted_at&order=due_at.asc&limit=20`;
+      // `description` = the assignment instructions, so the tutor can advise on what
+      // the work actually requires (keyword-matched queries pull the most detail).
+      let url = `${supabaseUrl}/rest/v1/assignments?user_id=eq.${userId}&select=title,due_at,score,points_possible,missing,late,submitted_at,description&order=due_at.asc&limit=20`;
       if (keyword) url += `&title=ilike.*${encodeURIComponent(keyword)}*`;
       const r = await fetch(url, { headers: sbHeaders });
       if (r.ok) {
         const rows = await r.json();
         if (rows.length) {
+          // When the query targets a specific assignment (keyword), include the full
+          // instructions for the top matches; otherwise just the one-line summary.
           context = "ASSIGNMENT DETAILS:\n" + rows
-            .map(a => [
-              `• ${a.title}`,
-              a.due_at        ? `due ${new Date(a.due_at).toLocaleDateString()}` : null,
-              a.score != null ? `score ${a.score}/${a.points_possible}` : null,
-              a.submitted_at  ? `submitted` : null,
-              a.missing       ? "MISSING" : null,
-              a.late          ? "LATE"    : null,
-            ].filter(Boolean).join(" | "))
+            .map(a => {
+              const line = [
+                `• ${a.title}`,
+                a.due_at        ? `due ${new Date(a.due_at).toLocaleDateString()}` : null,
+                a.score != null ? `score ${a.score}/${a.points_possible}` : null,
+                a.submitted_at  ? `submitted` : null,
+                a.missing       ? "MISSING" : null,
+                a.late          ? "LATE"    : null,
+              ].filter(Boolean).join(" | ");
+              const instr = keyword && a.description
+                ? `\n   instructions: ${String(a.description).slice(0, 1200)}`
+                : "";
+              return line + instr;
+            })
             .join("\n");
+        }
+      }
+    }
+
+    else if (queryType === "file_lookup") {
+      // Resolve keyword → matching course ids so a course name ("Linear Algebra")
+      // and a file/topic name ("Haskell project") both work.
+      let courseIds = [];
+      if (keyword) {
+        const cr = await fetch(
+          `${supabaseUrl}/rest/v1/courses?user_id=eq.${userId}&select=id&or=(name.ilike.*${encodeURIComponent(keyword)}*,course_code.ilike.*${encodeURIComponent(keyword)}*)`,
+          { headers: sbHeaders }
+        );
+        if (cr.ok) courseIds = (await cr.json()).map(c => c.id);
+      }
+
+      // Embed the course via the files→courses FK so each file shows its course.
+      let url = `${supabaseUrl}/rest/v1/files?user_id=eq.${userId}&select=name,file_type,status,folder,source_url,courses(name,course_code)&order=name.asc&limit=25`;
+      if (keyword) {
+        const kw  = encodeURIComponent(keyword);
+        const ors = [`name.ilike.*${kw}*`, `folder.ilike.*${kw}*`];
+        if (courseIds.length) ors.push(`course_id.in.(${courseIds.join(",")})`);
+        url += `&or=(${ors.join(",")})`;
+      }
+      const r = await fetch(url, { headers: sbHeaders });
+      if (r.ok) {
+        const rows = await r.json();
+        if (rows.length) {
+          // NOTE for the model: this is the file INDEX. You have names + links, NOT
+          // the file contents — point the student to source_url; do not pretend to
+          // have read the file.
+          context = "FILES (synced index — you have names + links, NOT contents; share source_url, don't invent contents):\n" + rows
+            .map(f => {
+              const course = f.courses?.course_code || f.courses?.name || "";
+              return [
+                `• ${f.name}`,
+                f.file_type ? `(${f.file_type})` : null,
+                course      ? `— ${course}` : null,
+                f.status    ? `— ${f.status}` : null,
+                f.source_url ? `— ${f.source_url}` : null,
+              ].filter(Boolean).join(" ");
+            })
+            .join("\n");
+        } else {
+          context = "FILES: none matching that in the synced index.";
         }
       }
     }

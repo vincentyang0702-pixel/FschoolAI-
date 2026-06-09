@@ -418,12 +418,14 @@ export async function syncCanvasData(userId, canvasToken, canvasBaseUrl) {
  * FIX: manual courses have no canvas_course_id — use DB id as fallback.
  */
 export async function loadCanvasData(userId) {
-  const [cResult, aResult, blobResult, fcResult] = await Promise.all([
+  const [cResult, aResult, blobResult, fcResult, fileResult] = await Promise.all([
     supabase.from('courses').select('*').eq('user_id', userId),
     supabase.from('assignments').select('*, courses(id, canvas_course_id, course_code, name)').eq('user_id', userId),
     // Single query for all blob types — avoids 5 separate requests and 400s on missing rows
     supabase.from('canvas_data').select('data_type, payload').eq('user_id', userId),
     supabase.from('flashcards').select('course_id, cards, generated_at').eq('user_id', userId),
+    // Extension-synced file index (structured `files` table).
+    supabase.from('files').select('id, course_id, assignment_id, name, file_type, size_bytes, source_url, folder, status').eq('user_id', userId),
   ]);
 
   // Build a lookup map from the single blob query
@@ -491,6 +493,20 @@ export async function loadCanvasData(userId) {
       },
     };
   });
+
+  // Extension file index → app shape. `courseDbId` matches a course's DB UUID
+  // (course.dbId in the mapped courses above), so the UI can group by course.
+  const files = (fileResult.data || []).map(f => ({
+    id:             f.id,
+    courseDbId:     f.course_id,
+    assignmentDbId: f.assignment_id,
+    name:           f.name,
+    fileType:       f.file_type,
+    sizeBytes:      f.size_bytes,
+    sourceUrl:      f.source_url,
+    folder:         f.folder,
+    status:         f.status,
+  }));
 
   // Build flashcard map: course_id → cards[]
   const flashcardMap = {};
@@ -578,6 +594,7 @@ export async function loadCanvasData(userId) {
   return {
     courses,
     assignments,
+    files,
     announcements:    annResult.data?.payload  ?? [],
     modules:          modResult.data?.payload  ?? [],
     assignmentGroups: agResult.data?.payload   ?? [],
