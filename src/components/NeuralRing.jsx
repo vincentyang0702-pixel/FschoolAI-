@@ -402,6 +402,16 @@ Q: question | A: answer
 [QUIZ_END]
 One intro line before, nothing after. Quiz ONLY on the student's real course material from context. If none, say so plainly.
 
+ACTIONS I CAN PERFORM — include ONE action tag at the very end of your reply (stripped before display):
+[SYNC]                         — trigger a Canvas sync. Use when they ask to sync, refresh, or update courses/grades.
+[GENERATE_FLASHCARDS:course]   — generate flashcards for that course. Use the exact course name.
+[QUIZ:course]                  — start a spoken interactive quiz for that course.
+[NAVIGATE:page]                — navigate. Pages: work, assignment, study, canvas, toolkit, leaderboard, identity.
+When taking an action: speak a brief confirmation first, then append the tag.
+  "Syncing your Canvas now. [SYNC]"
+  "Generating flashcards for Calculus. [GENERATE_FLASHCARDS:Calculus]"
+Only include an action tag when the student explicitly asks for that action.
+
 STYLE:
 - Never mention GPA, streak, or tokens unless asked.
 - Never dump assignment lists unless asked.
@@ -444,14 +454,16 @@ const VOICE_SPEED_FAST   = /\b(faster|speed up|too slow|quicker|hurry)\b/i;
 const VOICE_SPEED_SLOW   = /\b(slower|slow down|too fast|slow it down)\b/i;
 
 // ── Voice intent tag parser ──────────────────────────────────────────────────
-// Extracts [VOICE:x], [SPEED:x], [TONE:x], [READ:x], [QUIZ:x] from Claude reply
+// Extracts [VOICE:x], [SPEED:x], [TONE:x], [READ:x], [QUIZ:x],
+//          [SYNC], [GENERATE_FLASHCARDS:course] from Claude reply
 function parseVoiceTags(raw) {
   const tags = {};
   let cleaned = raw;
-  const re = /\[(VOICE|SPEED|TONE|READ|QUIZ):?([^\]]*)\]/gi;
+  const re = /\[(VOICE|SPEED|TONE|READ|QUIZ|SYNC|GENERATE_FLASHCARDS|NAVIGATE):?([^\]]*)\]/gi;
   let m;
   while ((m = re.exec(raw)) !== null) {
-    tags[m[1].toUpperCase()] = m[2].trim();
+    // Use `true` for argument-less tags (e.g. [SYNC]), string value for the rest
+    tags[m[1].toUpperCase()] = m[2].trim() || true;
     cleaned = cleaned.replace(m[0], "");
   }
   return { tags, cleaned: cleaned.trim() };
@@ -885,7 +897,7 @@ const VoiceToggle = ({ muted, onClick, speaking }) => (
 );
 
 export default function NeuralRing() {
-  const { userData, updateUserField, courses, assignments, setPendingNav, setStudyConfig, userId, flashcardMap, syllabus } = useApp();
+  const { userData, updateUserField, courses, assignments, setPendingNav, setStudyConfig, userId, flashcardMap, syllabus, forceSync, canvasToken } = useApp();
 
   const courseOptions = courses.length
     ? courses.map(c => `${c.courseCode} — ${c.name}`)
@@ -931,6 +943,7 @@ export default function NeuralRing() {
   const lastSpokenTextRef  = useRef("");     // last assistant text (for "say that again")
   const streamingMsgRef    = useRef("");     // mirrors streamingMsg for stopResponse capture
   const voiceQuizRef       = useRef(null);   // { questions:[{q,a}], idx, score } | null
+  const voiceTTSAbortRef   = useRef(false);  // true = skip remaining queued TTS sentences
 
   const canvasRef      = useRef(null);
   const rafRef         = useRef(null);
@@ -991,6 +1004,8 @@ export default function NeuralRing() {
       const partial = streamingMsgRef.current || lastSpokenTextRef.current;
       if (partial) interruptedTextRef.current = partial;
     }
+    // Kill the queued TTS sentence chain immediately
+    voiceTTSAbortRef.current = true;
     // Cancel in-flight fetch
     abortCtrlRef.current?.abort();
     abortCtrlRef.current = null;
@@ -1017,7 +1032,13 @@ export default function NeuralRing() {
   useEffect(() => { voiceIdRef.current   = userData?.preferred_voice_id ?? null;      }, [userData?.preferred_voice_id]);
   useEffect(() => { speedRef.current     = userData?.preferred_speed    ?? 1.0;       }, [userData?.preferred_speed]);
   useEffect(() => { toneRef.current      = userData?.preferred_tone     ?? "neutral"; }, [userData?.preferred_tone]);
-  useEffect(() => { voiceModeRef.current = voiceMode;  }, [voiceMode]);
+  useEffect(() => {
+    // Secondary sync — fires after paint. Direct assignments below are the primary.
+    if (voiceModeRef.current !== voiceMode) {
+      console.log("[voiceMode] useEffect sync:", voiceModeRef.current, "→", voiceMode, new Error("voiceMode useEffect").stack?.split("\n")[2]?.trim());
+      voiceModeRef.current = voiceMode;
+    }
+  }, [voiceMode]);
   useEffect(() => { speakingRef.current  = speaking;   }, [speaking]);
   useEffect(() => { streamingMsgRef.current = streamingMsg; }, [streamingMsg]);
   // Keep activeVoiceId in sync when userData loads / changes from DB
@@ -1552,6 +1573,11 @@ export default function NeuralRing() {
   // ── Voice mode: auto-listen + silence detection + barge-in ──────────────────
   async function startAutoListen() {
     if (isRecording || micDenied) return;
+    // Stop any lingering stream kept alive for barge-in monitoring
+    cancelAnimationFrame(silenceRafRef.current);
+    micStreamRef.current?.getTracks().forEach(t => t.stop());
+    micStreamRef.current = null;
+    analyserRef.current  = null;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       micStreamRef.current    = stream;
@@ -1571,15 +1597,36 @@ export default function NeuralRing() {
       const mr = new MediaRecorder(stream, { mimeType });
       mr.ondataavailable = e => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
       mr.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        micStreamRef.current = null;
-        analyserRef.current  = null;
         cancelAnimationFrame(silenceRafRef.current);
         clearTimeout(silenceTimerRef.current);
         silenceTimerRef.current = null;
         setIsRecording(false);
         voiceRmsRef.current = 0;
-        if (!audioChunksRef.current.length) return;
+        if (!audioChunksRef.current.length) {
+          // No audio captured — clean up stream immediately
+          stream.getTracks().forEach(t => t.stop());
+          micStreamRef.current = null;
+          analyserRef.current  = null;
+          return;
+        }
+        // Keep stream + analyser alive so the barge-in monitor can interrupt TTS.
+        // The next startAutoListen() will stop this stream before opening a fresh one.
+        const bargeinData = new Float32Array(analyser.fftSize);
+        const BARGE_THRESH = 0.012 * 2.5;
+        function bargeinTick() {
+          if (!analyserRef.current) return; // stream was closed
+          analyser.getFloatTimeDomainData(bargeinData);
+          const rms = Math.sqrt(bargeinData.reduce((s, v) => s + v * v, 0) / bargeinData.length);
+          voiceRmsRef.current = Math.min(rms * 14, 1);
+          if (speakingRef.current && rms > BARGE_THRESH) {
+            stopResponse(); // kills TTS chain + aborts stream
+            return;         // let sendMessage's finally-path call startAutoListen
+          }
+          silenceRafRef.current = requestAnimationFrame(bargeinTick);
+        }
+        // Brief delay so TTS startup transient doesn't trigger false barge-in
+        setTimeout(() => { if (analyserRef.current) bargeinTick(); }, 300);
+
         const blob = new Blob(audioChunksRef.current, { type: mimeType });
         await _transcribeAndSend(blob, mimeType);
       };
@@ -1636,6 +1683,10 @@ export default function NeuralRing() {
   }
 
   function exitVoiceMode() {
+    // Set ref synchronously FIRST so any in-flight async code sees false immediately,
+    // without waiting for the useEffect to run after paint.
+    console.log("[voiceMode] exitVoiceMode() called — setting ref false synchronously", new Error("exitVoiceMode").stack?.split("\n")[2]?.trim());
+    voiceModeRef.current = false;
     if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
     micStreamRef.current?.getTracks().forEach(t => t.stop());
     micStreamRef.current = null;
@@ -1710,6 +1761,12 @@ export default function NeuralRing() {
   }
 
   async function _transcribeAndSend(blob, mimeType) {
+    // Guard: if voice mode was exited between recording start and onstop firing,
+    // discard the audio — don't send a stale recording as a text-mode message.
+    if (!voiceModeRef.current) {
+      console.log("[voiceMode] _transcribeAndSend: voiceModeRef.current is false — discarding stale recording");
+      return;
+    }
     sphereStateRef.current = "thinking";
     try {
       const base64 = await new Promise((res, rej) => {
@@ -1725,7 +1782,12 @@ export default function NeuralRing() {
       });
       if (!sttRes.ok) throw new Error(`STT ${sttRes.status}`);
       const { text } = await sttRes.json();
-      if (!text?.trim()) { sphereStateRef.current = "idle"; return; }
+      if (!text?.trim()) {
+        // Empty transcript — re-listen silently rather than leaving dead air
+        sphereStateRef.current = "idle";
+        if (voiceModeRef.current && !micDenied) await startAutoListen();
+        return;
+      }
       const trimmed = text.trim();
 
       // ── Stop-word detection — halt without sending to Claude ─────────────
@@ -1890,12 +1952,13 @@ export default function NeuralRing() {
           const decoder = new TextDecoder();
           let sseBuffer = "", pendingSentence = "", fullText = "";
           let ttsChain  = Promise.resolve();
+          voiceTTSAbortRef.current = false; // reset for this turn
 
           const enqueueTTS = (text) => {
             const clean = sanitizeForTTS(text.trim());
             if (!clean) return;
             ttsChain = ttsChain.then(async () => {
-              if (abortCtrlRef.current?.signal?.aborted) return;
+              if (abortCtrlRef.current?.signal?.aborted || voiceTTSAbortRef.current) return;
               setSpeaking(true); speakingRef.current = true;
               sphereStateRef.current = "speaking";
               const tone = TONE_PRESETS[toneRef.current] ?? TONE_PRESETS.neutral;
@@ -1944,6 +2007,7 @@ export default function NeuralRing() {
 
           raw = fullText;
           voiceTTSDone = ttsChain.then(() => {
+            voiceTTSAbortRef.current = false;
             setSpeaking(false); speakingRef.current = false;
             sphereStateRef.current = "idle"; audioSourceRef.current = null;
           });
@@ -2083,6 +2147,62 @@ export default function NeuralRing() {
         lastSpokenTextRef.current = cleanText;
         await speakAndType(cleanText);
       }
+      // ── Execute voice action tags (SYNC, GENERATE_FLASHCARDS) ───────────────
+      if (voiceTags.SYNC && voiceModeRef.current) {
+        try {
+          if (!canvasToken) {
+            const msg = "Canvas isn't connected yet. Head to the Canvas page to set that up first.";
+            setMessages(m => [...m, { role: "assistant", content: msg }]);
+            lastSpokenTextRef.current = msg;
+            await speakAndType(msg);
+          } else {
+            await forceSync();
+            const cCount = courses.length;
+            const aCount = assignments.length;
+            const msg = `Done — synced ${cCount} course${cCount !== 1 ? "s" : ""} and ${aCount} assignment${aCount !== 1 ? "s" : ""}.`;
+            setMessages(m => [...m, { role: "assistant", content: msg }]);
+            lastSpokenTextRef.current = msg;
+            await speakAndType(msg);
+          }
+        } catch (_) {
+          if (voiceModeRef.current) await speakAndType("Canvas sync ran into an issue. Try again in a moment.");
+        }
+      }
+
+      if (voiceTags.GENERATE_FLASHCARDS && voiceModeRef.current) {
+        const course = typeof voiceTags.GENERATE_FLASHCARDS === "string"
+          ? voiceTags.GENERATE_FLASHCARDS
+          : (courseOptions[0] ?? "your course");
+        try {
+          const flashResult = await groq([{
+            role: "user",
+            content: `Create exactly 8 study flashcards for "${course}". Format each card as: Q: [question] | A: [answer] — one per line. No numbering, no extra text, no markdown.`,
+          }]);
+          const cards = flashResult.split("\n")
+            .filter(l => l.includes("Q:") && l.includes(" | ") && l.includes("A:"))
+            .map(l => {
+              const [qP, aP] = l.split(" | ");
+              return { question: (qP || "").replace(/^Q:\s*/i, "").trim(), answer: (aP || "").replace(/^A:\s*/i, "").trim() };
+            })
+            .filter(c => c.question && c.answer);
+          if (cards.length > 0) {
+            await supabase.from("flashcards").upsert({
+              user_id:      userId,
+              course_id:    null,
+              cards:        cards.map(c => ({ question: c.question, answer: c.answer })),
+              generated_at: new Date().toISOString(),
+            }, { onConflict: "user_id,course_id" });
+            awardTokens("flashcards_generated", {}).catch(() => {});
+            const msg = `${cards.length} flashcards ready for ${course}. Head to Study to review them.`;
+            setMessages(m => [...m, { role: "assistant", content: msg }]);
+            lastSpokenTextRef.current = msg;
+            await speakAndType(msg);
+          }
+        } catch (_) {
+          if (voiceModeRef.current) await speakAndType("Flashcard generation hit an error. Try again in a moment.");
+        }
+      }
+
       // Auto-restart listening after reply ends, if still in voice mode
       if (voiceModeRef.current && !micDenied) {
         await startAutoListen();
@@ -2404,7 +2524,7 @@ export default function NeuralRing() {
               <div style={{ display: "flex", gap: "10px", padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
                 {/* Subtle waveform glyph — enters voice mode */}
                 <button
-                  onClick={() => { getAudioContext(); setVoiceMode(true); startAutoListen(); }}
+                  onClick={() => { getAudioContext(); voiceModeRef.current = true; console.log("[voiceMode] entered — ref set true synchronously"); setVoiceMode(true); startAutoListen(); }}
                   title="Voice mode"
                   style={{
                     background: "none", border: "none", padding: "8px 6px",

@@ -25,6 +25,55 @@ const TOKEN_LABELS = {
   streak_milestone:     "Streak milestone",
 };
 
+const TOKEN_ICONS = {
+  daily_login:          "↗",
+  canvas_sync:          "↺",
+  flashcards_generated: "≡",
+  quiz_completed:       "◎",
+  quiz_perfect:         "✦",
+  assignment_submitted: "✓",
+  discord_connected:    "⬡",
+  streak_day:           "↑",
+  streak_milestone:     "★",
+};
+
+// Tier thresholds — keep in sync with api/token-engine.js
+const TIERS = [
+  { name: "Basic",       min: 0    },
+  { name: "Scholar",     min: 100  },
+  { name: "Mastermind",  min: 500  },
+  { name: "Brain Owner", min: 2000 },
+];
+
+function getNextTier(points) {
+  for (const t of TIERS) {
+    if (points < t.min) return t;
+  }
+  return null; // already at max
+}
+
+function tierProgressPct(points) {
+  // Find current and next tier
+  let curr = TIERS[0];
+  for (let i = TIERS.length - 1; i >= 0; i--) {
+    if (points >= TIERS[i].min) { curr = TIERS[i]; break; }
+  }
+  const next = TIERS[TIERS.indexOf(curr) + 1];
+  if (!next) return 100;
+  return Math.min(100, Math.round(((points - curr.min) / (next.min - curr.min)) * 100));
+}
+
+function fmtAgo(iso) {
+  if (!iso) return "";
+  const diff = Date.now() - new Date(iso).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d ago`;
+}
+
 function fmtEventDate(iso) {
   if (!iso) return "";
   const d = new Date(iso);
@@ -37,6 +86,7 @@ function fmtEventDate(iso) {
 
 export default function Identity() {
   const { userData, courses, assignments, canvasToken, updateUserField, tokenSummary, userId } = useApp();
+  const [tokenExpanded, setTokenExpanded] = useState(false);
 
   // Editable name
   const currentName = userData?.name || localStorage.getItem("fschool_name") || "";
@@ -194,21 +244,85 @@ export default function Identity() {
         })}
       </div>
 
-      {/* Token activity */}
-      {tokenSummary?.recentEvents?.length > 0 && (
+      {/* Token wallet + activity */}
+      {tokenSummary && (
         <div style={{ marginBottom: "32px" }}>
           <p style={{ fontSize: "11px", color: "var(--text-dim)", letterSpacing: "2px", textTransform: "uppercase", marginBottom: "12px" }}>
-            Recent activity
+            Tokens
           </p>
-          <div style={{ display: "flex", flexDirection: "column", gap: "1px" }}>
-            {tokenSummary.recentEvents.map((e, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "9px 14px", background: i % 2 === 0 ? "rgba(255,255,255,0.02)" : "transparent", borderRadius: "8px" }}>
-                <span style={{ color: "#C49A3C", fontSize: "12px", fontWeight: "700", minWidth: "32px" }}>+{e.tokens}</span>
-                <span style={{ color: "var(--text-secondary)", fontSize: "13px", flex: 1 }}>{TOKEN_LABELS[e.action] ?? e.action}</span>
-                <span style={{ color: "var(--text-dim)", fontSize: "11px" }}>{fmtEventDate(e.created_at)}</span>
+
+          {/* Summary card */}
+          <div style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius-card)", padding: "16px 18px", marginBottom: "10px" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "12px" }}>
+              <div>
+                <p style={{ fontSize: "28px", fontWeight: "600", color: "#C49A3C", letterSpacing: "-0.5px", lineHeight: 1 }}>
+                  {tokenSummary.points ?? 0}
+                </p>
+                <p style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "3px" }}>
+                  {tokenSummary.tier}
+                  {tokenSummary.todayEarned > 0 && (
+                    <span style={{ color: "rgba(196,154,60,0.65)", marginLeft: "8px" }}>+{tokenSummary.todayEarned} today</span>
+                  )}
+                </p>
               </div>
-            ))}
+              {getNextTier(tokenSummary.points ?? 0) && (
+                <p style={{ fontSize: "11px", color: "var(--text-dim)", textAlign: "right", lineHeight: 1.4 }}>
+                  {getNextTier(tokenSummary.points ?? 0).min - (tokenSummary.points ?? 0)} to<br/>
+                  <span style={{ color: "rgba(196,154,60,0.7)" }}>{getNextTier(tokenSummary.points ?? 0).name}</span>
+                </p>
+              )}
+            </div>
+            {/* Tier progress bar */}
+            <div style={{ background: "rgba(255,255,255,0.06)", borderRadius: "3px", height: "3px" }}>
+              <div style={{
+                background: "linear-gradient(90deg, #C49A3C, rgba(196,154,60,0.6))",
+                height: "100%", borderRadius: "3px",
+                width: `${tierProgressPct(tokenSummary.points ?? 0)}%`,
+                transition: "width 0.6s var(--ease-apple)",
+              }} />
+            </div>
           </div>
+
+          {/* Recent events — capped at 5, expandable */}
+          {(tokenSummary.recentEvents?.length ?? 0) > 0 && (
+            <>
+              <div style={{ display: "flex", flexDirection: "column" }}>
+                {(tokenExpanded
+                  ? tokenSummary.recentEvents
+                  : tokenSummary.recentEvents.slice(0, 5)
+                ).map((e, i, arr) => (
+                  <div key={i} style={{
+                    display: "flex", alignItems: "center", gap: "10px",
+                    padding: "8px 4px",
+                    borderBottom: i < arr.length - 1 ? "1px solid rgba(255,255,255,0.05)" : "none",
+                  }}>
+                    <span style={{ fontSize: "13px", color: "rgba(196,154,60,0.6)", width: "16px", textAlign: "center", flexShrink: 0 }}>
+                      {TOKEN_ICONS[e.action] ?? "·"}
+                    </span>
+                    <span style={{ color: "var(--text-secondary)", fontSize: "13px", flex: 1 }}>
+                      {TOKEN_LABELS[e.action] ?? e.action}
+                    </span>
+                    <span style={{ color: "#C49A3C", fontSize: "12px", fontWeight: "700", flexShrink: 0 }}>+{e.tokens}</span>
+                    <span style={{ color: "var(--text-dim)", fontSize: "11px", flexShrink: 0, minWidth: "44px", textAlign: "right" }}>
+                      {fmtAgo(e.created_at)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {tokenSummary.recentEvents.length > 5 && (
+                <button
+                  onClick={() => setTokenExpanded(v => !v)}
+                  style={{
+                    marginTop: "8px", background: "none", border: "none", padding: "4px 0",
+                    color: "var(--text-dim)", fontSize: "12px", cursor: "pointer", fontFamily: "inherit",
+                    letterSpacing: "0.3px",
+                  }}
+                >
+                  {tokenExpanded ? "Show less ↑" : `View all ${tokenSummary.recentEvents.length} ↓`}
+                </button>
+              )}
+            </>
+          )}
         </div>
       )}
 
