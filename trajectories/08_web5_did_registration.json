@@ -1,0 +1,182 @@
+{
+  "session_id": "b2c3d4e5-0008-4f6a-9b0c-web5scenario01",
+  "agent_states": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "[SYSTEM TRIGGER] New user completed email verification. Initiating Web5 identity creation.",
+          "extra": {
+            "is_original_user_input": false,
+            "trigger_type": "post_email_verification",
+            "user_id": "uuid-alex-new",
+            "email": "alex@mail.utoronto.ca",
+            "university_id": "uoft-001",
+            "canvas_oauth_token": "canvas_tok_abc123"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-001-generate-keypair",
+              "type": "function",
+              "function": {
+                "name": "crypto.generateKeypair",
+                "arguments": "{\"algorithm\": \"Ed25519\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 2,
+                "execution": "local_crypto",
+                "note": "Private key never leaves user device. Encrypted with PBKDF2 derived from user password."
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"publicKey\": \"ed25519-pub:7f4a2b1c9d3e...\", \"privateKey\": \"[ENCRYPTED_LOCAL_ONLY]\", \"algorithm\": \"Ed25519\"}",
+          "extra": {
+            "tool_call_id": "tc-001-generate-keypair",
+            "latency_ms": 2
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-002-anchor-did-ion",
+              "type": "function",
+              "function": {
+                "name": "ion.anchorDID",
+                "arguments": "{\"publicKey\": \"ed25519-pub:7f4a2b1c9d3e...\", \"services\": [{\"id\": \"brain\", \"type\": \"DecentralizedWebNode\", \"serviceEndpoint\": \"https://dwn.neuroagi.com\"}]}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 800,
+                "network": "ION_Bitcoin_L2",
+                "endpoint": "https://ion.neuroagi.com/operations"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"did\": \"did:ion:EiA7xK9mP2qR4sT6uV8wX0yZ1aB3cD5eF7gH9iJ\", \"status\": \"anchored\", \"network\": \"ION\", \"confirmation_time_ms\": 800}",
+          "extra": {
+            "tool_call_id": "tc-002-anchor-did-ion",
+            "latency_ms": 800
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-003-provision-dwn",
+              "type": "function",
+              "function": {
+                "name": "dwn.provision",
+                "arguments": "{\"did\": \"did:ion:EiA7xK9mP2qR4sT6uV8wX0yZ1aB3cD5eF7gH9iJ\", \"schema\": \"neuroagi/brain/v1\", \"encryption\": \"AES-256-GCM\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 150,
+                "endpoint": "https://dwn.neuroagi.com/provision",
+                "note": "Encryption key derived from user DID keypair. FschoolAI cannot decrypt."
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"dwn_endpoint\": \"https://dwn.neuroagi.com/did:ion:EiA7xK9mP2qR4sT6uV8wX0yZ1aB3cD5eF7gH9iJ\", \"vault_id\": \"vault-alex-001\", \"status\": \"ready\", \"initial_storage_mb\": 0}",
+          "extra": {
+            "tool_call_id": "tc-003-provision-dwn",
+            "latency_ms": 150
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-004-write-db-reference",
+              "type": "function",
+              "function": {
+                "name": "db.createPersonRecord",
+                "arguments": "{\"user_id\": \"uuid-alex-new\", \"did\": \"did:ion:EiA7xK9mP2qR4sT6uV8wX0yZ1aB3cD5eF7gH9iJ\", \"dwn_endpoint\": \"https://dwn.neuroagi.com/did:ion:EiA7...\", \"public_key_fingerprint\": \"fp:7f4a2b1c\", \"university_id\": \"uoft-001\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 8,
+                "db_query": "INSERT INTO neuro.persons (user_id, did, dwn_endpoint, public_key_fingerprint, university_id, created_at) VALUES (...)",
+                "note": "NO cognitive data stored here. Only DID reference and DWN endpoint."
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"person_id\": \"uuid-alex-new\", \"did\": \"did:ion:EiA7xK9mP2qR4sT6uV8wX0yZ1aB3cD5eF7gH9iJ\", \"brain_id\": \"brain-alex-001\", \"onboarding_complete\": true}",
+          "extra": {
+            "tool_call_id": "tc-004-write-db-reference",
+            "latency_ms": 8
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "{\"status\": \"identity_created\", \"did\": \"did:ion:EiA7...H9iJ\", \"brain_id\": \"brain-alex-001\", \"dwn_endpoint\": \"https://dwn.neuroagi.com/did:ion:EiA7...\", \"message\": \"Your Brain has been created. You own this brain. FschoolAI can never access it without your permission.\", \"private_key_status\": \"stored_locally_encrypted\", \"recovery_phrase_shown\": true}",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 0,
+              "completion_tokens": 0,
+              "total_tokens": 0,
+              "completion_token_details": {}
+            },
+            "model": "none",
+            "latency_ms": 0
+          },
+          "reasoning_content": "No Claude call needed. This is a pure cryptographic + infrastructure operation. The response is a structured JSON status object assembled from the tool results.",
+          "extra": {
+            "agent_type": "Web5IdentityService",
+            "claude_call": false
+          }
+        }
+      ]
+    }
+  ],
+  "message": {
+    "role": "assistant",
+    "content": "{\"status\": \"identity_created\", \"did\": \"did:ion:EiA7...H9iJ\", \"brain_id\": \"brain-alex-001\", \"message\": \"Your Brain has been created. You own this brain. FschoolAI can never access it without your permission.\"}",
+    "response_meta": {
+      "finish_reason": "end_turn",
+      "usage": {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0
+      },
+      "model": "none"
+    },
+    "extra": {
+      "scenario": "08_web5_did_registration",
+      "description": "New user completes email verification. System generates Ed25519 keypair locally, anchors DID on ION (Bitcoin L2), provisions a personal DWN (Decentralized Web Node) as the user's PBDS, and writes only a DID reference to FschoolAI DB. Zero cognitive data stored centrally. Private key never leaves user device.",
+      "claude_calls": 0,
+      "total_latency_ms": 960,
+      "cost_usd": 0.003,
+      "cost_breakdown": {
+        "ion_anchor_gas_usd": 0.001,
+        "dwn_storage_monthly_usd": 0.002,
+        "claude_api_usd": 0.0
+      },
+      "web5_primitives": ["DID:ION", "PBDS:DWN", "Ed25519_keypair"],
+      "data_stored_centrally": "DID reference only — NO cognitive data",
+      "agents_involved": ["Web5IdentityService", "IONAnchorService", "DWNProvisionService"]
+    }
+  }
+}

@@ -1,0 +1,171 @@
+{
+  "session_id": "a1b2c3d4-0002-4e5f-8a9b-fschoolai0002",
+  "agent_states": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "[SYSTEM TRIGGER] BrainScheduler.runUrgentInterventionCheck() — 15-minute interval check fired. No user action initiated this session.",
+          "extra": {
+            "is_original_user_input": false,
+            "trigger_type": "scheduler",
+            "trigger_interval_minutes": 15,
+            "person_id": "uuid-alex"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-001-scheduler-query",
+              "type": "function",
+              "function": {
+                "name": "db.queryUrgentDeadlines",
+                "arguments": "{\"deadline_window_hours\": 8, \"momentum_states\": [\"stalled\", \"low\"]}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 12,
+                "db_query": "SELECT person_id FROM brain.context_window WHERE most_urgent_deadline < NOW() + INTERVAL '8 hours' AND momentum_state IN ('stalled', 'low')"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"persons\": [{\"person_id\": \"uuid-alex\", \"most_urgent_deadline\": \"2025-06-11T23:59:00Z\", \"hours_remaining\": 6.2, \"momentum_state\": \"stalled\"}]}",
+          "extra": {
+            "tool_call_id": "tc-001-scheduler-query",
+            "latency_ms": 12
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-002-read-brain-context",
+              "type": "function",
+              "function": {
+                "name": "contextWindowWriter.read",
+                "arguments": "{\"person_id\": \"uuid-alex\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 8,
+                "db_query": "SELECT * FROM brain.context_window WHERE person_id = 'uuid-alex'"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"stress_level\": 0.7, \"momentum_state\": \"stalled\", \"most_urgent_deadline\": \"PSYC 201 essay — 6.2 hours\", \"confirmed_hypotheses\": [\"avoidance_pattern_late_night\", \"visual_learner\", \"procrastination_under_stress\"], \"last_24h_signals\": [{\"type\": \"app_open\", \"count\": 0}, {\"type\": \"assignment_opened\", \"assignment\": \"PSYC201_essay\", \"count\": 0}, {\"type\": \"study_session\", \"count\": 0}], \"avoidance_detected\": true}",
+          "extra": {
+            "tool_call_id": "tc-002-read-brain-context",
+            "latency_ms": 8
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-003-evaluate-intervention",
+              "type": "function",
+              "function": {
+                "name": "proactiveInterventionEngine.evaluate",
+                "arguments": "{\"person_id\": \"uuid-alex\", \"brain_context\": {\"avoidance_detected\": true, \"assignment_opened_today\": false, \"hours_remaining\": 6.2, \"assignment\": \"PSYC 201 essay\"}}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 3,
+                "decision": "intervention_type=deadline_approaching_avoidance"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"should_intervene\": true, \"intervention_type\": \"deadline_approaching_avoidance\", \"priority\": \"high\", \"reasoning\": \"Assignment not opened today, avoidance pattern confirmed, 6.2 hours remaining, momentum stalled\"}",
+          "extra": {
+            "tool_call_id": "tc-003-evaluate-intervention",
+            "latency_ms": 3
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Hey Alex — your PSYC 201 essay is due in 6 hours. I know you usually start late, but this rubric needs personal reflection which takes real time to write well. Want to spend just 10 minutes on the outline now? I'll help you get the structure down so the writing part is easy.",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 350,
+              "prompt_token_details": {
+                "cached_tokens": 0
+              },
+              "completion_tokens": 98,
+              "total_tokens": 448,
+              "completion_token_details": {}
+            },
+            "model": "claude-3-5-sonnet-20241022",
+            "latency_ms": 600
+          },
+          "reasoning_content": "Alex has not opened the app or the assignment today. The brain has confirmed an avoidance pattern under stress. The deadline is in 6.2 hours. The intervention should be warm, direct, and low-friction — not alarming. I should acknowledge the pattern without shaming, offer a small concrete first step (10 min outline), and make it easy to say yes.",
+          "extra": {
+            "agent_type": "proactiveInterventionEngine",
+            "intervention_type": "deadline_approaching_avoidance",
+            "background_execution": true
+          }
+        },
+        {
+          "role": "tool",
+          "content": "{\"status\": \"ok\", \"pending_intervention_written\": true, \"context_window_updated\": true, \"delivery_method\": \"next_app_open\", \"message_preview\": \"Hey Alex — your PSYC 201 essay is due in 6 hours...\"}",
+          "extra": {
+            "tool_call_id": "tc-004-write-intervention",
+            "latency_ms": 10,
+            "db_writes": [
+              "INSERT INTO brain.pending_interventions (person_id, message, intervention_type, created_at)",
+              "UPDATE brain.context_window SET pending_intervention = '...' WHERE person_id = 'uuid-alex'"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "message": {
+    "role": "assistant",
+    "content": "Hey Alex — your PSYC 201 essay is due in 6 hours. I know you usually start late, but this rubric needs personal reflection which takes real time to write well. Want to spend just 10 minutes on the outline now? I'll help you get the structure down so the writing part is easy.",
+    "response_meta": {
+      "finish_reason": "end_turn",
+      "usage": {
+        "prompt_tokens": 350,
+        "prompt_token_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens": 98,
+        "total_tokens": 448,
+        "completion_token_details": {}
+      },
+      "model": "claude-3-5-sonnet-20241022"
+    },
+    "extra": {
+      "scenario": "02_proactive_intervention",
+      "description": "Brain Scheduler fires every 15 minutes. Detects Alex has a deadline in 6 hours, avoidance pattern confirmed, app not opened today. Generates a warm proactive nudge delivered on next app open. Zero user wait time — entirely background execution.",
+      "claude_calls": 1,
+      "total_latency_ms": 633,
+      "user_wait_ms": 0,
+      "cost_usd": 0.00257,
+      "cost_breakdown": {
+        "input_tokens": 350,
+        "input_cost_usd": 0.00105,
+        "output_tokens": 98,
+        "output_cost_usd": 0.00147
+      },
+      "db_reads": 2,
+      "db_writes": 2,
+      "agents_involved": ["BrainScheduler", "proactiveInterventionEngine", "contextWindowWriter"]
+    }
+  }
+}

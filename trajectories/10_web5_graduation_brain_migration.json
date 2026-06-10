@@ -1,0 +1,256 @@
+{
+  "session_id": "b2c3d4e5-0010-4f6a-9b0c-web5scenario05",
+  "agent_states": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "[SYSTEM TRIGGER] Canvas webhook received: enrollment_completed for uuid-alex. Checking graduation eligibility.",
+          "extra": {
+            "is_original_user_input": false,
+            "trigger_type": "canvas_webhook",
+            "event": "enrollment_completed",
+            "person_id": "uuid-alex",
+            "did": "did:ion:EiA7xK9mP2qR4sT6uV8wX0yZ1aB3cD5eF7gH9iJ",
+            "canvas_payload": {
+              "user_id": "uuid-alex",
+              "event": "enrollment_completed",
+              "graduation_date": "2025-06-15"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-001-check-eligibility",
+              "type": "function",
+              "function": {
+                "name": "brainMigrationService.checkGraduationEligibility",
+                "arguments": "{\"person_id\": \"uuid-alex\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 15,
+                "db_queries": [
+                  "SELECT * FROM neuro.persons WHERE user_id='uuid-alex'",
+                  "SELECT COUNT(*) FROM public.assignments WHERE user_id='uuid-alex' AND status='completed'",
+                  "SELECT * FROM brain.data_references WHERE person_id='uuid-alex'"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"eligible\": true, \"graduation_date\": \"2025-06-15\", \"brain_stats\": {\"total_records\": 847, \"concepts_mastered\": 23, \"study_sessions\": 312, \"years_active\": 4, \"dwn_endpoint\": \"https://dwn.neuroagi.com/did:ion:EiA7...\", \"top_skills\": [\"statistical_reasoning\", \"attachment_theory\", \"research_methodology\"]}, \"account_status\": \"good_standing\"}",
+          "extra": {
+            "tool_call_id": "tc-001-check-eligibility",
+            "latency_ms": 15
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-002-generate-brain-summary",
+              "type": "function",
+              "function": {
+                "name": "claude.complete",
+                "arguments": "{\"model\": \"claude-3-5-sonnet-20241022\", \"system\": \"Generate a meaningful, warm graduation brain summary for Alex. This is a milestone moment — 4 years of cognitive growth captured in this brain. Tone: celebratory but grounded, forward-looking, personal. Max 3 sentences. Do not be generic.\", \"user\": \"Brain stats: 847 records, 23 concepts at mastery ≥0.7, 312 study sessions over 4 years. Top skills: statistical reasoning (87th percentile), attachment theory, research methodology. GPA trajectory: 3.1 → 3.7. University: University of Toronto.\", \"max_tokens\": 150}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 600
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "Over four years at the University of Toronto, Alex's brain grew from a first-year student finding his footing to someone with verified mastery across 23 concepts — with statistical reasoning now in the 87th percentile and a GPA that climbed steadily from 3.1 to 3.7. 847 learning records, 312 study sessions, and countless moments of working through hard problems are encoded in this brain. This is not the end of the story — it is the foundation.",
+          "extra": {
+            "tool_call_id": "tc-002-generate-brain-summary",
+            "latency_ms": 600,
+            "usage": {
+              "prompt_tokens": 350,
+              "completion_tokens": 118,
+              "total_tokens": 468
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-003-create-neuroagi-wallet",
+              "type": "function",
+              "function": {
+                "name": "neuroagiWallet.create",
+                "arguments": "{\"did\": \"did:ion:EiA7xK9mP2qR4sT6uV8wX0yZ1aB3cD5eF7gH9iJ\", \"migration_source\": \"fschoolai\", \"brain_summary\": \"Over four years at the University of Toronto...\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 200,
+                "endpoint": "https://wallet.neuroagi.com/create"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"wallet_id\": \"wallet-alex-001\", \"wallet_endpoint\": \"https://wallet.neuroagi.com/did:ion:EiA7...\", \"status\": \"created\", \"migration_ready\": true}",
+          "extra": {
+            "tool_call_id": "tc-003-create-neuroagi-wallet",
+            "latency_ms": 200
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-004-migrate-pbds",
+              "type": "function",
+              "function": {
+                "name": "dwn.migrateRecords",
+                "arguments": "{\"source_endpoint\": \"https://dwn.neuroagi.com/did:ion:EiA7...\", \"destination_endpoint\": \"https://wallet.neuroagi.com/did:ion:EiA7...\", \"did\": \"did:ion:EiA7xK9mP2qR4sT6uV8wX0yZ1aB3cD5eF7gH9iJ\", \"records_count\": 847, \"retain_source_readonly\": true}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 2000,
+                "note": "Encryption keys unchanged — same DID keypair. Data migrates encrypted. FschoolAI DWN becomes read-only archive.",
+                "protocol": "DWN_sync_protocol"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"records_migrated\": 847, \"migration_status\": \"complete\", \"source_status\": \"read_only_archive\", \"destination_status\": \"active\", \"encryption_unchanged\": true, \"migration_duration_ms\": 2000}",
+          "extra": {
+            "tool_call_id": "tc-004-migrate-pbds",
+            "latency_ms": 2000
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-005-issue-graduation-vbc",
+              "type": "function",
+              "function": {
+                "name": "vbcEngine.issueCredential",
+                "arguments": "{\"subject_did\": \"did:ion:EiA7xK9mP2qR4sT6uV8wX0yZ1aB3cD5eF7gH9iJ\", \"issuer_did\": \"did:ion:FschoolAI-Issuer-v1\", \"credential_type\": \"GraduationBrainCredential\", \"claims\": {\"graduation_date\": \"2025-06-15\", \"university\": \"University of Toronto\", \"brain_records\": 847, \"concepts_mastered\": 23, \"academic_years\": 4, \"gpa_trajectory\": \"positive\"}}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 100
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"credential_id\": \"vc-alex-graduation-001\", \"issued_at\": \"2025-06-15T00:00:00Z\", \"expires_at\": null, \"note\": \"Graduation credential does not expire\"}",
+          "extra": {
+            "tool_call_id": "tc-005-issue-graduation-vbc",
+            "latency_ms": 100
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-006-update-db",
+              "type": "function",
+              "function": {
+                "name": "db.updatePersonStatus",
+                "arguments": "{\"person_id\": \"uuid-alex\", \"status\": \"graduated\", \"brain_wallet_endpoint\": \"https://wallet.neuroagi.com/did:ion:EiA7...\", \"migrated_at\": \"2025-06-15T00:00:00Z\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 8,
+                "db_query": "UPDATE neuro.persons SET status='graduated', brain_wallet_endpoint='...', migrated_at=NOW() WHERE user_id='uuid-alex'"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"status\": \"updated\", \"person_id\": \"uuid-alex\", \"new_status\": \"graduated\"}",
+          "extra": {
+            "tool_call_id": "tc-006-update-db",
+            "latency_ms": 8
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "🎓 Congratulations, Alex.\n\nOver four years at the University of Toronto, Alex's brain grew from a first-year student finding his footing to someone with verified mastery across 23 concepts — with statistical reasoning now in the 87th percentile and a GPA that climbed steadily from 3.1 to 3.7. 847 learning records, 312 study sessions, and countless moments of working through hard problems are encoded in this brain. This is not the end of the story — it is the foundation.\n\n**Your Brain has been migrated to your NeuroAGI Brain Wallet.**\n\n- 847 records transferred ✓\n- Encryption unchanged — only you can access it ✓\n- Graduation Credential issued ✓\n- FschoolAI archive retained (read-only) ✓\n\nYour brain will keep growing. Every job, project, and skill you develop from here will compound on this foundation.",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 350,
+              "prompt_token_details": {
+                "cached_tokens": 0
+              },
+              "completion_tokens": 118,
+              "total_tokens": 468,
+              "completion_token_details": {}
+            },
+            "model": "claude-3-5-sonnet-20241022",
+            "latency_ms": 600
+          },
+          "reasoning_content": "This is the graduation moment — the most emotionally significant event in the FschoolAI lifecycle. The brain summary should feel personal and earned, not generic. I should use the actual stats (847 records, 23 concepts, 87th percentile, 3.1→3.7 GPA) to make it feel real. The message should be warm but not saccharine. The technical confirmation (records transferred, encryption unchanged) should follow the emotional beat, not precede it.",
+          "extra": {
+            "agent_type": "BrainMigrationService",
+            "migration_complete": true,
+            "data_continuity": "100%",
+            "encryption_preserved": true
+          }
+        }
+      ]
+    }
+  ],
+  "message": {
+    "role": "assistant",
+    "content": "🎓 Congratulations, Alex.\n\nOver four years at the University of Toronto, your brain grew from a first-year student finding his footing to someone with verified mastery across 23 concepts — statistical reasoning at the 87th percentile, GPA 3.1 → 3.7. 847 learning records. This is not the end of the story — it is the foundation.\n\nYour Brain has been migrated to your NeuroAGI Brain Wallet. 847 records transferred. Encryption unchanged. Graduation Credential issued. Your brain will keep growing.",
+    "response_meta": {
+      "finish_reason": "end_turn",
+      "usage": {
+        "prompt_tokens": 350,
+        "prompt_token_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens": 118,
+        "total_tokens": 468
+      },
+      "model": "claude-3-5-sonnet-20241022"
+    },
+    "extra": {
+      "scenario": "10_web5_graduation_brain_migration",
+      "description": "Canvas webhook fires on graduation. BrainMigrationService verifies eligibility (847 records, 4 years, good standing). One Claude call generates a personal graduation brain summary. NeuroAGI Brain Wallet created. All 847 PBDS records migrated from FschoolAI DWN to NeuroAGI DWN — encryption keys unchanged, only Alex can access. Graduation VBC issued (non-expiring). FschoolAI DWN becomes read-only archive. This is the Web5 anti-data-death moment: brain survives graduation and compounds into professional life.",
+      "claude_calls": 1,
+      "total_latency_ms": 2923,
+      "cost_usd": 0.013,
+      "cost_breakdown": {
+        "input_tokens": 350,
+        "input_cost_usd": 0.00105,
+        "output_tokens": 118,
+        "output_cost_usd": 0.00177,
+        "pbds_migration_usd": 0.01
+      },
+      "records_migrated": 847,
+      "encryption_unchanged": true,
+      "data_death_prevented": true,
+      "web5_primitives": ["PBDS_migration", "DWN_sync", "W3C_VC:GraduationCredential", "DID_continuity"],
+      "agents_involved": ["BrainMigrationService", "DWNSyncService", "VBCEngine", "NeuroAGIWalletService"]
+    }
+  }
+}

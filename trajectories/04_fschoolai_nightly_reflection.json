@@ -1,0 +1,151 @@
+{
+  "session_id": "a1b2c3d4-0004-4e5f-8a9b-fschoolai0004",
+  "agent_states": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "[SYSTEM TRIGGER] BrainScheduler nightly reflection — 11:00 PM. Running reflectionEngine.runDailyReflection() for all active users today.",
+          "extra": {
+            "is_original_user_input": false,
+            "trigger_type": "scheduler_nightly",
+            "trigger_time": "2025-06-10T23:00:00Z",
+            "person_id": "uuid-alex",
+            "active_today": true
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-001-gather-signals",
+              "type": "function",
+              "function": {
+                "name": "db.gatherTodaySignals",
+                "arguments": "{\"person_id\": \"uuid-alex\", \"date\": \"2025-06-10\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 18,
+                "db_queries": [
+                  "SELECT * FROM brain.signals WHERE person_id='uuid-alex' AND occurred_at > '2025-06-10T00:00:00Z'",
+                  "SELECT * FROM agents.messages WHERE person_id='uuid-alex' AND created_at > '2025-06-10T00:00:00Z'",
+                  "SELECT * FROM public.assignments WHERE user_id='uuid-alex' AND updated_at > '2025-06-10T00:00:00Z'",
+                  "SELECT * FROM brain.context_window WHERE person_id='uuid-alex'"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"signals\": [{\"type\": \"study_session\", \"duration_min\": 45, \"subject\": \"PSYC201\", \"time\": \"09:15\"}, {\"type\": \"study_session\", \"duration_min\": 30, \"subject\": \"STATS110\", \"time\": \"14:00\"}, {\"type\": \"study_session\", \"duration_min\": 60, \"subject\": \"PSYC201\", \"time\": \"20:30\"}, {\"type\": \"assignment_opened\", \"assignment\": \"PSYC201_essay\", \"time\": \"09:10\"}, {\"type\": \"assignment_submitted\", \"assignment\": \"PSYC201_essay\", \"submitted_at\": \"21:45\", \"deadline\": \"23:59\", \"early_by_hours\": 2.23}, {\"type\": \"app_open\", \"count\": 4}, {\"type\": \"chat_session\", \"turns\": 8, \"topic\": \"PSYC201_essay_outline\"}], \"chat_summary\": \"Alex asked for help structuring PSYC 201 essay. Worked through outline together. Submitted 2.2 hours early.\", \"assignment_submitted\": {\"title\": \"PSYC 201 Reflection Essay\", \"submitted_early\": true, \"early_hours\": 2.23}, \"current_brain_state\": {\"stress_level\": 0.4, \"momentum_state\": \"building\", \"confirmed_hypotheses\": [\"avoidance_pattern_late_night\", \"visual_learner\"], \"upcoming_deadlines\": [{\"course\": \"STATS110\", \"title\": \"Midterm\", \"days_remaining\": 3}]}}",
+          "extra": {
+            "tool_call_id": "tc-001-gather-signals",
+            "latency_ms": 18
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-002-daily-reflection",
+              "type": "function",
+              "function": {
+                "name": "claude.complete",
+                "arguments": "{\"model\": \"claude-3-5-sonnet-20241022\", \"system\": \"You are Alex's autonomous brain performing a nightly reflection. Your job is to: 1) Summarise today's academic activity honestly, 2) Identify any new patterns or updates to existing hypotheses, 3) Update knowledge mastery estimates based on today's study, 4) Generate a suggestion for tomorrow. Return structured JSON. Brain context: stress_level=0.4, momentum_state=building, confirmed_hypotheses=[avoidance_pattern_late_night, visual_learner], upcoming: STATS110 midterm in 3 days.\", \"user\": \"Today's data: 3 study sessions (45min PSYC201, 30min STATS110, 60min PSYC201). 8 chat turns on essay outline. Submitted PSYC201 essay 2.2 hours early (unusual — normally submits within 1 hour of deadline). Stress level dropped from 0.6 to 0.4 during day. App opened 4 times.\", \"max_tokens\": 600}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 1400,
+                "async": true
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"summary\": \"Alex had a genuinely productive day. He submitted the PSYC 201 essay 2.2 hours early — this is the first time in 6 weeks he has submitted more than 1 hour before a deadline. The outlining session in the morning appears to have been the key unlock: he opened the assignment at 9:10, worked on the outline with Reggie, then completed the essay across two study sessions. Stress dropped from 0.6 to 0.4 by evening.\", \"new_patterns\": [{\"pattern_id\": \"p-new-001\", \"description\": \"early_submission_when_outlined_day_before\", \"confidence\": 0.55, \"evidence\": \"First early submission correlated with morning outline session\"}], \"hypothesis_updates\": [{\"id\": \"h-avoidance-001\", \"old_confidence\": 0.82, \"new_confidence\": 0.75, \"reason\": \"Early submission contradicts avoidance pattern — may be weakening or context-dependent\"}], \"knowledge_updates\": [{\"concept\": \"attachment_theory\", \"old_mastery\": 0.45, \"new_mastery\": 0.62, \"reason\": \"135 min study + essay written\"}, {\"concept\": \"STATS110_probability\", \"old_mastery\": 0.38, \"new_mastery\": 0.41, \"reason\": \"30 min review session\"}], \"tomorrow_suggestion\": \"STATS 110 midterm is in 3 days. Today's 30-minute session was a start but probability and hypothesis testing need more depth. Suggest a 60-minute focused session tomorrow morning before 11am — your brain is sharpest before noon based on your pattern data.\", \"mood_estimate\": \"positive\", \"streak_day\": 4}",
+          "extra": {
+            "tool_call_id": "tc-002-daily-reflection",
+            "latency_ms": 1400,
+            "usage": {
+              "prompt_tokens": 1200,
+              "completion_tokens": 580,
+              "total_tokens": 1780
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-003-write-reflection",
+              "type": "function",
+              "function": {
+                "name": "brain.writeReflectionResults",
+                "arguments": "{\"person_id\": \"uuid-alex\", \"date\": \"2025-06-10\", \"reflection\": {\"summary\": \"Alex had a genuinely productive day...\", \"new_patterns\": [{\"pattern_id\": \"p-new-001\"}], \"hypothesis_updates\": [{\"id\": \"h-avoidance-001\", \"new_confidence\": 0.75}], \"knowledge_updates\": [{\"concept\": \"attachment_theory\", \"new_mastery\": 0.62}], \"tomorrow_suggestion\": \"STATS 110 midterm in 3 days...\", \"streak_day\": 4}}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 22,
+                "db_writes": [
+                  "INSERT INTO brain.reflections (person_id, date, summary, insights, tomorrow_suggestion)",
+                  "UPDATE brain.knowledge SET mastery = 0.62 WHERE person_id='uuid-alex' AND concept='attachment_theory'",
+                  "UPDATE neuro.patterns SET confidence = 0.75 WHERE id='h-avoidance-001'",
+                  "UPDATE brain.context_window SET ... (full snapshot refresh)"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"status\": \"ok\", \"reflection_id\": \"ref-alex-20250610\", \"knowledge_nodes_updated\": 2, \"patterns_updated\": 1, \"new_patterns_created\": 1, \"context_window_refreshed\": true, \"fst_earned_today\": 310, \"fst_breakdown\": {\"study_sessions\": 90, \"early_submission\": 100, \"daily_streak\": 10, \"grade_improvement_pending\": 0}}",
+          "extra": {
+            "tool_call_id": "tc-003-write-reflection",
+            "latency_ms": 22
+          }
+        }
+      ]
+    }
+  ],
+  "message": {
+    "role": "assistant",
+    "content": "{\"reflection_complete\": true, \"person_id\": \"uuid-alex\", \"date\": \"2025-06-10\", \"summary\": \"Alex had a genuinely productive day. First early submission in 6 weeks — correlated with morning outline session. Avoidance hypothesis confidence reduced from 0.82 to 0.75. Attachment theory mastery updated to 0.62. Tomorrow: STATS 110 focus recommended.\", \"fst_earned_today\": 310, \"streak_day\": 4, \"tomorrow_suggestion\": \"STATS 110 midterm in 3 days — 60-minute focused session before 11am recommended.\"}",
+    "response_meta": {
+      "finish_reason": "end_turn",
+      "usage": {
+        "prompt_tokens": 1200,
+        "prompt_token_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens": 580,
+        "total_tokens": 1780,
+        "completion_token_details": {}
+      },
+      "model": "claude-3-5-sonnet-20241022"
+    },
+    "extra": {
+      "scenario": "04_nightly_reflection",
+      "description": "BrainScheduler fires at 11pm. Gathers all of Alex's signals, chat history, and assignment activity from today. One Claude call synthesises the day: identifies a new pattern (early submission when outlined day before), updates hypothesis confidence, updates knowledge mastery for 2 concepts, generates tomorrow's suggestion. Alex earns 310 FST today. Zero user wait — entirely background.",
+      "claude_calls": 1,
+      "total_latency_ms": 1440,
+      "user_wait_ms": 0,
+      "cost_usd": 0.0125,
+      "cost_breakdown": {
+        "input_tokens": 1200,
+        "input_cost_usd": 0.0036,
+        "output_tokens": 580,
+        "output_cost_usd": 0.0087
+      },
+      "db_reads": 4,
+      "db_writes": 4,
+      "fst_earned": 310,
+      "agents_involved": ["BrainScheduler", "reflectionEngine", "hypothesisEngine", "contextWindowWriter", "FSTRewardEngine"]
+    }
+  }
+}

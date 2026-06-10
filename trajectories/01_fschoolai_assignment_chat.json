@@ -1,0 +1,180 @@
+{
+  "session_id": "a1b2c3d4-0001-4e5f-8a9b-fschoolai0001",
+  "agent_states": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "help me with my PSYC 201 essay",
+          "extra": {
+            "is_original_user_input": true,
+            "person_id": "uuid-alex",
+            "session_id": "sess-001",
+            "brain_ready": true,
+            "brain_summary": {
+              "stress_level": 0.6,
+              "momentum_state": "building",
+              "most_urgent_deadline": "PSYC 201 essay — 2 days",
+              "confirmed_hypotheses": ["avoidance_pattern_late_night", "visual_learner"],
+              "pending_intervention": null,
+              "last_48h": "3 study sessions, 2 assignment views, 1 late night session"
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-001-read-brain-context",
+              "type": "function",
+              "function": {
+                "name": "contextWindowWriter.read",
+                "arguments": "{\"person_id\": \"uuid-alex\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 10,
+                "db_query": "SELECT * FROM brain.context_window WHERE person_id = 'uuid-alex'"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"stress_level\": 0.6, \"momentum_state\": \"building\", \"most_urgent_deadline\": \"PSYC 201 essay — 2 days\", \"confirmed_hypotheses\": [\"avoidance_pattern_late_night\", \"visual_learner\"], \"pending_intervention\": null, \"last_48h_signal_summary\": \"3 study sessions, 2 assignment views, 1 late night session\", \"sleep_hours\": 6.5}",
+          "extra": {
+            "tool_call_id": "tc-001-read-brain-context",
+            "latency_ms": 10
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-002-detect-capability",
+              "type": "function",
+              "function": {
+                "name": "agentRouter.detectCapability",
+                "arguments": "{\"message\": \"help me with my PSYC 201 essay\", \"brain_context\": {\"stress_level\": 0.6, \"momentum_state\": \"building\", \"most_urgent_deadline\": \"PSYC 201 essay — 2 days\"}}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 2,
+                "routing_logic": "crisis_check=false, keyword_match=essay, capability=assignment"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"capability\": \"assignment\", \"crisis_detected\": false, \"confidence\": 0.97}",
+          "extra": {
+            "tool_call_id": "tc-002-detect-capability",
+            "latency_ms": 2
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-003-fetch-assignment",
+              "type": "function",
+              "function": {
+                "name": "db.fetchAssignmentContext",
+                "arguments": "{\"user_id\": \"uuid-alex\", \"course_filter\": \"PSYC\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 15,
+                "db_queries": [
+                  "SELECT * FROM public.assignments WHERE user_id='uuid-alex' AND course LIKE '%PSYC%'",
+                  "SELECT rubric FROM public.course_content WHERE course_id='psyc201-uoft'",
+                  "SELECT past_grade, feedback FROM public.assignments WHERE user_id='uuid-alex' AND course='PSYC201' ORDER BY due_date DESC LIMIT 3"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"assignment\": {\"title\": \"PSYC 201 Reflection Essay — Week 8\", \"description\": \"500-word reflection on attachment theory and its application to a personal relationship\", \"due\": \"2025-06-11T23:59:00Z\", \"rubric\": \"Clarity (25%), Evidence (35%), Personal reflection (40%)\", \"word_limit\": 500}, \"past_grade\": 78, \"past_feedback\": \"Good personal connection but needed more citations\", \"course_code\": \"PSYC201\", \"university\": \"University of Toronto\"}",
+          "extra": {
+            "tool_call_id": "tc-003-fetch-assignment",
+            "latency_ms": 15
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Hey Alex! I can see your PSYC 201 Reflection Essay is due in 2 days — good timing to start now.\n\nYour essay is a 500-word reflection on attachment theory applied to a personal relationship. Based on your last essay in this course (78%), your professor's main feedback was to add more citations — so this time let's make sure we back every claim with Bowlby, Ainsworth, or a peer-reviewed source.\n\nHere's a structure that fits the rubric (Clarity 25%, Evidence 35%, Personal Reflection 40%):\n\n**Suggested Outline:**\n1. **Introduction (50 words)** — Briefly define attachment theory (Bowlby, 1969) and state which relationship you'll reflect on.\n2. **Theory Application (150 words)** — Describe your attachment style (secure/anxious/avoidant) with evidence. Cite at least 2 sources.\n3. **Personal Reflection (250 words)** — This is worth 40% — be specific and honest. Connect a real memory or pattern to the theory.\n4. **Conclusion (50 words)** — What did you learn? How might this awareness change your behaviour?\n\nWant me to help you draft any section, or would you like to start by telling me which relationship and attachment style you're thinking of writing about?",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 1310,
+              "prompt_token_details": {
+                "cached_tokens": 800
+              },
+              "completion_tokens": 398,
+              "total_tokens": 1708,
+              "completion_token_details": {}
+            },
+            "model": "claude-3-5-sonnet-20241022",
+            "latency_ms": 800
+          },
+          "reasoning_content": "Student has a PSYC 201 essay due in 2 days. Brain context shows stress_level=0.6 (moderate), momentum_state=building. Past grade was 78% with feedback about needing more citations. The rubric weights personal reflection at 40% which is the highest — I should emphasize this. I'll provide a concrete outline that directly addresses the rubric weighting and the specific past feedback about citations.",
+          "extra": {
+            "agent_type": "assignment",
+            "brain_context_used": true,
+            "assignment_context_used": true,
+            "past_feedback_incorporated": true
+          }
+        },
+        {
+          "role": "tool",
+          "content": "{\"status\": \"ok\", \"impression_written\": true, \"signal_emitted\": \"session_completed\", \"impression\": \"Alex asked for help with PSYC 201 essay. Provided structured outline emphasising citation gap from past feedback. Student engaged, deadline in 2 days.\"}",
+          "extra": {
+            "tool_call_id": "tc-004-session-end",
+            "latency_ms": 8,
+            "async": true
+          }
+        }
+      ]
+    }
+  ],
+  "message": {
+    "role": "assistant",
+    "content": "Hey Alex! I can see your PSYC 201 Reflection Essay is due in 2 days — good timing to start now.\n\nYour essay is a 500-word reflection on attachment theory applied to a personal relationship. Based on your last essay in this course (78%), your professor's main feedback was to add more citations — so this time let's make sure we back every claim with Bowlby, Ainsworth, or a peer-reviewed source.\n\nHere's a structure that fits the rubric (Clarity 25%, Evidence 35%, Personal Reflection 40%):\n\n**Suggested Outline:**\n1. **Introduction (50 words)** — Briefly define attachment theory (Bowlby, 1969) and state which relationship you'll reflect on.\n2. **Theory Application (150 words)** — Describe your attachment style (secure/anxious/avoidant) with evidence. Cite at least 2 sources.\n3. **Personal Reflection (250 words)** — This is worth 40% — be specific and honest. Connect a real memory or pattern to the theory.\n4. **Conclusion (50 words)** — What did you learn? How might this awareness change your behaviour?\n\nWant me to help you draft any section, or would you like to start by telling me which relationship and attachment style you're thinking of writing about?",
+    "response_meta": {
+      "finish_reason": "end_turn",
+      "usage": {
+        "prompt_tokens": 1310,
+        "prompt_token_details": {
+          "cached_tokens": 800
+        },
+        "completion_tokens": 398,
+        "total_tokens": 1708,
+        "completion_token_details": {}
+      },
+      "model": "claude-3-5-sonnet-20241022"
+    },
+    "extra": {
+      "scenario": "01_assignment_chat",
+      "description": "Student asks Reggie for help with a PSYC 201 essay. Brain context is read, assignment details and past feedback are fetched, and a personalised outline is returned in one Claude call.",
+      "claude_calls": 1,
+      "total_latency_ms": 827,
+      "cost_usd": 0.0099,
+      "cost_breakdown": {
+        "input_tokens": 1310,
+        "input_cost_usd": 0.00393,
+        "output_tokens": 398,
+        "output_cost_usd": 0.00597
+      },
+      "db_reads": 2,
+      "db_writes": 1,
+      "agents_involved": ["contextWindowWriter", "agentRouter", "brainChatSession"]
+    }
+  }
+}

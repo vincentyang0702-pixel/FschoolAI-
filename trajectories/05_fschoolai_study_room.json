@@ -1,0 +1,224 @@
+{
+  "session_id": "a1b2c3d4-0005-4e5f-8a9b-fschoolai0005",
+  "agent_states": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "can someone explain attachment theory?",
+          "extra": {
+            "is_original_user_input": true,
+            "sender": "student_a",
+            "person_id": "uuid-alex",
+            "room_id": "room-psyc201-001",
+            "room_participants": ["uuid-alex", "uuid-priya", "uuid-ben"],
+            "websocket_session": true
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-001-read-all-brain-contexts",
+              "type": "function",
+              "function": {
+                "name": "db.batchReadBrainContexts",
+                "arguments": "{\"person_ids\": [\"uuid-alex\", \"uuid-priya\", \"uuid-ben\"]}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 18,
+                "db_queries": [
+                  "SELECT * FROM brain.context_window WHERE person_id IN ('uuid-alex', 'uuid-priya', 'uuid-ben')",
+                  "SELECT concept, mastery FROM brain.knowledge WHERE person_id IN ('uuid-alex', 'uuid-priya', 'uuid-ben') AND concept = 'attachment_theory'"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"contexts\": {\"uuid-alex\": {\"name\": \"Alex\", \"stress_level\": 0.5, \"momentum_state\": \"building\", \"knowledge\": {\"attachment_theory\": 0.62}}, \"uuid-priya\": {\"name\": \"Priya\", \"stress_level\": 0.3, \"momentum_state\": \"strong\", \"knowledge\": {\"attachment_theory\": 0.85}, \"notes\": \"Priya wrote a paper on Bowlby last semester\"}, \"uuid-ben\": {\"name\": \"Ben\", \"stress_level\": 0.6, \"momentum_state\": \"low\", \"knowledge\": {\"attachment_theory\": 0.40}}}}",
+          "extra": {
+            "tool_call_id": "tc-001-read-all-brain-contexts",
+            "latency_ms": 18
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-002-orchestrator-route",
+              "type": "function",
+              "function": {
+                "name": "studyRoomOrchestrator.route",
+                "arguments": "{\"message\": \"can someone explain attachment theory?\", \"sender\": \"uuid-alex\", \"room_contexts\": {\"uuid-alex\": {\"mastery\": 0.62}, \"uuid-priya\": {\"mastery\": 0.85, \"notes\": \"wrote paper on Bowlby\"}, \"uuid-ben\": {\"mastery\": 0.40}}}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 3,
+                "decision": "Priya has high mastery (0.85) and prior written work on topic. Reggie explains but invites Priya to add perspective. Ben is also learning — frame explanation for both Alex and Ben."
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"strategy\": \"reggie_explains_invite_expert_peer\", \"expert_peer\": \"uuid-priya\", \"learners\": [\"uuid-alex\", \"uuid-ben\"], \"explanation_depth\": \"intermediate\"}",
+          "extra": {
+            "tool_call_id": "tc-002-orchestrator-route",
+            "latency_ms": 3
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Great question, Alex! Let me give everyone a solid foundation.\n\n**Attachment Theory** (Bowlby, 1969) proposes that humans are biologically programmed to form close emotional bonds — particularly with caregivers in early childhood. These bonds serve as a \"secure base\" from which we explore the world.\n\n**The four attachment styles** (Ainsworth, 1978):\n- **Secure** — comfortable with closeness, trusts others will be available\n- **Anxious-Preoccupied** — craves closeness but fears abandonment\n- **Dismissive-Avoidant** — values independence, suppresses attachment needs\n- **Fearful-Avoidant** — wants closeness but fears it simultaneously\n\nThe key insight for your essay: your **internal working model** — the mental blueprint formed in childhood — shapes how you relate to people throughout your life.\n\nPriya, you wrote about Bowlby last semester — want to add anything about how the theory evolved or any critiques worth knowing for the essay?",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 920,
+              "prompt_token_details": {
+                "cached_tokens": 400
+              },
+              "completion_tokens": 245,
+              "total_tokens": 1165,
+              "completion_token_details": {}
+            },
+            "model": "claude-3-5-sonnet-20241022",
+            "latency_ms": 750
+          },
+          "reasoning_content": "Three students in the room. Alex asked the question (mastery 0.62 — intermediate). Priya has mastery 0.85 and wrote a paper on Bowlby — she is the expert peer I should invite. Ben has mastery 0.40 — I should pitch the explanation at a level that works for both Alex and Ben, not too advanced. I'll give a clear structured explanation then explicitly invite Priya to contribute, which also earns her Study Room MVP FST if she helps.",
+          "extra": {
+            "agent_type": "studyRoomOrchestrator",
+            "broadcast_to": ["uuid-alex", "uuid-priya", "uuid-ben"],
+            "expert_peer_invited": "uuid-priya"
+          }
+        },
+        {
+          "role": "user",
+          "content": "Yeah! One thing worth adding — Bowlby was actually influenced by ethology, specifically Lorenz's work on imprinting in geese. The idea that attachment is instinctive, not just learned, was controversial at the time. Also for the essay, the critique that the theory is culturally biased (it assumes Western nuclear family norms) is worth mentioning if you want to show critical thinking.",
+          "extra": {
+            "is_original_user_input": true,
+            "sender": "student_priya",
+            "person_id": "uuid-priya",
+            "room_id": "room-psyc201-001"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-003-process-priya-response",
+              "type": "function",
+              "function": {
+                "name": "claude.complete",
+                "arguments": "{\"model\": \"claude-3-5-sonnet-20241022\", \"system\": \"You are Reggie, the Study Room facilitator. Priya (expert peer, mastery 0.85) just added valuable context. Acknowledge her contribution, reinforce the key points for Alex and Ben (both writing essays), and check if Ben has questions — his mastery is 0.40 and he has been quiet.\", \"user\": \"Priya said: Bowlby was influenced by Lorenz's ethology/imprinting work. Attachment is instinctive not just learned. Cultural bias critique (Western nuclear family assumption) is worth adding for critical thinking.\", \"max_tokens\": 200}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 650
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "That's gold, Priya — thank you! Two things to note for your essays:\n\n1. **Ethology link** — Bowlby drew on Lorenz's imprinting research to argue attachment is *instinctive*, not just conditioned behaviour. This is what made the theory controversial in a behaviourist era.\n\n2. **Cultural critique** — Mentioning this in your essay shows critical thinking (which is exactly what your rubric rewards). You could write: *\"While Bowlby's theory has been widely influential, critics note it reflects Western assumptions about nuclear family structures and may not generalise across cultures (Rothbaum et al., 2000).\"*\n\nBen — you've been quiet. Does the secure base concept make sense, or would it help to talk through how it connects to adult relationships?",
+          "extra": {
+            "tool_call_id": "tc-003-process-priya-response",
+            "latency_ms": 650,
+            "usage": {
+              "prompt_tokens": 850,
+              "completion_tokens": 190,
+              "total_tokens": 1040
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "That's gold, Priya — thank you! Two things to note for your essays:\n\n1. **Ethology link** — Bowlby drew on Lorenz's imprinting research to argue attachment is *instinctive*, not just conditioned behaviour. This is what made the theory controversial in a behaviourist era.\n\n2. **Cultural critique** — Mentioning this in your essay shows critical thinking (which is exactly what your rubric rewards). You could write: *\"While Bowlby's theory has been widely influential, critics note it reflects Western assumptions about nuclear family structures and may not generalise across cultures (Rothbaum et al., 2000).\"*\n\nBen — you've been quiet. Does the secure base concept make sense, or would it help to talk through how it connects to adult relationships?",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 850,
+              "prompt_token_details": {
+                "cached_tokens": 400
+              },
+              "completion_tokens": 190,
+              "total_tokens": 1040,
+              "completion_token_details": {}
+            },
+            "model": "claude-3-5-sonnet-20241022",
+            "latency_ms": 650
+          },
+          "extra": {
+            "broadcast_to": ["uuid-alex", "uuid-priya", "uuid-ben"],
+            "fst_signal_queued": {
+              "uuid-priya": {
+                "type": "study_room_help_confirmed",
+                "amount": 25,
+                "pending_confirmation_from": "uuid-alex"
+              }
+            }
+          }
+        },
+        {
+          "role": "tool",
+          "content": "{\"status\": \"session_end\", \"impressions_written\": 3, \"signals_emitted\": 3, \"fst_awarded\": {\"uuid-alex\": 25, \"uuid-priya\": 25, \"uuid-ben\": 25}, \"study_room_mvp_signal\": \"uuid-priya\"}",
+          "extra": {
+            "tool_call_id": "tc-004-session-end",
+            "latency_ms": 25,
+            "db_writes": [
+              "INSERT INTO brain.impressions (person_id='uuid-alex', ...)",
+              "INSERT INTO brain.impressions (person_id='uuid-priya', ...)",
+              "INSERT INTO brain.impressions (person_id='uuid-ben', ...)",
+              "INSERT INTO brain.signals (person_id='uuid-alex', signal_type='study_room_session')",
+              "INSERT INTO brain.signals (person_id='uuid-priya', signal_type='study_room_session')",
+              "INSERT INTO brain.signals (person_id='uuid-ben', signal_type='study_room_session')"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "message": {
+    "role": "assistant",
+    "content": "That's gold, Priya — thank you! Two things to note for your essays:\n\n1. **Ethology link** — Bowlby drew on Lorenz's imprinting research to argue attachment is *instinctive*, not just conditioned behaviour. This is what made the theory controversial in a behaviourist era.\n\n2. **Cultural critique** — Mentioning this in your essay shows critical thinking (which is exactly what your rubric rewards). You could write: *\"While Bowlby's theory has been widely influential, critics note it reflects Western assumptions about nuclear family structures and may not generalise across cultures (Rothbaum et al., 2000).\"*\n\nBen — you've been quiet. Does the secure base concept make sense, or would it help to talk through how it connects to adult relationships?",
+    "response_meta": {
+      "finish_reason": "end_turn",
+      "usage": {
+        "prompt_tokens": 850,
+        "prompt_token_details": {
+          "cached_tokens": 400
+        },
+        "completion_tokens": 190,
+        "total_tokens": 1040,
+        "completion_token_details": {}
+      },
+      "model": "claude-3-5-sonnet-20241022"
+    },
+    "extra": {
+      "scenario": "05_study_room",
+      "description": "3 students in a PSYC 201 Study Room. Alex asks about attachment theory. Reggie reads all 3 brain contexts, identifies Priya as expert peer (mastery 0.85, wrote paper on Bowlby), explains at intermediate level for Alex and Ben, then invites Priya. Priya adds ethology link and cultural critique. Reggie synthesises and checks in with Ben (mastery 0.40, quiet). 2 Claude calls total for this exchange. Each student earns 25 FST. Priya queued for Study Room MVP signal.",
+      "claude_calls": 2,
+      "claude_calls_per_room_message": 1,
+      "total_latency_ms_turn1": 771,
+      "total_latency_ms_turn2": 653,
+      "cost_per_turn_usd": {
+        "turn1": 0.0064,
+        "turn2": 0.0057
+      },
+      "cost_per_student_per_turn_usd": 0.0021,
+      "db_reads": 2,
+      "db_writes": 6,
+      "fst_earned_per_student": 25,
+      "students": 3,
+      "agents_involved": ["studyRoomOrchestrator", "contextWindowWriter", "FSTRewardEngine"]
+    }
+  }
+}

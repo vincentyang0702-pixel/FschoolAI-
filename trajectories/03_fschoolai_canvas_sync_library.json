@@ -1,0 +1,199 @@
+{
+  "session_id": "a1b2c3d4-0003-4e5f-8a9b-fschoolai0003",
+  "agent_states": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "[EXTENSION TRIGGER] Chrome extension content script detected Canvas syllabus page. Auto-submitting content for sync.",
+          "extra": {
+            "is_original_user_input": false,
+            "trigger_type": "chrome_extension",
+            "user_id": "uuid-aryan",
+            "url": "https://canvas.utoronto.ca/courses/psyc201/files/syllabus",
+            "content_type": "syllabus",
+            "course_code": "PSYC201",
+            "university": "University of Toronto",
+            "extracted_text_tokens": 2000
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-001-auth-verify",
+              "type": "function",
+              "function": {
+                "name": "auth.verifyJWT",
+                "arguments": "{\"token\": \"Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 2
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"valid\": true, \"user_id\": \"uuid-aryan\", \"university_id\": \"uoft-001\"}",
+          "extra": {
+            "tool_call_id": "tc-001-auth-verify",
+            "latency_ms": 2
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-002-hash-check",
+              "type": "function",
+              "function": {
+                "name": "library.checkContentHash",
+                "arguments": "{\"content_hash\": \"sha256:8f4a2b1c9d3e7f0a5b6c2d4e8f1a3b5c\", \"university_id\": \"uoft-001\", \"course_code\": \"PSYC201\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 5,
+                "db_query": "SELECT id FROM public.course_content WHERE content_hash = 'sha256:8f4a2b1c9d3e7f0a5b6c2d4e8f1a3b5c' AND university_id = 'uoft-001'"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"exists\": false, \"is_first_sync\": true, \"message\": \"New content — not previously seen in library\"}",
+          "extra": {
+            "tool_call_id": "tc-002-hash-check",
+            "latency_ms": 5
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-003-write-library",
+              "type": "function",
+              "function": {
+                "name": "library.writeContent",
+                "arguments": "{\"university_id\": \"uoft-001\", \"course_code\": \"PSYC201\", \"content_type\": \"syllabus\", \"content_hash\": \"sha256:8f4a2b1c9d3e7f0a5b6c2d4e8f1a3b5c\", \"text\": \"[PSYC 201 Syllabus full text...]\", \"contributed_by\": \"uuid-aryan\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 8,
+                "db_query": "INSERT INTO public.course_content (university_id, course_code, content_type, content_hash, text, week, contributed_by, created_at) VALUES (...)"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"content_id\": \"cc-psyc201-syllabus-001\", \"status\": \"written\", \"fst_reward_queued\": true, \"fst_amount\": 75}",
+          "extra": {
+            "tool_call_id": "tc-003-write-library",
+            "latency_ms": 8
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-004-library-analysis",
+              "type": "function",
+              "function": {
+                "name": "claude.complete",
+                "arguments": "{\"model\": \"claude-3-5-sonnet-20241022\", \"system\": \"You are an academic content analyzer. Extract structured knowledge from the following course syllabus. Return a JSON object with: concepts (array of key topics with difficulty 1-5), weeks (array of week objects with topic and assignments), learning_outcomes (array), and prerequisite_knowledge (array).\", \"user\": \"[PSYC 201 Syllabus full text — Week 1: Introduction to Psychology, Week 2: Biological Bases of Behaviour, Week 3: Sensation and Perception, Week 4: States of Consciousness, Week 5: Learning, Week 6: Memory, Week 7: Cognition and Intelligence, Week 8: Motivation and Emotion, Week 9: Developmental Psychology, Week 10: Personality, Week 11: Social Psychology, Week 12: Psychological Disorders — Attachment Theory covered in Week 9...]\", \"max_tokens\": 800}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 1800,
+                "async": true,
+                "pipeline": "LibraryAnalysisPipeline"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"concepts\": [{\"name\": \"attachment theory\", \"difficulty\": 3, \"week\": 9, \"related\": [\"Bowlby\", \"Ainsworth\", \"secure base\", \"internal working model\"]}, {\"name\": \"classical conditioning\", \"difficulty\": 2, \"week\": 5}, {\"name\": \"cognitive dissonance\", \"difficulty\": 3, \"week\": 11}, {\"name\": \"neuroplasticity\", \"difficulty\": 4, \"week\": 2}, {\"name\": \"working memory model\", \"difficulty\": 3, \"week\": 6}], \"weeks\": [{\"week\": 1, \"topic\": \"Introduction to Psychology\", \"assignments\": []}, {\"week\": 8, \"topic\": \"Motivation and Emotion\", \"assignments\": [{\"type\": \"reflection_essay\", \"due_offset_days\": 14}]}, {\"week\": 9, \"topic\": \"Developmental Psychology — Attachment\", \"assignments\": []}], \"learning_outcomes\": [\"Apply psychological theories to real-world behaviour\", \"Critically evaluate research methodology\", \"Demonstrate understanding of biopsychosocial model\"], \"prerequisite_knowledge\": [\"Basic biology\", \"High school psychology (optional)\"]}",
+          "extra": {
+            "tool_call_id": "tc-004-library-analysis",
+            "latency_ms": 1800,
+            "usage": {
+              "prompt_tokens": 2200,
+              "completion_tokens": 780,
+              "total_tokens": 2980
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-005-write-brain-knowledge",
+              "type": "function",
+              "function": {
+                "name": "brain.writeSharedKnowledge",
+                "arguments": "{\"course_code\": \"PSYC201\", \"university_id\": \"uoft-001\", \"concepts\": [{\"name\": \"attachment theory\", \"difficulty\": 3}, {\"name\": \"classical conditioning\", \"difficulty\": 2}], \"source\": \"library\", \"person_id\": null}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 12,
+                "note": "person_id=null means shared knowledge, not individual brain entry"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"concepts_written\": 5, \"students_context_updated\": 12, \"fst_awarded_to_aryan\": 75, \"signal_emitted\": \"content_viewed_syllabus\"}",
+          "extra": {
+            "tool_call_id": "tc-005-write-brain-knowledge",
+            "latency_ms": 12
+          }
+        }
+      ]
+    }
+  ],
+  "message": {
+    "role": "assistant",
+    "content": "{\"status\": \"sync_complete\", \"content_id\": \"cc-psyc201-syllabus-001\", \"is_new_content\": true, \"concepts_extracted\": 5, \"fst_earned\": 75, \"message\": \"Syllabus synced to shared Library. You earned 75 FST for contributing new content. 12 other PSYC 201 students at UofT will benefit from this sync.\"}",
+    "response_meta": {
+      "finish_reason": "end_turn",
+      "usage": {
+        "prompt_tokens": 2200,
+        "prompt_token_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens": 780,
+        "total_tokens": 2980,
+        "completion_token_details": {}
+      },
+      "model": "claude-3-5-sonnet-20241022"
+    },
+    "extra": {
+      "scenario": "03_canvas_sync_library",
+      "description": "Aryan's Chrome extension detects a Canvas syllabus page and auto-syncs it. Content hash check confirms this is new (first student to sync PSYC 201 syllabus at UofT). Library Analysis Pipeline runs one Claude call to extract concepts. 12 other students' brain context windows are updated. Aryan earns 75 FST. All subsequent students syncing the same syllabus cost $0 (hash match).",
+      "claude_calls": 1,
+      "total_latency_ms": 1837,
+      "user_wait_ms": 0,
+      "cost_usd": 0.0183,
+      "cost_breakdown": {
+        "input_tokens": 2200,
+        "input_cost_usd": 0.0066,
+        "output_tokens": 780,
+        "output_cost_usd": 0.0117
+      },
+      "subsequent_student_cost_usd": 0.0,
+      "db_reads": 1,
+      "db_writes": 3,
+      "students_benefited": 12,
+      "agents_involved": ["ChromeExtension", "LibraryAnalysisPipeline", "contextWindowWriter", "FSTRewardEngine"]
+    }
+  }
+}

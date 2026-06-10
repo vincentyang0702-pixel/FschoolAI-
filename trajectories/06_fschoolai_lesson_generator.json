@@ -1,0 +1,209 @@
+{
+  "session_id": "a1b2c3d4-0006-4e5f-8a9b-fschoolai0006",
+  "agent_states": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "can you teach me probability distributions? I have a STATS 110 midterm in 3 days",
+          "extra": {
+            "is_original_user_input": true,
+            "person_id": "uuid-alex",
+            "session_id": "sess-lesson-001",
+            "brain_ready": true
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-001-read-brain-context",
+              "type": "function",
+              "function": {
+                "name": "contextWindowWriter.read",
+                "arguments": "{\"person_id\": \"uuid-alex\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 8,
+                "db_query": "SELECT * FROM brain.context_window WHERE person_id = 'uuid-alex'"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"stress_level\": 0.55, \"momentum_state\": \"building\", \"confirmed_hypotheses\": [\"visual_learner\", \"responds_well_to_examples_before_theory\"], \"most_urgent_deadline\": \"STATS110 midterm — 3 days\", \"last_48h\": \"1 study session STATS110 (30min), submitted PSYC201 essay\"}",
+          "extra": {
+            "tool_call_id": "tc-001-read-brain-context",
+            "latency_ms": 8
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-002-detect-capability",
+              "type": "function",
+              "function": {
+                "name": "agentRouter.detectCapability",
+                "arguments": "{\"message\": \"can you teach me probability distributions? I have a STATS 110 midterm in 3 days\", \"brain_context\": {\"confirmed_hypotheses\": [\"visual_learner\", \"responds_well_to_examples_before_theory\"]}}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 2,
+                "routing_logic": "keyword=teach, midterm detected → capability=lesson_generator"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"capability\": \"lesson_generator\", \"crisis_detected\": false, \"confidence\": 0.95}",
+          "extra": {
+            "tool_call_id": "tc-002-detect-capability",
+            "latency_ms": 2
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-003-fetch-knowledge-gaps",
+              "type": "function",
+              "function": {
+                "name": "db.fetchKnowledgeGaps",
+                "arguments": "{\"person_id\": \"uuid-alex\", \"course_code\": \"STATS110\", \"topic\": \"probability_distributions\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 14,
+                "db_queries": [
+                  "SELECT concept, mastery FROM brain.knowledge WHERE person_id='uuid-alex' AND course_code='STATS110'",
+                  "SELECT concepts FROM public.course_content WHERE course_code='STATS110' AND university_id='uoft-001' AND content_type='syllabus'",
+                  "SELECT past_grade, feedback FROM public.assignments WHERE user_id='uuid-alex' AND course='STATS110' ORDER BY due_date DESC LIMIT 2"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"knowledge_gaps\": [{\"concept\": \"normal_distribution\", \"mastery\": 0.35, \"gap\": \"high\"}, {\"concept\": \"binomial_distribution\", \"mastery\": 0.28, \"gap\": \"high\"}, {\"concept\": \"expected_value\", \"mastery\": 0.50, \"gap\": \"medium\"}, {\"concept\": \"z_score\", \"mastery\": 0.42, \"gap\": \"medium\"}, {\"concept\": \"central_limit_theorem\", \"mastery\": 0.20, \"gap\": \"critical\"}], \"course_concepts\": [\"probability_basics\", \"normal_distribution\", \"binomial_distribution\", \"expected_value\", \"z_score\", \"central_limit_theorem\", \"hypothesis_testing\"], \"past_grade\": 71, \"past_feedback\": \"Good on probability basics but struggled with distribution applications and z-score calculations\", \"learning_style\": \"visual_learner, examples_before_theory\"}",
+          "extra": {
+            "tool_call_id": "tc-003-fetch-knowledge-gaps",
+            "latency_ms": 14
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-004-generate-lesson",
+              "type": "function",
+              "function": {
+                "name": "claude.complete",
+                "arguments": "{\"model\": \"claude-3-5-sonnet-20241022\", \"system\": \"You are Reggie, Alex's personal AI tutor. Generate a structured, personalised lesson on probability distributions for a student with these characteristics:\\n- Learning style: visual learner, responds better to examples BEFORE theory\\n- Midterm in 3 days (time-constrained)\\n- Past grade: 71% with weakness in distribution applications and z-scores\\n- Critical gap: central_limit_theorem (mastery 0.20)\\n- High gaps: normal_distribution (0.35), binomial_distribution (0.28)\\n- Medium gaps: expected_value (0.50), z_score (0.42)\\n\\nLesson requirements:\\n1. Start with a concrete real-world example, THEN introduce the formula\\n2. Use analogies that connect to everyday life\\n3. Focus on the 3 critical/high gaps first (CLT, normal, binomial)\\n4. Include 1 practice problem per concept with step-by-step solution\\n5. Keep each section under 150 words — Alex studies in focused bursts\\n6. End with a 3-day study plan for the midterm\\n\\nFormat as a structured lesson with clear section headers.\", \"user\": \"Teach me probability distributions for STATS 110 midterm in 3 days.\", \"max_tokens\": 1200}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 2100
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "## Your STATS 110 Lesson: Probability Distributions\n*Personalised for Alex — 3 days to midterm*\n\n---\n\n### 1. Normal Distribution — Start Here First\n\n**Real example first:** Imagine 1,000 students take the same exam. Most score around 70%. Very few score 30% or 99%. That bell-shaped spread of scores? That's a normal distribution.\n\n**The formula:** X ~ N(μ, σ²) — where μ is the mean (centre of the bell) and σ is the standard deviation (how wide the bell is).\n\n**Practice problem:** Heights of UofT students are normally distributed with μ = 170cm, σ = 10cm. What percentage of students are between 160cm and 180cm?\n\n*Solution:* 160 and 180 are both exactly 1σ from the mean. The empirical rule (68-95-99.7) tells us **68%** of data falls within 1σ. ✓\n\n---\n\n### 2. Binomial Distribution — Counting Successes\n\n**Real example first:** You flip a coin 10 times. How likely is it to get exactly 6 heads? That's a binomial problem — fixed trials, two outcomes, constant probability.\n\n**The formula:** P(X = k) = C(n,k) × p^k × (1-p)^(n-k)\n- n = number of trials (10 flips)\n- k = successes you want (6 heads)\n- p = probability of success (0.5 for fair coin)\n\n**Practice problem:** A multiple choice test has 5 questions, each with 4 options. If you guess randomly, what's P(exactly 2 correct)?\n\n*Solution:* n=5, k=2, p=0.25 → C(5,2) × 0.25² × 0.75³ = 10 × 0.0625 × 0.4219 = **0.264 (26.4%)** ✓\n\n---\n\n### 3. Central Limit Theorem — The Most Important One ⚠️\n\n**Real example first:** You survey 5 random students about sleep hours — you might get a weird sample. But if you survey 100 students and repeat that survey 1,000 times, the average of those averages will always form a perfect bell curve. That's the CLT.\n\n**The key insight:** No matter what the original distribution looks like, the **sampling distribution of the mean** becomes normal as n gets large (n ≥ 30).\n\n**Why it matters for your exam:** The CLT is why we can use z-scores and normal distribution tables for almost everything. It's the foundation of hypothesis testing.\n\n**Practice problem:** A population has μ = 50, σ = 20. You take samples of n = 100. What is the standard error?\n\n*Solution:* SE = σ/√n = 20/√100 = 20/10 = **2** ✓\n\n---\n\n### 4. Z-Score — Translating to Standard Units\n\n**Formula:** z = (X - μ) / σ\n\n**What it means:** How many standard deviations is X from the mean? z = 2 means X is 2 standard deviations above average.\n\n**Practice problem:** A student scores 85 on an exam where μ = 70, σ = 10. What is their z-score?\n\n*Solution:* z = (85 - 70) / 10 = **1.5** → They scored better than ~93% of students ✓\n\n---\n\n### Your 3-Day Study Plan\n\n| Day | Focus | Time |\n|---|---|---|\n| Day 1 (Today) | Normal distribution + z-scores (practice 5 problems each) | 60 min |\n| Day 2 | Binomial distribution + CLT (practice 5 problems each) | 60 min |\n| Day 3 | Mixed practice exam — all 4 concepts, timed | 45 min |\n\nWant me to generate practice problems for Day 1 right now?",
+          "extra": {
+            "tool_call_id": "tc-004-generate-lesson",
+            "latency_ms": 2100,
+            "usage": {
+              "prompt_tokens": 1050,
+              "completion_tokens": 1180,
+              "total_tokens": 2230
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "## Your STATS 110 Lesson: Probability Distributions\n*Personalised for Alex — 3 days to midterm*\n\n---\n\n### 1. Normal Distribution — Start Here First\n\n**Real example first:** Imagine 1,000 students take the same exam. Most score around 70%. Very few score 30% or 99%. That bell-shaped spread of scores? That's a normal distribution.\n\n**The formula:** X ~ N(μ, σ²) — where μ is the mean (centre of the bell) and σ is the standard deviation (how wide the bell is).\n\n**Practice problem:** Heights of UofT students are normally distributed with μ = 170cm, σ = 10cm. What percentage of students are between 160cm and 180cm?\n\n*Solution:* 160 and 180 are both exactly 1σ from the mean. The empirical rule (68-95-99.7) tells us **68%** of data falls within 1σ. ✓\n\n---\n\n### 2. Binomial Distribution — Counting Successes\n\n**Real example first:** You flip a coin 10 times. How likely is it to get exactly 6 heads? That's a binomial problem — fixed trials, two outcomes, constant probability.\n\n**The formula:** P(X = k) = C(n,k) × p^k × (1-p)^(n-k)\n\n**Practice problem:** A multiple choice test has 5 questions, each with 4 options. If you guess randomly, what's P(exactly 2 correct)?\n\n*Solution:* n=5, k=2, p=0.25 → C(5,2) × 0.25² × 0.75³ = 10 × 0.0625 × 0.4219 = **0.264 (26.4%)** ✓\n\n---\n\n### 3. Central Limit Theorem — The Most Important One ⚠️\n\n**Real example first:** You survey 5 random students about sleep hours — you might get a weird sample. But if you survey 100 students and repeat that survey 1,000 times, the average of those averages will always form a perfect bell curve. That's the CLT.\n\n**The key insight:** No matter what the original distribution looks like, the **sampling distribution of the mean** becomes normal as n gets large (n ≥ 30).\n\n**Practice problem:** A population has μ = 50, σ = 20. You take samples of n = 100. What is the standard error?\n\n*Solution:* SE = σ/√n = 20/√100 = 20/10 = **2** ✓\n\n---\n\n### 4. Z-Score — Translating to Standard Units\n\n**Formula:** z = (X - μ) / σ\n\n**Practice problem:** A student scores 85 on an exam where μ = 70, σ = 10. What is their z-score?\n\n*Solution:* z = (85 - 70) / 10 = **1.5** → They scored better than ~93% of students ✓\n\n---\n\n### Your 3-Day Study Plan\n\n| Day | Focus | Time |\n|---|---|---|\n| Day 1 (Today) | Normal distribution + z-scores (practice 5 problems each) | 60 min |\n| Day 2 | Binomial distribution + CLT (practice 5 problems each) | 60 min |\n| Day 3 | Mixed practice exam — all 4 concepts, timed | 45 min |\n\nWant me to generate practice problems for Day 1 right now?",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 1050,
+              "prompt_token_details": {
+                "cached_tokens": 600
+              },
+              "completion_tokens": 1180,
+              "total_tokens": 2230,
+              "completion_token_details": {}
+            },
+            "model": "claude-3-5-sonnet-20241022",
+            "latency_ms": 2100
+          },
+          "reasoning_content": "Alex is a visual learner who responds better to examples before theory. He has 3 days to his STATS 110 midterm. His critical gap is CLT (mastery 0.20) — this must be covered. His past feedback said he struggled with distribution applications and z-scores. I should order the lesson: Normal first (most foundational), then Binomial, then CLT (hardest, most critical), then Z-score (ties everything together). Each section: real example → formula → practice problem with solution. End with a concrete 3-day plan so he knows exactly what to do. Keep sections short — he studies in bursts.",
+          "extra": {
+            "agent_type": "lesson_generator",
+            "brain_context_used": true,
+            "knowledge_gaps_used": true,
+            "learning_style_applied": ["visual_learner", "examples_before_theory"],
+            "concepts_covered": ["normal_distribution", "binomial_distribution", "central_limit_theorem", "z_score"],
+            "study_plan_generated": true
+          }
+        },
+        {
+          "role": "tool",
+          "content": "{\"status\": \"ok\", \"lesson_id\": \"lesson-alex-stats110-001\", \"impression_written\": true, \"signal_emitted\": \"lesson_completed\", \"knowledge_updates_queued\": [{\"concept\": \"normal_distribution\", \"delta\": +0.05}, {\"concept\": \"binomial_distribution\", \"delta\": +0.05}, {\"concept\": \"central_limit_theorem\", \"delta\": +0.05}, {\"concept\": \"z_score\", \"delta\": +0.05}], \"fst_earned\": 30, \"study_session_duration_min\": 25}",
+          "extra": {
+            "tool_call_id": "tc-005-session-end",
+            "latency_ms": 10,
+            "async": true,
+            "note": "Knowledge mastery deltas are small — lesson reading alone does not fully close gaps. Deltas increase after practice problems are completed and verified."
+          }
+        }
+      ]
+    }
+  ],
+  "message": {
+    "role": "assistant",
+    "content": "## Your STATS 110 Lesson: Probability Distributions\n*Personalised for Alex — 3 days to midterm*\n\n[Full lesson content as above — Normal Distribution, Binomial Distribution, Central Limit Theorem, Z-Score, 3-Day Study Plan]",
+    "response_meta": {
+      "finish_reason": "end_turn",
+      "usage": {
+        "prompt_tokens": 1050,
+        "prompt_token_details": {
+          "cached_tokens": 600
+        },
+        "completion_tokens": 1180,
+        "total_tokens": 2230,
+        "completion_token_details": {}
+      },
+      "model": "claude-3-5-sonnet-20241022"
+    },
+    "extra": {
+      "scenario": "06_lesson_generator",
+      "description": "Alex asks Reggie to teach him probability distributions 3 days before his STATS 110 midterm. Brain context is read to identify learning style (visual, examples-before-theory). Knowledge gaps are fetched — CLT is critical (mastery 0.20), normal and binomial are high gaps. One Claude call generates a fully personalised lesson: examples first, then formulas, practice problems with solutions, and a 3-day study plan. Knowledge mastery deltas are queued for async update.",
+      "claude_calls": 1,
+      "total_latency_ms": 2134,
+      "cost_usd": 0.0209,
+      "cost_breakdown": {
+        "input_tokens": 1050,
+        "input_cost_usd": 0.00315,
+        "output_tokens": 1180,
+        "output_cost_usd": 0.0177
+      },
+      "db_reads": 3,
+      "db_writes": 1,
+      "knowledge_gaps_addressed": 4,
+      "study_plan_days": 3,
+      "fst_earned": 30,
+      "agents_involved": ["contextWindowWriter", "agentRouter", "lessonGenerator", "knowledgeMasteryEngine"]
+    }
+  }
+}

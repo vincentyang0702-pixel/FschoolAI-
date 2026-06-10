@@ -1,0 +1,293 @@
+{
+  "session_id": "a1b2c3d4-0007-4e5f-8a9b-fschoolai0007",
+  "agent_states": [
+    {
+      "messages": [
+        {
+          "role": "user",
+          "content": "hey can we do a lesson on the central limit theorem together? none of us really get it",
+          "extra": {
+            "is_original_user_input": true,
+            "sender": "student_alex",
+            "person_id": "uuid-alex",
+            "room_id": "room-stats110-lesson-001",
+            "room_participants": ["uuid-alex", "uuid-priya", "uuid-ben"],
+            "room_mode": "lesson",
+            "websocket_session": true
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-001-read-all-contexts",
+              "type": "function",
+              "function": {
+                "name": "db.batchReadBrainContexts",
+                "arguments": "{\"person_ids\": [\"uuid-alex\", \"uuid-priya\", \"uuid-ben\"], \"include_knowledge\": true, \"concepts\": [\"central_limit_theorem\", \"normal_distribution\", \"sampling_distribution\"]}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 20,
+                "db_queries": [
+                  "SELECT * FROM brain.context_window WHERE person_id IN ('uuid-alex', 'uuid-priya', 'uuid-ben')",
+                  "SELECT person_id, concept, mastery FROM brain.knowledge WHERE person_id IN ('uuid-alex', 'uuid-priya', 'uuid-ben') AND concept IN ('central_limit_theorem', 'normal_distribution', 'sampling_distribution')"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"contexts\": {\"uuid-alex\": {\"name\": \"Alex\", \"learning_style\": [\"visual_learner\", \"examples_before_theory\"], \"knowledge\": {\"central_limit_theorem\": 0.20, \"normal_distribution\": 0.35, \"sampling_distribution\": 0.25}}, \"uuid-priya\": {\"name\": \"Priya\", \"learning_style\": [\"theory_first\", \"formula_oriented\"], \"knowledge\": {\"central_limit_theorem\": 0.45, \"normal_distribution\": 0.70, \"sampling_distribution\": 0.50}}, \"uuid-ben\": {\"name\": \"Ben\", \"learning_style\": [\"step_by_step\", \"needs_repetition\"], \"knowledge\": {\"central_limit_theorem\": 0.15, \"normal_distribution\": 0.28, \"sampling_distribution\": 0.20}}}}",
+          "extra": {
+            "tool_call_id": "tc-001-read-all-contexts",
+            "latency_ms": 20
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-002-plan-lesson",
+              "type": "function",
+              "function": {
+                "name": "studyRoomOrchestrator.planGroupLesson",
+                "arguments": "{\"topic\": \"central_limit_theorem\", \"participants\": {\"uuid-alex\": {\"mastery\": 0.20, \"style\": \"visual\"}, \"uuid-priya\": {\"mastery\": 0.45, \"style\": \"theory_first\"}, \"uuid-ben\": {\"mastery\": 0.15, \"style\": \"step_by_step\"}}, \"room_mode\": \"lesson\"}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 3,
+                "decision": "All three have low mastery — no expert peer. Reggie leads full lesson. Pitch at Ben's level (0.15) but include theory layer for Priya. Use example-first approach for Alex. Check understanding after each section with a quick question directed at different students."
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "{\"lesson_strategy\": \"reggie_leads_full_lesson\", \"pitch_level\": \"beginner_to_intermediate\", \"check_understanding_targets\": {\"after_intro\": \"uuid-ben\", \"after_formula\": \"uuid-priya\", \"after_example\": \"uuid-alex\"}, \"estimated_turns\": 6, \"adapt_on_wrong_answer\": true}",
+          "extra": {
+            "tool_call_id": "tc-002-plan-lesson",
+            "latency_ms": 3
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Perfect — CLT is one of the most important concepts in the course and also one of the trickiest. Let's do this properly together.\n\n**Let's start with the *why* before the formula.**\n\nImagine you want to know the average height of all 50,000 students at UofT. You can't measure everyone — so you take a random sample of 30 students and calculate their average. Then you do it again. And again. 1,000 times.\n\nHere's the magic: even if the actual heights in the population are slightly skewed (more short people, fewer very tall people), the distribution of those **1,000 sample averages** will look like a perfect bell curve — a normal distribution.\n\n**That's the Central Limit Theorem.**\n\n> As your sample size n gets large enough (usually n ≥ 30), the sampling distribution of the sample mean will be approximately normal — regardless of the shape of the original population.\n\nBen — before we go further: in your own words, what do you think a \"sampling distribution\" is? No wrong answers here.",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 980,
+              "prompt_token_details": {
+                "cached_tokens": 500
+              },
+              "completion_tokens": 230,
+              "total_tokens": 1210,
+              "completion_token_details": {}
+            },
+            "model": "claude-3-5-sonnet-20241022",
+            "latency_ms": 820
+          },
+          "reasoning_content": "All three students have low CLT mastery. Ben is lowest (0.15) and needs step-by-step. Alex is visual and wants examples first. Priya is more theory-oriented but still only 0.45. I should lead with a concrete example (for Alex), then state the theorem clearly (for Priya), then check Ben's understanding with a direct but low-stakes question. The UofT heights example is relatable and concrete. I'll ask Ben first because he's the weakest — catching his misconception early helps me calibrate the rest of the lesson.",
+          "extra": {
+            "broadcast_to": ["uuid-alex", "uuid-priya", "uuid-ben"],
+            "lesson_turn": 1,
+            "check_understanding_target": "uuid-ben",
+            "agent_type": "studyRoomOrchestrator"
+          }
+        },
+        {
+          "role": "user",
+          "content": "umm like... is it the distribution of all the samples you take?",
+          "extra": {
+            "is_original_user_input": true,
+            "sender": "student_ben",
+            "person_id": "uuid-ben",
+            "room_id": "room-stats110-lesson-001"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-003-assess-ben-answer",
+              "type": "function",
+              "function": {
+                "name": "claude.complete",
+                "arguments": "{\"model\": \"claude-3-5-sonnet-20241022\", \"system\": \"You are Reggie in a Study Room lesson on the Central Limit Theorem. Ben (mastery 0.15, needs step-by-step) just answered a check-understanding question. Assess his answer, give warm specific feedback, correct any misconception gently, then continue the lesson with the formula. Also invite Priya (mastery 0.45, theory-oriented) to verify the formula. Keep it conversational — this is a group chat, not a lecture.\", \"user\": \"Ben answered: 'umm like... is it the distribution of all the samples you take?' — Correct concept (distribution of samples) but missing the key word: it's the distribution of the MEANS (averages) of those samples, not the raw samples themselves.\", \"max_tokens\": 280}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 780
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "You're really close, Ben — good instinct! The small but important distinction: it's not the distribution of the raw samples, it's the distribution of the **means** (averages) of those samples.\n\nSo in the UofT example: each time you measure 30 students, you calculate their *average* height. The sampling distribution is the distribution of all those averages — not the individual heights.\n\nThink of it this way:\n- Raw sample = [165, 172, 168, 180, ...] (30 individual heights)\n- Sample mean = 171.2cm (one number)\n- Sampling distribution = what you get when you plot 1,000 of those 171.2-type numbers\n\n**Now the formula.** The CLT tells us:\n- The sampling distribution has mean: μ_x̄ = μ (same as population mean)\n- The sampling distribution has standard deviation: σ_x̄ = σ/√n (this is called the **standard error**)\n\nPriya — does that formula match what you've seen in your notes? Anything to add?",
+          "extra": {
+            "tool_call_id": "tc-003-assess-ben-answer",
+            "latency_ms": 780,
+            "usage": {
+              "prompt_tokens": 920,
+              "completion_tokens": 265,
+              "total_tokens": 1185
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "You're really close, Ben — good instinct! The small but important distinction: it's not the distribution of the raw samples, it's the distribution of the **means** (averages) of those samples.\n\nSo in the UofT example: each time you measure 30 students, you calculate their *average* height. The sampling distribution is the distribution of all those averages — not the individual heights.\n\nThink of it this way:\n- Raw sample = [165, 172, 168, 180, ...] (30 individual heights)\n- Sample mean = 171.2cm (one number)\n- Sampling distribution = what you get when you plot 1,000 of those 171.2-type numbers\n\n**Now the formula.** The CLT tells us:\n- The sampling distribution has mean: μ_x̄ = μ (same as population mean)\n- The sampling distribution has standard deviation: σ_x̄ = σ/√n (this is called the **standard error**)\n\nPriya — does that formula match what you've seen in your notes? Anything to add?",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 920,
+              "prompt_token_details": {
+                "cached_tokens": 500
+              },
+              "completion_tokens": 265,
+              "total_tokens": 1185,
+              "completion_token_details": {}
+            },
+            "model": "claude-3-5-sonnet-20241022",
+            "latency_ms": 780
+          },
+          "extra": {
+            "broadcast_to": ["uuid-alex", "uuid-priya", "uuid-ben"],
+            "lesson_turn": 2,
+            "check_understanding_target": "uuid-priya",
+            "ben_misconception_corrected": true,
+            "knowledge_signal_queued": {
+              "uuid-ben": {"concept": "sampling_distribution", "signal": "partial_understanding", "delta": 0.08}
+            }
+          }
+        },
+        {
+          "role": "user",
+          "content": "yeah that's right — one thing I'd add is that the n ≥ 30 rule is a rule of thumb, not a hard law. If the population is already normal, even n = 5 works. The rule of 30 is for when you don't know the population shape.",
+          "extra": {
+            "is_original_user_input": true,
+            "sender": "student_priya",
+            "person_id": "uuid-priya",
+            "room_id": "room-stats110-lesson-001"
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "tc-004-synthesise-and-practice",
+              "type": "function",
+              "function": {
+                "name": "claude.complete",
+                "arguments": "{\"model\": \"claude-3-5-sonnet-20241022\", \"system\": \"You are Reggie in a Study Room lesson. Priya just added an excellent nuance about the n≥30 rule. Acknowledge it, reinforce it for Alex and Ben, then give the group a practice problem to solve together. The problem should be solvable using CLT + standard error formula. Ask Alex to attempt it first (he's visual — give him a concrete scenario). After the problem, summarise the 3 key things to remember for the midterm.\", \"user\": \"Priya added: n≥30 is a rule of thumb, not a hard law. If population is already normal, even n=5 works. The rule of 30 is for unknown population shapes.\", \"max_tokens\": 350}"
+              },
+              "extra": {
+                "is_programmatic": true,
+                "latency_ms": 900
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "content": "Excellent point, Priya — that's exactly the kind of nuance that separates a B from an A on this exam. Write that down, all three of you.\n\n**Practice problem — Alex, want to try this one?**\n\nA coffee machine fills cups with an average of 250ml (μ = 250) and standard deviation of 20ml (σ = 20). You randomly sample 25 cups.\n\n1. What is the mean of the sampling distribution?\n2. What is the standard error?\n3. What is the probability the sample mean is between 246ml and 254ml?\n\nTake your time — work through it step by step. Ben and Priya, hold off for a moment and let Alex try first.\n\n---\n\n**3 things to remember for your midterm:**\n1. CLT says sample means form a normal distribution when n is large enough\n2. Standard error = σ/√n (larger sample → smaller error → more precise estimate)\n3. n ≥ 30 is a rule of thumb for unknown populations — if population is already normal, smaller n works",
+          "extra": {
+            "tool_call_id": "tc-004-synthesise-and-practice",
+            "latency_ms": 900,
+            "usage": {
+              "prompt_tokens": 1050,
+              "completion_tokens": 310,
+              "total_tokens": 1360
+            }
+          }
+        },
+        {
+          "role": "assistant",
+          "content": "Excellent point, Priya — that's exactly the kind of nuance that separates a B from an A on this exam. Write that down, all three of you.\n\n**Practice problem — Alex, want to try this one?**\n\nA coffee machine fills cups with an average of 250ml (μ = 250) and standard deviation of 20ml (σ = 20). You randomly sample 25 cups.\n\n1. What is the mean of the sampling distribution?\n2. What is the standard error?\n3. What is the probability the sample mean is between 246ml and 254ml?\n\nTake your time — work through it step by step. Ben and Priya, hold off for a moment and let Alex try first.\n\n---\n\n**3 things to remember for your midterm:**\n1. CLT says sample means form a normal distribution when n is large enough\n2. Standard error = σ/√n (larger sample → smaller error → more precise estimate)\n3. n ≥ 30 is a rule of thumb for unknown populations — if population is already normal, smaller n works",
+          "tool_calls": [],
+          "response_meta": {
+            "finish_reason": "end_turn",
+            "usage": {
+              "prompt_tokens": 1050,
+              "prompt_token_details": {
+                "cached_tokens": 600
+              },
+              "completion_tokens": 310,
+              "total_tokens": 1360,
+              "completion_token_details": {}
+            },
+            "model": "claude-3-5-sonnet-20241022",
+            "latency_ms": 900
+          },
+          "extra": {
+            "broadcast_to": ["uuid-alex", "uuid-priya", "uuid-ben"],
+            "lesson_turn": 3,
+            "practice_problem_issued": true,
+            "check_understanding_target": "uuid-alex",
+            "fst_signal_queued": {
+              "uuid-priya": {"type": "study_room_help_confirmed", "amount": 25}
+            }
+          }
+        },
+        {
+          "role": "tool",
+          "content": "{\"status\": \"session_end\", \"impressions_written\": 3, \"signals_emitted\": 3, \"lesson_id\": \"lesson-room-stats110-clt-001\", \"knowledge_updates_queued\": [{\"person_id\": \"uuid-alex\", \"concept\": \"central_limit_theorem\", \"delta\": 0.12}, {\"person_id\": \"uuid-priya\", \"concept\": \"central_limit_theorem\", \"delta\": 0.08}, {\"person_id\": \"uuid-ben\", \"concept\": \"central_limit_theorem\", \"delta\": 0.10}, {\"person_id\": \"uuid-ben\", \"concept\": \"sampling_distribution\", \"delta\": 0.08}], \"fst_earned\": {\"uuid-alex\": 30, \"uuid-priya\": 55, \"uuid-ben\": 30}, \"study_room_mvp_signal\": \"uuid-priya\"}",
+          "extra": {
+            "tool_call_id": "tc-005-session-end",
+            "latency_ms": 28,
+            "db_writes": [
+              "INSERT INTO brain.impressions x3",
+              "INSERT INTO brain.signals x3 (study_room_lesson_session)",
+              "INSERT INTO brain.lesson_records (room_id, topic, participants, turns, lesson_id)"
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "message": {
+    "role": "assistant",
+    "content": "Excellent point, Priya — that's exactly the kind of nuance that separates a B from an A on this exam. Write that down, all three of you.\n\n**Practice problem — Alex, want to try this one?**\n\nA coffee machine fills cups with an average of 250ml (μ = 250) and standard deviation of 20ml (σ = 20). You randomly sample 25 cups.\n\n1. What is the mean of the sampling distribution?\n2. What is the standard error?\n3. What is the probability the sample mean is between 246ml and 254ml?\n\nTake your time — work through it step by step. Ben and Priya, hold off for a moment and let Alex try first.\n\n---\n\n**3 things to remember for your midterm:**\n1. CLT says sample means form a normal distribution when n is large enough\n2. Standard error = σ/√n (larger sample → smaller error → more precise estimate)\n3. n ≥ 30 is a rule of thumb for unknown populations — if population is already normal, smaller n works",
+    "response_meta": {
+      "finish_reason": "end_turn",
+      "usage": {
+        "prompt_tokens": 1050,
+        "prompt_token_details": {
+          "cached_tokens": 600
+        },
+        "completion_tokens": 310,
+        "total_tokens": 1360,
+        "completion_token_details": {}
+      },
+      "model": "claude-3-5-sonnet-20241022"
+    },
+    "extra": {
+      "scenario": "07_study_room_lesson",
+      "description": "3 students request a group lesson on CLT in a Study Room. Reggie reads all 3 brain contexts and knowledge gaps (all low mastery, no expert peer). Plans a full lesson: example-first for Alex, formula layer for Priya, step-by-step checks for Ben. 3 Claude calls across 3 lesson turns. Ben's misconception (raw samples vs sample means) is caught and corrected in turn 2. Priya adds an exam-relevant nuance (n≥30 rule of thumb). Practice problem issued at the end. Knowledge mastery deltas queued for all 3 students. Priya earns Study Room MVP signal.",
+      "claude_calls": 3,
+      "claude_calls_per_lesson_turn": 1,
+      "total_cost_usd": 0.0326,
+      "cost_per_student_usd": 0.0109,
+      "cost_breakdown": {
+        "turn1": {"input_tokens": 980, "output_tokens": 230, "cost_usd": 0.00639},
+        "turn2": {"input_tokens": 920, "output_tokens": 265, "cost_usd": 0.00673},
+        "turn3": {"input_tokens": 1050, "output_tokens": 310, "cost_usd": 0.00780}
+      },
+      "db_reads": 2,
+      "db_writes": 7,
+      "lesson_turns": 3,
+      "misconceptions_caught": 1,
+      "knowledge_updates_queued": 4,
+      "fst_earned": {"uuid-alex": 30, "uuid-priya": 55, "uuid-ben": 30},
+      "agents_involved": ["studyRoomOrchestrator", "lessonGenerator", "contextWindowWriter", "knowledgeMasteryEngine", "FSTRewardEngine"]
+    }
+  }
+}
