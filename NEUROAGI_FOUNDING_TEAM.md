@@ -1,6 +1,8 @@
 # NeuroAGI — Founding Team Recruitment
-**Confidential. For prospective founding team members only.**
-**June 2026**
+**Your brain. Your world.**
+
+*Confidential. For prospective founding team members only.*
+*June 2026*
 
 ---
 
@@ -164,4 +166,5 @@ Every human being has a brain that is completely disconnected from their digital
 ---
 
 *NeuroAGI Inc. — Toronto, Canada. June 2026.*
+*Your brain. Your world.*
 *This document is confidential and intended for prospective founding team members only.*
