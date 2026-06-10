@@ -1,8 +1,8 @@
-# FschoolAI — Brand Bible v2.0
+# FschoolAI / NeuroAGI — Brand Bible v2.1
 
 **Internal Document. Not for distribution.**
-**Version:** 2.0 — June 2026
-**Supersedes:** fschoolai-complete-brand-bible v1.0
+**Version:** 2.1 — June 2026 (updated)
+**Supersedes:** FschoolAI Brand Bible v2.0
 
 ---
 
@@ -11,6 +11,8 @@
 The first brand bible was written when FschoolAI was a Canvas automation tool built on an iPhone. It was honest, sharp, and directionally correct. It earned the first 52 users without a single dollar of marketing.
 
 This version is different. Not because the original was wrong, but because the product has grown into something the original could not yet see. FschoolAI is no longer just a tool that goes to school with you. It is the first consumer-facing cognitive operating system — a student second brain that compounds over time, migrates at graduation, and eventually becomes the foundation of NeuroAGI: a lifelong brain OS for every human being.
+
+**v2.1 update:** This version expands the NeuroAGI vision beyond students and sharpens the brain ownership narrative. A creator named Robert Gutierrez described the core thesis in a single sentence: *"Whatever company wins the context game and is able to capture everything you see, hear and feel will become the most powerful company in the world."* He named OpenAI, Anthropic, and Hark as the likely winners. He was right about the thesis. He missed that the winner could be a vertical-first product built for the highest-stakes context that exists: the human brain. NeuroAGI is that product. Students are v1. Everyone is the endgame.
 
 Everything in the original bible that is still true has been kept. Everything that is now too small has been expanded. Nothing has been discarded without reason.
 
@@ -59,6 +61,41 @@ Apple did not build a better MP3 player. It built an ecosystem. The iPod was the
 FschoolAI is following the same logic. The Canvas integration is the entry point. The student second brain is the lock-in. NeuroAGI is the platform. The Web5 data layer is the flywheel.
 
 The difference is that FschoolAI's flywheel is not content or apps. It is cognitive data. Every student who uses FschoolAI for four years generates a brain that no competitor can replicate, no institution can claim, and no algorithm can commoditize. That brain belongs to the student. And when they graduate, it goes with them.
+
+### The Context OS Frame
+
+The AI industry in 2025–2026 is racing to build general-purpose context layers. OpenAI, Google, and Anthropic are all building products that try to capture everything you do and make AI smarter about you. The implicit assumption is that the platform that owns the most context wins.
+
+NeuroAGI's counter-thesis: **the platform that gives users the most sovereignty over their context wins.** Not because data sovereignty is idealistic, but because it is the only architecture that survives the regulatory and trust environment of the next decade. Students and professionals are increasingly aware that their data is being used to train models they do not benefit from.
+
+The first brain OS that genuinely gives users ownership of their cognitive data will earn a level of trust that no centralised competitor can match. That is NeuroAGI.
+
+### NeuroAGI Is Not Just for Students
+
+Students are the entry point. The context OS architecture works for any human who thinks, learns, and creates.
+
+| Vertical | Context captured | Brain value |
+|---|---|---|
+| **Students (v1)** | Classes, assignments, study sessions | Academic mastery, grade prediction, learning gaps |
+| **Professionals (v2)** | Meetings, projects, research, decisions | Professional knowledge graph, career credential |
+| **Researchers (v3)** | Papers, experiments, hypotheses, citations | Scientific knowledge graph, discovery acceleration |
+| **Everyone (v4)** | All context across all life domains | Complete cognitive identity, life intelligence |
+
+The brain that a student builds in FschoolAI does not disappear at graduation. It migrates into the professional context. By age 30, a NeuroAGI user has a brain that contains four years of verified academic engagement plus years of professional knowledge. This is the resume of the 21st century — not a PDF listing where you worked, but a living, verifiable, cryptographically signed record of what you actually know and how you actually think.
+
+### How the Brain Belongs to You
+
+Every other context platform owns your data. OpenAI owns your conversation history. Google owns your search. Canvas owns your grades. When you stop paying, the data disappears or becomes inaccessible.
+
+NeuroAGI's ownership architecture has three layers:
+
+**Decentralized Identity (DID):** Each user's brain is tied to a cryptographic identifier they hold, not to a NeuroAGI account. Even if NeuroAGI shuts down, the identity persists. DIDs are a W3C standard — production-ready today.
+
+**Personal Brain Data Store (PBDS):** The knowledge graph, signals, and memory are stored in a format the user can export, move, or migrate. In v1 this is a Supabase database scoped to the user's DID. In v3 it migrates to a user-controlled decentralized data store.
+
+**Verifiable Brain Credentials (VBC):** Mastery of a subject, learning history, and cognitive profile become cryptographically signed credentials. A university, employer, or AI system can verify what you know without asking a company for permission.
+
+The honest caveat: the full decentralized architecture is 2–3 years away. v1 uses Supabase with a DID layer on top. But the architecture is designed from day one so that when the infrastructure matures, the data migrates without rebuilding the product. The positioning is correct even if the full technical reality is not yet here.
 
 ---
 
@@ -484,20 +521,24 @@ When in doubt, look at these and ask if your content feels like it belongs next 
 
 The following table summarizes the key changes between the original brand bible and this version.
 
-| Section | v1.0 Status | v2.0 Update |
-|---|---|---|
-| Core positioning | "AI that goes to school with you" | Expanded to "student second brain that compounds, migrates, and becomes NeuroAGI" |
-| Founding story | Strong, preserved | Expanded with the outside-the-box / Elon / Apple strategic framing |
-| Product description | Canvas automation + assignment help | Full agent system, nightly reflection, proactive intervention, Study Room, Lesson Generator |
-| Subscription tiers | Not defined | Free / Pro $12 / Max $20 with full feature matrix |
-| Token economy | Not present | FST earn table, exchange catalog, leaderboard categories, partner program |
-| NeuroAGI | Not present | Full graduation migration story, hardware roadmap, lifelong brain OS thesis |
-| Web5 | Not present | DID, PBDS, VBC, phase timeline, cognitive sovereignty framing |
-| Web3 partnerships | Not present | Tripartite model, partner categories, on-chain settlement layer |
-| Content universe | 6 universes defined | All 6 preserved, Second Brain Universe added as 7th, film ideas expanded |
-| War positioning | Strong, preserved | Updated with ChatGPT comparison and compounding moat framing |
-| Brand aesthetic | Fully defined | Preserved entirely, brain sound added, second brain visual language added |
-| TV series structure | 4 seasons | Expanded to 5 seasons with Brain and Graduation seasons added |
+| Section | v1.0 Status | v2.0 Update | v2.1 Update |
+|---|---|---|---|
+| Core positioning | "AI that goes to school with you" | Expanded to "student second brain that compounds, migrates, and becomes NeuroAGI" | Expanded to "personal context OS for human intelligence — students are v1, everyone is the endgame" |
+| Founding story | Strong, preserved | Expanded with outside-the-box / Elon / Apple framing | Preserved |
+| Product description | Canvas automation + assignment help | Full agent system, nightly reflection, proactive intervention | Preserved |
+| Subscription tiers | Not defined | Free / Pro $12 / Max $20 | Preserved |
+| Token economy | Not present | FST earn table, exchange catalog, leaderboard | Preserved |
+| NeuroAGI | Not present | Graduation migration story, hardware roadmap | Expanded: beyond students, context OS frame, v1/v2/v3 expansion path |
+| Web5 | Not present | DID, PBDS, VBC, phase timeline | Updated with technology reality check, honest DWN timeline, v1 DB changes needed |
+| Web3 partnerships | Not present | Tripartite model, partner categories | Preserved |
+| Content universe | 6 universes defined | 7th universe added | Preserved |
+| War positioning | Strong, preserved | Updated with ChatGPT comparison | Preserved |
+| Brand aesthetic | Fully defined | Brain sound added | Neural Card visual language flagged as missing |
+| TV series structure | 4 seasons | 5 seasons | Preserved |
+| Context OS frame | Not present | Not present | Added — Robert Gutierrez thesis, NeuroAGI as the answer |
+| Brain ownership narrative | Not present | Partial (Web5 section) | Expanded with DID/PBDS/VBC plain-language explanation |
+| NeuroAGI beyond students | Not present | Not present | Added — v1/v2/v3/v4 vertical expansion table |
+| Hiring content strategy | Not present | Not present | Flagged as missing — Roy Lee style, 6 roles defined |
 
 ---
 
@@ -513,12 +554,16 @@ The **international expansion content strategy** needs localization beyond the i
 
 The **B2B institutional story** is entirely absent from this bible. At some point FschoolAI will need to speak to universities, not just students. That brand voice is different from the student voice and should be developed separately.
 
-The **NeuroAGI brand bible** does not yet exist. NeuroAGI is a different product with a different audience (post-graduation professionals) and will need its own visual language, narrative system, and content strategy that connects to but is distinct from FschoolAI.
+The **NeuroAGI brand bible** does not yet exist. NeuroAGI is a different product with a different audience (post-graduation professionals and eventually all humans) and will need its own visual language, narrative system, and content strategy that connects to but is distinct from FschoolAI. The NeuroAGI brand should feel like what Apple would build if Apple built a brain OS — quiet, confident, sovereign. The FschoolAI brand is about the grind and the survival. The NeuroAGI brand is about the ownership and the permanence.
+
+The **Neural Card visual language** has not been defined. The MagSafe attachment mechanism, the thin screen, the physical form factor — these need their own aesthetic treatment that communicates both technical precision and cognitive intimacy. The Neural Card is not a gadget. It is the physical layer of the brain. It should be filmed and photographed accordingly.
+
+The **hiring and team content strategy** is missing. As NeuroAGI moves toward a founding team, the content should reflect the caliber of people being recruited: neuroscientists, embedded engineers, agent builders, industrial designers. The hiring posts should read like Roy Lee's posts — raw, first-person, direct. No corporate language. No LinkedIn boilerplate.
 
 ---
 
 *This document is a living artifact. It should be updated every time the product changes, a new feature ships, or the narrative evolves.*
 
 *Owner: Founder*
-*Last updated: June 2026*
+*Last updated: June 2026 (v2.1)*
 *Next review: September 2026*

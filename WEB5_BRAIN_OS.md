@@ -1,5 +1,20 @@
-# NeuroAGI as Web5 — The Personal Brain OS Thesis
-**Strategic Vision Document | v1.0 | Confidential**
+# NeuroAGI — Web5 Brain OS Thesis
+## The Personal Context OS for Human Intelligence
+**Strategic Vision Document | v2.0 | Confidential**
+
+---
+
+## Why Now: The Context Game
+
+In 2025, a creator named Robert Gutierrez posted a reel that reached 1.7K likes with a single question:
+
+> *"Whatever company wins the context game and is able to capture everything you see, hear and feel will become the most powerful company in the world. Who do you think it will be?"*
+
+He named OpenAI, Anthropic, and Hark as the likely winners. He was right about the thesis. He missed one thing: the company that wins does not have to be a general-purpose AI lab. It can be a vertical-first product that builds the context layer for the highest-stakes use case that exists — the human brain during its formative years.
+
+That is NeuroAGI.
+
+**NeuroAGI is not an EdTech product.** It is the personal context OS for human intelligence. Students are v1 because they have the most structured context, the most measurable outcomes, and the most to gain from a brain that compounds. But the architecture is not student-specific. It is human-specific. Students are the entry point, not the ceiling.
 
 ---
 
@@ -179,17 +194,122 @@ The competitive positioning is clear: NeuroAGI is not competing with ChatGPT on 
 
 ---
 
-## Part 6 — The Web5 Roadmap
+## Part 6 — Technology Reality Check: What Is Live Today
+
+This section is honest about what is production-ready, what is beta, and what is still early.
+
+### Web3 — Live Infrastructure
+
+| Technology | Status | NeuroAGI Use Case |
+|---|---|---|
+| **Ethereum / Solana** | ✅ Production | FST token issuance, smart contracts |
+| **IPFS / Filecoin** | ✅ Production | Brain snapshot storage, export archives |
+| **ENS (Ethereum Name Service)** | ✅ Production | yourname.eth as portable identity |
+| **Ceramic Network** | ⚠️ Beta | Decentralized user profiles, composable data streams |
+| **ERC-20 / SPL tokens** | ✅ Production | FST token (earn, stake, redeem) |
+
+### Web4 — Not a Real Standard
+
+Web4 is a marketing term with no technical consensus definition. NeuroAGI does not use this framing.
+
+### Web5 — Real Technology, Early Stage
+
+| Technology | Status | NeuroAGI Use Case |
+|---|---|---|
+| **DIDs — W3C Standard** | ✅ Production | Brain identity — `did:key`, `did:web`, `did:ion` work today |
+| **Verifiable Credentials — W3C Standard** | ✅ Production | Mastery certificates, learning proofs, cognitive credentials |
+| **ION (Microsoft, Bitcoin-anchored)** | ✅ Production | Enterprise DID anchoring |
+| **DWN (Decentralized Web Nodes, TBD)** | ❌ Beta/Early | Full personal brain data store — too early for v1 |
+| **Zero-Knowledge Proofs** | ⚠️ Maturing | Privacy-preserving credential verification |
+
+**Key insight:** DIDs and Verifiable Credentials are W3C standards that are production-ready right now. You can assign every user a DID at signup today, issue VCs for learning milestones today, and build full data portability incrementally as the infrastructure matures.
+
+---
+
+## Part 7 — The Three-Phase Architecture
+
+### Phase 1 — v1: DID-First, Supabase-Backed (Now → 12 months)
+
+Brain data lives in Supabase, scoped to the user's DID. The DID is the primary key — not an email address. This is the critical architectural decision that makes everything else possible later.
+
+**What is built:**
+- Every user gets a `did:key` assigned at signup (free, instant, no blockchain required)
+- All brain data in Supabase is keyed to the DID, not the user's email
+- Verifiable Credentials issued for mastery milestones
+- Brain export function: user can download their full knowledge graph as a signed JSON package
+- FST token on Solana: earn tokens for learning, redeem for features
+
+### Phase 2 — v2: Credential Economy + Neural Card (12–24 months)
+
+**What is built:**
+- Verifiable Brain Credentials (VBC) standard launched — mastery in a subject becomes a signed, verifiable credential
+- First employer and university integrations
+- Neural Card ships — physical sensor layer that captures lecture audio, ambient context, biometric signals
+- Ceramic Network integration for composable user profiles
+
+**Why the Neural Card matters:** Robert's reel predicted a wearable pin from OpenAI. The Neural Card is smarter — it attaches to the iPhone via MagSafe. No new device to carry. Piggybacks on the device 1.5 billion people already own. The distribution strategy is the product design.
+
+### Phase 3 — v3: Sovereign Brain (24–48 months)
+
+**What is built:**
+- Brain data migrates from Supabase to user-controlled decentralized storage (DWN or equivalent, when production-ready)
+- NeuroAGI becomes a reader of the brain, not the owner
+- Brain Credential Protocol open-sourced — any app can build on the standard
+- Local model on Neural Card processes raw signals on-device (no cloud required for core intelligence)
+- ZK proofs enable privacy-preserving verification
+
+---
+
+## Part 8 — NeuroAGI Beyond Students
+
+Students are the entry point, not the ceiling. The context OS architecture works for any human who thinks, learns, and creates.
+
+| Vertical | Context captured | Brain value |
+|---|---|---|
+| **Students (v1)** | Classes, assignments, study sessions | Academic mastery, grade prediction, learning gaps |
+| **Professionals (v2)** | Meetings, projects, research, decisions | Professional knowledge graph, career credential |
+| **Researchers (v3)** | Papers, experiments, hypotheses, citations | Scientific knowledge graph, discovery acceleration |
+| **Everyone (v4)** | All context across all life domains | Complete cognitive identity, life intelligence |
+
+The brain that a student builds in FschoolAI does not disappear at graduation. It migrates into the professional context. By age 30, a NeuroAGI user has a brain that contains four years of verified academic engagement plus years of professional knowledge — the most comprehensive cognitive credential in existence.
+
+---
+
+## Part 9 — What the Database and Architecture Need (v1 Changes)
+
+The current architecture is mostly correct. The stateful brain / stateless agents split, the FschoolAI domain data separation, and the Apple ID analogy confirmed by 李小雷 — all of these are right and do not need to change.
+
+Two specific additions are needed for DID support:
+
+**Database additions (additive only — nothing deleted):**
+
+| Table / Column | What it stores | Priority |
+|---|---|---|
+| `users.did` column | User's `did:key` identifier, generated at signup | v1 — required |
+| `brain_credentials` table | Issued Verifiable Credentials (W3C VC JSON-LD format) | v1 — required |
+| `brain_export_log` table | Tracks when and what the user has exported | v1 — recommended |
+
+**Architecture additions:**
+
+1. **DID generation at signup** — when a user creates an account, generate a `did:key` and store it alongside their Supabase UUID. This is a one-line addition to the signup flow.
+2. **VC issuance service** — a lightweight service that signs learning milestones as W3C Verifiable Credentials using the user's DID. Can be a simple serverless function.
+3. **Brain export endpoint** — an API route that packages the user's knowledge graph as a signed, portable JSON-LD document.
+
+These are additive. The existing schema, the existing agent architecture, and the existing FschoolAI/NeuroAGI separation all remain unchanged.
+
+---
+
+## Part 10 — The Web5 Roadmap (Updated)
 
 | Phase | Timeline | Web5 Milestone |
 |---|---|---|
 | Phase 0 | Now | Off-chain brain data in NeuroAGI Supabase (current state) |
-| Phase 1 | 2025 Q4 | DBI standard defined; Brain Wallet launched (off-chain, custodial) |
-| Phase 2 | 2026 Q1 | PBDS migrated to user-controlled DWN; permission grant system live |
-| Phase 3 | 2026 Q2 | VBC standard launched; first employer integrations |
-| Phase 4 | 2026 Q3 | NeuroAGI hardware ships; local model processes raw signals on-device |
-| Phase 5 | 2027 | DBI standard open-sourced; third-party apps can build on Brain Credential Protocol |
-| Phase 6 | 2028+ | Brain Credential Protocol becomes industry standard for cognitive identity |
+| Phase 1 | 2026 Q3 | DID assigned at signup; brain_credentials table live; VC issuance for milestones |
+| Phase 2 | 2026 Q4 | Brain export endpoint; FST token on Solana; Neural Card pre-orders open |
+| Phase 3 | 2027 Q1 | VBC standard launched; first employer integrations; Neural Card ships |
+| Phase 4 | 2027 Q3 | Ceramic/DWN integration; brain data migrates to user-controlled storage |
+| Phase 5 | 2028 | Brain Credential Protocol open-sourced; third-party apps build on standard |
+| Phase 6 | 2029+ | Brain Credential Protocol becomes industry standard for cognitive identity |
 
 ---
 
@@ -203,5 +323,5 @@ The students who build their brain on NeuroAGI today are not just customers — 
 
 ---
 
-*Document version: 2025-06-09 v1.0 | Author: Vincent Yang / NeuroAGI*
+*Document version: 2026-06-10 v2.0 | Author: Vincent Yang / NeuroAGI*
 *Confidential — for strategic partner and investor discussions only*
