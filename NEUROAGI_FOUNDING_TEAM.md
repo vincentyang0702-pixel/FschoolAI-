@@ -130,13 +130,13 @@ What started as a student second brain became the proof that the personal world 
 
 **Aurora Chen — COO.** Hardware supply chain and chip manufacturing specialist with deep roots in China's semiconductor ecosystem. Sequoia Capital network with active relationships across top-tier VC firms. Close strategic ties to Alibaba's leadership. Aurora owns NeuroAGI's hardware manufacturing path — from Neural Card prototype to mass production — and the Chinese AI hardware partnership strategy. Her relationships are the fastest path to the ambient intelligence ecosystem.
 
+**Johan Naresh — CTO, FschoolAI.** University of Waterloo. Johan is the technical architect of FschoolAI — the system that proved the personal brain model works in production. Building the first serious AI infrastructure of his career at one of the world's most technically rigorous universities. The architecture he has designed and shipped is the foundation every new hire will build on.
+
 **Pony Xia — Senior Engineer.** Tencent platform ecosystem experience. Deep knowledge of super-app architecture, identity systems, and the Chinese tech ecosystem. Brings the engineering foundation for the open agent platform and the hardware partner integration layer.
 
 **Xiaolie Xi — Senior Engineer.** ByteDance personalization systems experience. ByteDance built the most sophisticated real-time behavioral modeling system in production today. Xiaolie brings that depth to the personal world model — signal processing, behavioral pattern extraction, and personalization at scale.
 
 **Aryan Desai — Agent Systems Engineer.** Toronto Metropolitan University. Aryan is the engineer who built FschoolAI's multi-agent network — the orchestration layer that coordinates study agents, tutor agents, and signal processors in production. His work is not theoretical. He has shipped agents that real students depend on. He understands the gap between an LLM wrapper and a real agent system, and he has closed it.
-
-**Johan Naresh — CTO, FschoolAI.** University of Waterloo. Johan is the technical architect of FschoolAI — the system that proved the personal brain model works in production. Building the first serious AI infrastructure of his career at one of the world's most technically rigorous universities. The architecture he has designed and shipped is the foundation every new hire will build on.
 
 ### The Roles We Are Hiring
 
