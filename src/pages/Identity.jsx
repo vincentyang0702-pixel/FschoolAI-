@@ -1,17 +1,17 @@
 // Identity.jsx — Student profile with live Supabase data, GradeGraph, and ShareCard.
 
 import { useState, useCallback, useEffect } from "react";
+import { useApp }                    from "../context/AppContext";
+import GradeGraph, { COURSE_COLORS } from "../components/GradeGraph";
+import ShareCard                     from "../components/ShareCard";
+import FriendsSection                from "../components/FriendsSection";
 
 // Deterministic fallback grade (72–97) derived from the course code string.
-// Same course always produces the same number so it doesn't flicker on re-render.
 function fallbackGrade(seed) {
   let h = 0;
   for (let i = 0; i < seed.length; i++) { h = Math.imul(31, h) + seed.charCodeAt(i) | 0; }
   return 72 + (Math.abs(h) % 26);
 }
-import { useApp }                   from "../context/AppContext";
-import GradeGraph, { COURSE_COLORS } from "../components/GradeGraph";
-import ShareCard                     from "../components/ShareCard";
 
 // Update this when the server invite URL changes — no redeploy needed if set via env.
 const DISCORD_INVITE_URL = "https://discord.gg/SpFXzPZxBX";
@@ -390,8 +390,12 @@ export default function Identity() {
         </div>
       )}
 
+      {/* Friends */}
+      {userId && <FriendsSection userId={userId} />}
+
       {/* Share card */}
       <ShareCard />
     </div>
   );
 }
+
