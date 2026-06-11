@@ -4,11 +4,10 @@
 const SUPABASE_URL  = "https://wqgxpouhbwhwpzudrptp.supabase.co";
 const SUPABASE_ANON = "sb_publishable_e-3KMudaL-iXf5GGsuiQaA_VW21ZZFA";
 
-// Write to the isolated `neuroagi` schema — the SAME schema the app reads from
-// (src/supabase.js + every api/* route set schema = 'neuroagi'). Both sides MUST
-// match or synced data (and login, which reads the users table) is invisible to
-// the app. NOT public.* — that's Vincent's.
-const SB_PROFILE = { "Accept-Profile": "neuroagi", "Content-Profile": "neuroagi" };
+// Use the public schema — where all app data (users, courses, assignments) lives.
+// The app's Supabase client (src/api/supabase.js) targets public; the popup must match
+// or login queries hit the wrong schema and return empty rows.
+const SB_PROFILE = { "Accept-Profile": "public", "Content-Profile": "public" };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function sha256(text) {
