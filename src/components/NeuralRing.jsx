@@ -1962,6 +1962,7 @@ export default function NeuralRing() {
               setSpeaking(true); speakingRef.current = true;
               sphereStateRef.current = "speaking";
               const tone = TONE_PRESETS[toneRef.current] ?? TONE_PRESETS.neutral;
+              console.log("[voice] speaking chunk | voiceId:", voiceIdRef.current ?? "(default)");
               try {
                 const { play } = await fetchAndDecodeAudio(clean, voiceIdRef.current, speedRef.current, tone);
                 await play(src => { audioSourceRef.current = src; });
@@ -2674,6 +2675,7 @@ export default function NeuralRing() {
                           key={v.voice_id}
                           onClick={() => {
                             voiceIdRef.current = v.voice_id;
+                            setActiveVoiceId(v.voice_id);  // instant chip highlight (was missing)
                             updateUserField("preferred_voice_id", v.voice_id).catch(() => {});
                           }}
                           style={{

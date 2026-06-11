@@ -143,6 +143,7 @@ export default function Leaderboard() {
           .order("points", { ascending: false })
           .limit(50);
 
+        console.log("[lb] leaderboard rows fetched:", lbData?.length ?? 0);
         if (!lbData?.length) { setLbLoading(false); return; }
 
         // 2. Profile data for those IDs (two-query pattern avoids FK join issues)
@@ -152,6 +153,7 @@ export default function Leaderboard() {
           .select("id, name, school, city, country, continent, leaderboard_opt_in, gpa, streak, study_time")
           .in("id", ids);
 
+        console.log("[lb] users profiles fetched:", usersData?.length ?? 0);
         const uMap = {};
         (usersData ?? []).forEach(u => { uMap[u.id] = u; });
 

@@ -25,8 +25,11 @@ export default async function handler(req, res) {
   if (!cleanMessages.length)
     return res.status(400).json({ error: "No valid messages after sanitization" });
 
+  // Model is configurable via ANTHROPIC_MODEL env var so it can be corrected without a redeploy.
+  // Default is claude-sonnet-4-6; override if the key doesn't have access to that model.
+  const model = (process.env.ANTHROPIC_MODEL || "claude-sonnet-4-6").trim();
   const body = {
-    model:      "claude-sonnet-4-6",   // primary tutor model — Sonnet follows prompts correctly
+    model,
     max_tokens: Math.min(Number(max_tokens) || 400, 4096),
     messages:   cleanMessages,
   };
