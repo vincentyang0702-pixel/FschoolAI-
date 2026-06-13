@@ -63,12 +63,31 @@ async function login(email, password) {
 
 async function signup(name, email, password) {
   const hash = await sha256(password);
-  const id   = randomUUID();
+  const normalizedEmail = email.toLowerCase();
+
+  // H1 fix: check if this email already exists (user may have signed up via web app).
+  // If so, verify the password and return the existing account instead of creating a
+  // duplicate with a new UUID — this prevents split data across two user IDs.
+  const existing = await sbFetch(
+    `users?email=eq.${encodeURIComponent(normalizedEmail)}&select=id,name,email`,
+    { method: "GET" }
+  );
+  if (existing?.length) {
+    const match = await sbFetch(
+      `users?email=eq.${encodeURIComponent(normalizedEmail)}&password_hash=eq.${hash}&select=id,name,email`,
+      { method: "GET" }
+    );
+    if (match?.length) return match[0]; // same credentials — return existing account
+    throw new Error("Email already registered. Please log in instead.");
+  }
+
+  // New user — generate UUID and create the account
+  const id = randomUUID();
   const rows = await sbFetch("users", {
     method: "POST",
-    body: JSON.stringify({ id, name, email: email.toLowerCase(), password_hash: hash }),
+    body: JSON.stringify({ id, name, email: normalizedEmail, password_hash: hash }),
   });
-  return rows?.[0] ?? { id, name, email };
+  return rows?.[0] ?? { id, name, email: normalizedEmail };
 }
 
 async function saveSession(user) { await chrome.storage.local.set({ neuroagi_user: user }); }
