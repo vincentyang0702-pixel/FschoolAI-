@@ -256,7 +256,11 @@ Respond with valid JSON only, no markdown:
         "anthropic-version": "2023-06-01",
       },
       body: JSON.stringify({
-        model:      "claude-haiku-4-5",
+        // Use ANTHROPIC_MODEL env var (same pattern as api/claude.js) so both
+        // routes stay in sync. Fall back to dated Haiku — cheap, fast, good
+        // enough for summary/concept extraction. "claude-haiku-4-5" (undated)
+        // is not a confirmed valid API string; dated form is required.
+        model:      (process.env.ANTHROPIC_MODEL || "claude-haiku-4-5-20251001").trim(),
         max_tokens: 500,
         messages:   [{ role: "user", content: prompt }],
       }),

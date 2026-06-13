@@ -525,7 +525,7 @@ ${tables ? `Tables found:\n${tables}` : ""}`;
     const firstCourse = parsed.courses?.[0];
     const courseId    = firstCourse?.code || firstCourse?.name || 'unknown';
 
-    fetch('https://fschool-ai.vercel.app/api/extension-content', {
+    fetch('https://fschoolai.com/api/extension-content', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
