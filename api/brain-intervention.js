@@ -23,7 +23,7 @@
  *   CRON_SECRET               — Optional bearer token for manual triggers
  *
  * Add to vercel.json crons:
- *   { "path": "/api/brain-intervention", "schedule": "*/30 * * * *" }
+ *   { "path": "/api/brain-intervention", "schedule": "every 30 min" }
  */
 
 const BRAIN_URL  = process.env.BRAIN_SUPABASE_URL;

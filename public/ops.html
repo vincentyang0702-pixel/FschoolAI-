@@ -244,16 +244,35 @@ const { useState, useEffect, useCallback, useRef } = React;
 // ── Config ──────────────────────────────────────────────────────────────────
 const OPS_PASSWORD = "neuroagi2026";
 
-// These are read from the URL hash config or defaults
-// Format: #BRAIN_URL=https://...&BRAIN_KEY=...&FSCHOOL_URL=...&FSCHOOL_KEY=...
+// Config is persisted in localStorage so credentials survive refreshes.
+// Override via URL hash: #BRAIN_URL=...&BRAIN_KEY=...&FSCHOOL_URL=...&FSCHOOL_KEY=...
+const LS_KEY = "neuroagi_ops_config";
 function getConfig() {
   const params = new URLSearchParams(window.location.hash.slice(1));
-  return {
-    brainUrl:    params.get("BRAIN_URL")    || "",
-    brainKey:    params.get("BRAIN_KEY")    || "",
-    fschoolUrl:  params.get("FSCHOOL_URL")  || "",
-    fschoolKey:  params.get("FSCHOOL_KEY")  || "",
-  };
+  // If URL hash has values, use them and save to localStorage
+  if (params.get("BRAIN_URL") || params.get("BRAIN_KEY")) {
+    const cfg = {
+      brainUrl:   params.get("BRAIN_URL")   || "",
+      brainKey:   params.get("BRAIN_KEY")   || "",
+      fschoolUrl: params.get("FSCHOOL_URL") || "",
+      fschoolKey: params.get("FSCHOOL_KEY") || "",
+    };
+    localStorage.setItem(LS_KEY, JSON.stringify(cfg));
+    return cfg;
+  }
+  // Otherwise load from localStorage
+  try {
+    const saved = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+    return {
+      brainUrl:   saved.brainUrl   || "",
+      brainKey:   saved.brainKey   || "",
+      fschoolUrl: saved.fschoolUrl || "",
+      fschoolKey: saved.fschoolKey || "",
+    };
+  } catch { return { brainUrl: "", brainKey: "", fschoolUrl: "", fschoolKey: "" }; }
+}
+function saveConfig(cfg) {
+  localStorage.setItem(LS_KEY, JSON.stringify(cfg));
 }
 
 // ── Supabase helpers ─────────────────────────────────────────────────────────
@@ -422,8 +441,10 @@ function PasswordGate({ onAuth }) {
 
 // ── Config Panel ──────────────────────────────────────────────────────────────
 function ConfigPanel({ config, onSave }) {
+  // Also wire saveConfig so changes persist across refreshes
   const [form, setForm] = useState(config);
   const save = () => {
+    saveConfig(form);
     const hash = `BRAIN_URL=${encodeURIComponent(form.brainUrl)}&BRAIN_KEY=${encodeURIComponent(form.brainKey)}&FSCHOOL_URL=${encodeURIComponent(form.fschoolUrl)}&FSCHOOL_KEY=${encodeURIComponent(form.fschoolKey)}`;
     window.location.hash = hash;
     onSave(form);
