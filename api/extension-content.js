@@ -29,6 +29,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
+import { resolveAndEnrichCourse, normalizeCourseCode } from "./course-resolver.js";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -121,8 +122,22 @@ export default async function handler(req, res) {
   // ── Derive university ID ────────────────────────────────────────────────────
   const universityId = rawUniversityId || deriveUniversityId(sourceUrl) || "unknown";
 
+  // ── Resolve canonical course ID (H4 fix) ────────────────────────────────────
+  // Ensures all 3 ingestion paths (Canvas API, extension, manual) resolve to the
+  // same courses.id row regardless of whether they use numeric or text course IDs.
+  const canonicalCourseId = await resolveAndEnrichCourse({
+    userId,
+    canvasCourseId: canvasCourseId || null,
+    courseCode: courseId,  // courseId from extension is the text code
+    courseName: null,
+    professor: professorName || null,
+  }).catch(() => null);
+
+  // Normalize courseId to base code for consistent hashing
+  const normalizedCourseKey = normalizeCourseCode(courseId) || courseId;
+
   // ── Build content hash ──────────────────────────────────────────────────────
-  const contentHash = buildContentHash(universityId, courseId, contentType, text);
+  const contentHash = buildContentHash(universityId, normalizedCourseKey, contentType, text);
 
   // ── Dedup check: does this content already exist? ───────────────────────────
   const { data: existing, error: fetchErr } = await supabase
@@ -159,7 +174,7 @@ export default async function handler(req, res) {
     .from("course_content")
     .insert({
       university_id:    universityId,
-      course_id:        courseId,
+      course_id:        normalizedCourseKey,
       canvas_course_id: canvasCourseId || null,
       content_type:     contentType,
       content_hash:     contentHash,
