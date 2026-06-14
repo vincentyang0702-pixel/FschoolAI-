@@ -224,5 +224,5 @@ const itunesProxyPlugin = {
 
 export default defineConfig({
   plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin],
-  server:  { port: 5173 },
+  server:  { port: 5173, host: "0.0.0.0", allowedHosts: true },
 });

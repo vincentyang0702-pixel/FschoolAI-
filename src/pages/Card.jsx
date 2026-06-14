@@ -3,16 +3,16 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 /* ─── Assets ─────────────────────────────────────────────────────────────── */
-const HERO_IMG   = "/manus-storage/card-hero-original_08d1fb2f.jpg";
-const TITANIUM_IMG = "/manus-storage/card-titanium-single_b0553c3e.png";
+const HERO_IMG   = "/card-group.jpg";
+const TITANIUM_IMG = "/card-titanium.jpg";
 
 /* ─── Colorway data ──────────────────────────────────────────────────────── */
 const COLORWAYS = [
-  { id: "white",  name: "Base White",   hex: "#F5F5F0", border: "#D8D8D3", accent: "#1a1a1a", tagline: "Clean. Timeless. Iconic." },
-  { id: "purple", name: "Royal Purple", hex: "#C8B4F0", border: "#9B7FD4", accent: "#6B3FA0", tagline: "Bold. Regal. Unforgettable." },
-  { id: "pink",   name: "Royal Pink",   hex: "#F0B8CC", border: "#E07898", accent: "#C04870", tagline: "Vivid. Confident. Distinct." },
-  { id: "blue",   name: "Royal Blue",   hex: "#B4D0F0", border: "#78A8E0", accent: "#2860B0", tagline: "Sharp. Focused. Brilliant." },
-  { id: "green",  name: "Royal Green",  hex: "#D8ECA0", border: "#A8C870", accent: "#5A8020", tagline: "Fresh. Grounded. Alive." },
+  { id: "white",  name: "Base White",   hex: "#F5F5F0", border: "#D8D8D3", accent: "#1a1a1a", tagline: "Clean. Timeless. Iconic.",      img: "/card-white.jpg" },
+  { id: "purple", name: "Royal Purple", hex: "#C8B4F0", border: "#9B7FD4", accent: "#6B3FA0", tagline: "Bold. Regal. Unforgettable.",   img: "/card-purple.jpg" },
+  { id: "pink",   name: "Royal Pink",   hex: "#F0B8CC", border: "#E07898", accent: "#C04870", tagline: "Vivid. Confident. Distinct.",  img: "/card-pink.jpg" },
+  { id: "blue",   name: "Royal Blue",   hex: "#B4D0F0", border: "#78A8E0", accent: "#2860B0", tagline: "Sharp. Focused. Brilliant.",   img: "/card-blue.jpg" },
+  { id: "green",  name: "Royal Green",  hex: "#D8ECA0", border: "#A8C870", accent: "#5A8020", tagline: "Fresh. Grounded. Alive.",       img: "/card-green.jpg" },
 ];
 
 /* ─── Cinematic feature sections ─────────────────────────────────────────── */
@@ -143,40 +143,25 @@ function CardVisual({ colorway, engraving, isFounder, size = 220 }) {
   return (
     <div style={{
       width: size, height: h, borderRadius: size * 0.09,
-      background: c.hex,
-      boxShadow: `0 ${size*0.18}px ${size*0.36}px rgba(0,0,0,0.7), 0 0 ${size*0.18}px ${c.hex}40`,
-      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "space-between",
-      padding: `${size*0.13}px ${size*0.11}px`,
-      position: "relative", overflow: "hidden", flexShrink: 0,
-      transition: "background 0.5s ease, box-shadow 0.5s ease",
+      overflow: "hidden", flexShrink: 0, position: "relative",
+      boxShadow: `0 ${size*0.18}px ${size*0.36}px rgba(0,0,0,0.8), 0 0 ${size*0.18}px ${c.hex}30`,
+      transition: "box-shadow 0.5s ease",
     }}>
-      {/* Logo top-left */}
-      <div style={{ width: "100%", display: "flex", alignItems: "center", gap: size*0.03 }}>
-        <span style={{ fontSize: size*0.18, fontWeight: 800, color: c.accent, letterSpacing: "-0.05em", lineHeight: 1 }}>F</span>
-        <svg width={size*0.14} height={size*0.14} viewBox="0 0 40 40" fill="none">
-          <circle cx="20" cy="20" r="8" fill={c.accent} opacity="0.15"/>
-          <circle cx="20" cy="20" r="3" fill={c.accent} opacity="0.8"/>
-          <line x1="20" y1="5" x2="20" y2="13" stroke={c.accent} strokeWidth="2" opacity="0.6"/>
-          <line x1="20" y1="27" x2="20" y2="35" stroke={c.accent} strokeWidth="2" opacity="0.6"/>
-          <line x1="5" y1="20" x2="13" y2="20" stroke={c.accent} strokeWidth="2" opacity="0.6"/>
-          <line x1="27" y1="20" x2="35" y2="20" stroke={c.accent} strokeWidth="2" opacity="0.6"/>
-          <line x1="9" y1="9" x2="15" y2="15" stroke={c.accent} strokeWidth="1.5" opacity="0.4"/>
-          <line x1="25" y1="25" x2="31" y2="31" stroke={c.accent} strokeWidth="1.5" opacity="0.4"/>
-          <line x1="31" y1="9" x2="25" y2="15" stroke={c.accent} strokeWidth="1.5" opacity="0.4"/>
-          <line x1="9" y1="31" x2="15" y2="25" stroke={c.accent} strokeWidth="1.5" opacity="0.4"/>
-        </svg>
-      </div>
-      {/* Engraving */}
+      <img
+        src={c.img}
+        alt={c.name}
+        style={{ width: "100%", height: "100%", objectFit: "cover", objectPosition: "center top", display: "block", transition: "opacity 0.4s ease" }}
+      />
       {engraving && (
-        <div style={{ fontSize: size*0.055, color: c.accent, opacity: 0.65, letterSpacing: "0.04em", fontFamily: "'SF Pro Display', -apple-system, sans-serif", textAlign: "center", maxWidth: "90%", wordBreak: "break-word" }}>
+        <div style={{
+          position: "absolute", bottom: "18%", left: 0, right: 0, textAlign: "center",
+          fontSize: size * 0.055, color: c.id === "white" ? "rgba(30,30,30,0.7)" : `${c.accent}cc`,
+          fontFamily: "'SF Pro Display', -apple-system, sans-serif",
+          letterSpacing: "0.04em", fontWeight: 400,
+        }}>
           {engraving}
         </div>
       )}
-      {/* Bottom number */}
-      <div style={{ width: "100%", textAlign: "left" }}>
-        <div style={{ fontSize: size*0.045, color: c.accent, opacity: 0.4, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: size*0.02 }}>Founding Member</div>
-        <div style={{ fontSize: size*0.07, fontWeight: 700, color: c.accent, letterSpacing: "0.05em", fontVariantNumeric: "tabular-nums" }}>AF05 0000 0005 5301</div>
-      </div>
     </div>
   );
 }
@@ -405,13 +390,25 @@ export default function Card() {
       {FEATURES.map((f, i) => <FeatureSection key={i} feature={f} index={i} />)}
 
       {/* ── Colorway Picker ── */}
-      <section data-colorway-section style={{ padding: "80px 24px 72px", maxWidth: "600px", margin: "0 auto", textAlign: "center" }}>
+      <section data-colorway-section style={{ padding: "80px 24px 72px", maxWidth: "700px", margin: "0 auto", textAlign: "center" }}>
         <p style={{ fontSize: "11px", fontWeight: "600", letterSpacing: "0.12em", textTransform: "uppercase", color: "rgba(255,255,255,0.35)", marginBottom: "12px" }}>Colorway</p>
         <h2 style={{ fontSize: "clamp(26px, 5vw, 34px)", fontWeight: "700", letterSpacing: "-0.8px", marginBottom: "4px" }}>{isFounder ? "Titanium Black" : colorway.name}</h2>
         <p style={{ fontSize: "14px", color: "rgba(255,255,255,0.4)", marginBottom: "36px", letterSpacing: "-0.2px" }}>
           {isFounder ? "Exclusive to Founder Delivery. Not available separately." : colorway.tagline}
         </p>
-        <div style={{ display: "flex", justifyContent: "center", gap: "12px", marginBottom: "48px", flexWrap: "wrap" }}>
+        {/* Group photo with color glow — Apple style */}
+        <div style={{ position: "relative", width: "100%", maxWidth: 480, margin: "0 auto 40px", borderRadius: 20, overflow: "hidden" }}>
+          <img src={isFounder ? TITANIUM_IMG : HERO_IMG} alt="FschoolAI Cards" style={{ width: "100%", display: "block", borderRadius: 20 }} />
+          {/* Color glow overlay for selected colorway */}
+          {!isFounder && (
+            <div style={{
+              position: "absolute", inset: 0, borderRadius: 20,
+              background: `radial-gradient(ellipse at center bottom, ${colorway.hex}30 0%, transparent 70%)`,
+              pointerEvents: "none", transition: "background 0.5s ease",
+            }} />
+          )}
+        </div>
+        <div style={{ display: "flex", justifyContent: "center", gap: "12px", marginBottom: "0", flexWrap: "wrap" }}>
           {COLORWAYS.map((c, i) => (
             <button key={c.id} onClick={() => { setSelected(i); setFounder(false); }} title={c.name} style={{
               width: "32px", height: "32px", borderRadius: "50%", background: c.hex,
@@ -434,7 +431,6 @@ export default function Card() {
             }} />
           )}
         </div>
-        <CardVisual colorway={colorway} engraving={engraving} isFounder={isFounder} size={200} />
       </section>
 
       {/* ── Engraving ── */}
@@ -490,7 +486,7 @@ function ManifestoSection() {
   const [ref, visible] = useReveal(0.2);
   return (
     <section ref={ref} style={{ padding: "96px 24px", background: "#000", textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)" }}>
-      <div style={{ maxWidth: 680, margin: "0 auto", opacity: visible ? 1 : 0, transform: visible ? "translateY(0)" : "translateY(28px)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
+      <div style={{ maxWidth: 680, margin: "0 auto", opacity: 1, transform: "translateY(0)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
         <p style={{ fontSize: "11px", fontWeight: "600", letterSpacing: "0.12em", textTransform: "uppercase", color: "rgba(255,255,255,0.3)", marginBottom: "20px" }}>What is FschoolAI</p>
         <h2 style={{ fontSize: "clamp(30px, 7vw, 52px)", fontWeight: "700", letterSpacing: "-1.5px", lineHeight: 1.1, color: "#f5f5f7", marginBottom: "24px" }}>
           The AI that actually<br />knows your courses.
@@ -512,7 +508,7 @@ function FeatureSection({ feature: f, index }) {
         maxWidth: 900, margin: "0 auto", width: "100%",
         display: "flex", flexDirection: "column", alignItems: "center",
         gap: "clamp(40px, 6vw, 64px)",
-        opacity: visible ? 1 : 0, transform: visible ? "translateY(0)" : "translateY(36px)",
+        opacity: 1, transform: "translateY(0)",
         transition: "opacity 0.9s ease, transform 0.9s ease",
       }}>
         <div style={{ textAlign: "center", maxWidth: 560 }}>
@@ -531,7 +527,7 @@ function FeatureSection({ feature: f, index }) {
 function EngravingSection({ engraving, setEngraving, colorway, isFounder }) {
   const [ref, visible] = useReveal(0.2);
   return (
-    <section ref={ref} style={{ padding: "80px 24px 72px", maxWidth: 600, margin: "0 auto", textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)", opacity: visible ? 1 : 0, transform: visible ? "translateY(0)" : "translateY(28px)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
+    <section ref={ref} style={{ padding: "80px 24px 72px", maxWidth: 600, margin: "0 auto", textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)", opacity: 1, transform: "translateY(0)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
       <p style={{ fontSize: "11px", fontWeight: "600", letterSpacing: "0.12em", textTransform: "uppercase", color: "rgba(255,255,255,0.35)", marginBottom: "12px" }}>Engraving</p>
       <h2 style={{ fontSize: "clamp(26px, 5vw, 36px)", fontWeight: "700", letterSpacing: "-0.9px", marginBottom: "8px" }}>Make it yours.</h2>
       <p style={{ fontSize: "14px", color: "rgba(255,255,255,0.4)", marginBottom: "36px", lineHeight: 1.6 }}>
@@ -554,9 +550,25 @@ function EngravingSection({ engraving, setEngraving, colorway, isFounder }) {
         />
         <span style={{ position: "absolute", right: "14px", top: "50%", transform: "translateY(-50%)", fontSize: "12px", color: "rgba(255,255,255,0.25)" }}>{engraving.length}/30</span>
       </div>
-      {/* Live preview */}
-      <div style={{ display: "flex", justifyContent: "center" }}>
-        <CardVisual colorway={colorway} engraving={engraving || "Your engraving here"} isFounder={isFounder} size={180} />
+      {/* Live preview — real card photo with engraving overlay */}
+      <div style={{ position: "relative", width: "100%", maxWidth: 280, margin: "0 auto" }}>
+        <img
+          src={isFounder ? TITANIUM_IMG : colorway.img}
+          alt={isFounder ? "Titanium Black" : colorway.name}
+          style={{ width: "100%", display: "block", borderRadius: 16, boxShadow: `0 24px 48px rgba(0,0,0,0.8)` }}
+        />
+        {(engraving || true) && (
+          <div style={{
+            position: "absolute", bottom: "18%", left: 0, right: 0, textAlign: "center",
+            fontSize: "clamp(11px, 3vw, 14px)",
+            color: isFounder ? "rgba(200,200,200,0.75)" : (colorway.id === "white" ? "rgba(30,30,30,0.65)" : `${colorway.accent}cc`),
+            fontFamily: "'SF Pro Display', -apple-system, sans-serif",
+            letterSpacing: "0.04em", fontWeight: 400,
+            padding: "0 12px",
+          }}>
+            {engraving || <span style={{ opacity: 0.35 }}>Your engraving here</span>}
+          </div>
+        )}
       </div>
       {engraving && <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.25)", marginTop: "16px" }}>Preview — actual engraving may vary slightly</p>}
     </section>
@@ -566,7 +578,7 @@ function EngravingSection({ engraving, setEngraving, colorway, isFounder }) {
 function SpecSection() {
   const [ref, visible] = useReveal(0.1);
   return (
-    <section ref={ref} style={{ padding: "80px 24px 88px", maxWidth: 680, margin: "0 auto", borderTop: "1px solid rgba(255,255,255,0.06)", opacity: visible ? 1 : 0, transform: visible ? "translateY(0)" : "translateY(28px)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
+    <section ref={ref} style={{ padding: "80px 24px 88px", maxWidth: 680, margin: "0 auto", borderTop: "1px solid rgba(255,255,255,0.06)", opacity: 1, transform: "translateY(0)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
       <p style={{ fontSize: "11px", fontWeight: "600", letterSpacing: "0.12em", textTransform: "uppercase", color: "rgba(255,255,255,0.35)", marginBottom: "12px", textAlign: "center" }}>What's inside</p>
       <h2 style={{ fontSize: "clamp(28px, 6vw, 42px)", fontWeight: "700", letterSpacing: "-1px", marginBottom: "52px", textAlign: "center" }}>Everything a founder gets.</h2>
       <div>
@@ -588,7 +600,7 @@ function CounterSection() {
   const [ref, visible] = useReveal(0.2);
   const remaining = 247;
   return (
-    <section ref={ref} style={{ padding: "72px 24px", background: "#0a0a0a", textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)", borderBottom: "1px solid rgba(255,255,255,0.06)", opacity: visible ? 1 : 0, transform: visible ? "translateY(0)" : "translateY(28px)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
+    <section ref={ref} style={{ padding: "72px 24px", background: "#0a0a0a", textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)", borderBottom: "1px solid rgba(255,255,255,0.06)", opacity: 1, transform: "translateY(0)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
       <div style={{ fontSize: "clamp(52px, 14vw, 88px)", fontWeight: "700", letterSpacing: "-4px", color: "#f5f5f7", lineHeight: 1 }}>{remaining}</div>
       <div style={{ fontSize: "15px", color: "rgba(255,255,255,0.4)", marginTop: "10px", letterSpacing: "-0.2px" }}>of 500 founding spots remaining</div>
       <div style={{ width: "100%", maxWidth: "320px", height: "3px", background: "rgba(255,255,255,0.07)", borderRadius: "2px", margin: "22px auto 0", overflow: "hidden" }}>
@@ -609,7 +621,7 @@ function FounderDeliverySection({ founderDelivery, setFounder }) {
     "Lifetime Pro + priority support forever",
   ];
   return (
-    <section ref={ref} style={{ padding: "80px 24px", background: "#000", borderTop: "1px solid rgba(255,255,255,0.06)", opacity: visible ? 1 : 0, transform: visible ? "translateY(0)" : "translateY(28px)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
+    <section ref={ref} style={{ padding: "80px 24px", background: "#000", borderTop: "1px solid rgba(255,255,255,0.06)", opacity: 1, transform: "translateY(0)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
       <div style={{ maxWidth: 680, margin: "0 auto" }}>
         <p style={{ fontSize: "11px", fontWeight: "600", letterSpacing: "0.12em", textTransform: "uppercase", color: "rgba(255,255,255,0.35)", marginBottom: "12px", textAlign: "center" }}>Founder Delivery</p>
         <h2 style={{ fontSize: "clamp(28px, 6vw, 42px)", fontWeight: "700", letterSpacing: "-1px", marginBottom: "8px", textAlign: "center" }}>The rarest card<br />in the world.</h2>
@@ -668,7 +680,7 @@ function FounderDeliverySection({ founderDelivery, setFounder }) {
 function SpecialistSection() {
   const [ref, visible] = useReveal(0.2);
   return (
-    <section ref={ref} style={{ padding: "72px 24px", background: "#f5f5f7", opacity: visible ? 1 : 0, transform: visible ? "translateY(0)" : "translateY(28px)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
+    <section ref={ref} style={{ padding: "72px 24px", background: "#f5f5f7", opacity: 1, transform: "translateY(0)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
       <div style={{ maxWidth: 560, margin: "0 auto", textAlign: "center" }}>
         {/* Icon row */}
         <div style={{ display: "flex", justifyContent: "center", alignItems: "center", gap: "clamp(8px, 2vw, 16px)", marginBottom: "28px", flexWrap: "wrap" }}>
@@ -699,7 +711,7 @@ function ApplicationSection({ formData, setFormData, submitted, submitting, hand
     outline: "none", fontFamily: "inherit", transition: "border-color 0.15s",
   };
   return (
-    <section id="apply" ref={ref} style={{ padding: "88px 24px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)", opacity: visible ? 1 : 0, transform: visible ? "translateY(0)" : "translateY(28px)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
+    <section id="apply" ref={ref} style={{ padding: "88px 24px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", borderTop: "1px solid rgba(255,255,255,0.06)", opacity: 1, transform: "translateY(0)", transition: "opacity 0.8s ease, transform 0.8s ease" }}>
       <p style={{ fontSize: "11px", fontWeight: "600", letterSpacing: "0.12em", textTransform: "uppercase", color: "rgba(255,255,255,0.35)", marginBottom: "12px" }}>Founding Edition</p>
       <h2 style={{ fontSize: "clamp(28px, 6vw, 42px)", fontWeight: "700", letterSpacing: "-1px", marginBottom: "8px" }}>Apply for your card.</h2>
       <p style={{ fontSize: "15px", color: "rgba(255,255,255,0.4)", marginBottom: "40px", letterSpacing: "-0.2px", lineHeight: 1.6 }}>
