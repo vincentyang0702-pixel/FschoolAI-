@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { useApp }                    from "../context/AppContext";
+import { supabase }                  from "../api/supabase";
 import GradeGraph, { COURSE_COLORS } from "../components/GradeGraph";
 import ShareCard                     from "../components/ShareCard";
 import FriendsSection                from "../components/FriendsSection";
@@ -127,7 +128,8 @@ export default function Identity() {
     pct:  c.currentScore ?? c.finalScore ?? null,
   }));
 
-  function handleSignOut() {
+  async function handleSignOut() {
+    try { await supabase.auth.signOut(); } catch { /* clear local state regardless */ }
     localStorage.removeItem("fschool_logged_in");
     localStorage.removeItem("fschool_name");
     window.location.reload();

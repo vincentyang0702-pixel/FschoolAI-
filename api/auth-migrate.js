@@ -113,5 +113,42 @@ export default async function handler(req, res) {
     return res.status(200).json({ migrated: true });
   }
 
-  return res.status(400).json({ error: "Unknown action. Use ?action=signup or ?action=migrate" });
+  // ── reset (set a new password via the email reset link) ─────────────────────
+  // The client reaches here from /?reset=confirm&token=…&userId=… (token issued by
+  // api/email.js ?action=reset). We validate the token, then set the password in
+  // GoTrue — creating + linking the auth user if this account hasn't migrated yet.
+  if (action === "reset") {
+    const { userId, token, password } = req.body ?? {};
+    if (!userId || !token || !password) return res.status(400).json({ error: "userId, token and password required" });
+
+    const { data: profile } = await supabase
+      .from("users").select("id, email, auth_id, email_verify_token").eq("id", userId).maybeSingle();
+    if (!profile || !profile.email_verify_token || profile.email_verify_token !== token) {
+      return res.status(401).json({ error: "Invalid or expired reset link." });
+    }
+
+    if (profile.auth_id) {
+      const { error: updErr } = await supabase.auth.admin.updateUserById(profile.auth_id, { password });
+      if (updErr) {
+        console.error("[auth-migrate/reset] updateUserById failed:", updErr);
+        return res.status(500).json({ error: "Could not reset password. Please try again." });
+      }
+    } else {
+      // Account never migrated — create the GoTrue user with the new password and link it.
+      const { data: created, error: authErr } = await supabase.auth.admin.createUser({
+        email: profile.email, password, email_confirm: true,
+      });
+      if (authErr) {
+        console.error("[auth-migrate/reset] createUser failed:", authErr);
+        return res.status(500).json({ error: "Could not reset password. Please try again." });
+      }
+      await supabase.from("users").update({ auth_id: created.user.id }).eq("id", userId);
+    }
+
+    // Burn the one-time token.
+    await supabase.from("users").update({ email_verify_token: null }).eq("id", userId);
+    return res.status(200).json({ ok: true });
+  }
+
+  return res.status(400).json({ error: "Unknown action. Use ?action=signup, ?action=migrate, or ?action=reset" });
 }
