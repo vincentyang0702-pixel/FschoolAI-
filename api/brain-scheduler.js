@@ -14,7 +14,7 @@
 //   BRAIN_SUPABASE_URL  — NeuroAGI Brain DB URL
 //   BRAIN_SUPABASE_KEY  — Brain DB service_role key
 //   ANTHROPIC_API_KEY   — Claude Haiku for synthesis
-//   CRON_SECRET         — Optional: protect endpoint from unauthorized calls
+//   CRON_SECRET         — REQUIRED: reject all requests without it (fail-closed)
 
 const BRAIN_URL = process.env.BRAIN_SUPABASE_URL;
 const BRAIN_KEY = process.env.BRAIN_SUPABASE_KEY;
@@ -198,13 +198,13 @@ async function writeContextWindow(personId, context) {
 // ── Main handler ──────────────────────────────────────────────────────────────
 
 export default async function handler(req, res) {
-  // Auth check
+  // Auth check — FAIL CLOSED: reject if CRON_SECRET is missing or wrong.
+  // This cron calls Claude (cost) — must never be publicly triggerable.
   const cronSecret = process.env.CRON_SECRET;
-  if (cronSecret) {
-    const auth = req.headers.authorization ?? req.headers["x-cron-secret"];
-    if (auth !== `Bearer ${cronSecret}` && auth !== cronSecret) {
-      return res.status(401).json({ error: "Unauthorized" });
-    }
+  if (!cronSecret) return res.status(500).json({ error: "CRON_SECRET not configured" });
+  const auth = req.headers.authorization ?? req.headers["x-cron-secret"];
+  if (auth !== `Bearer ${cronSecret}` && auth !== cronSecret) {
+    return res.status(401).json({ error: "Unauthorized" });
   }
 
   if (!BRAIN_URL || !BRAIN_KEY) {
