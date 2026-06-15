@@ -4,6 +4,7 @@
 //         that isn't already in the system prompt
 // READS:  Supabase — assignments, courses, flashcards — filtered to what's relevant
 //         NeuroAGI Brain DB — brain.context_window (pre-cached student state)
+//         Library — course_content (shared lecture notes, syllabus, announcements)
 // WRITES: nothing — read-only
 // RETURNS: a context string injected into the Claude call as an extra system section
 //
@@ -11,6 +12,7 @@
 //   The system prompt has static context (top 5 assignments, course list, GPA).
 //   But students ask specific questions: "What's my score in BIO 101?"
 //   "What flashcards do I have for Media Studies?" "Which assignments am I missing?"
+//   "What did the professor say about the rubric?" "What's in the syllabus for week 3?"
 //   This endpoint detects those queries and fetches the exact data needed.
 //
 // BRAIN CONTEXT (NeuroAGI Brain DB):
@@ -20,12 +22,17 @@
 //   This is fetched in PARALLEL with FschoolAI DB queries (Promise.all).
 //   Brain DB has ~600ms latency — pre-caching eliminates this from the hot path.
 //
+// LIBRARY AGENT:
+//   Searches course_content (shared library) for relevant lecture notes, syllabus,
+//   announcements, and module pages. Runs in parallel with brain fetch.
+//   Returns top 3 scored snippets injected as [Source]: text blocks.
+//
 // QUERY CLASSIFICATION (done by Claude Haiku — fast, cheap):
 //   assignment_detail  → fetch specific assignment(s) matching query
 //   course_grades      → fetch all courses with scores
 //   missing_late       → fetch missing/late assignments
 //   flashcard_detail   → fetch flashcards for a specific course
-//   none               → no DB fetch needed (but brain context still returned if available)
+//   none               → no DB fetch needed (but brain + library context still returned)
 
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -41,7 +48,7 @@ export default async function handler(req, res) {
     return res.status(200).json({ context: null, reason: "missing env" });
   }
 
-  const { userId, userMessage, brainPersonId } = req.body ?? {};
+  const { userId, userMessage, brainPersonId, courseIds = [], activeCourseId = null } = req.body ?? {};
   if (!userId || !userMessage) return res.status(200).json({ context: null });
 
   const sbHeaders = {
@@ -50,12 +57,12 @@ export default async function handler(req, res) {
     "Content-Type":  "application/json",
   };
 
-  // ── 0. Fetch brain.context_window in parallel with classification ──────────
+  // ── 0a. Fetch brain.context_window in parallel with classification ─────────
   // Pre-cached by brain_scheduler — no 600ms Brain DB penalty on hot path
   let brainContext = null;
   const brainFetch = (brainUrl && brainKey && brainPersonId)
     ? fetch(
-        `${brainUrl}/rest/v1/brain.context_window?person_id=eq.${brainPersonId}&select=stress_level,momentum_state,active_deadline,recent_summary,what_to_focus_on,what_not_to_mention&limit=1`,
+        `${brainUrl}/rest/v1/context_window?person_id=eq.${brainPersonId}&select=stress_level,momentum_state,active_deadline,recent_summary,what_to_focus_on,what_not_to_mention&limit=1`,
         {
           headers: {
             "apikey":        brainKey,
@@ -64,6 +71,69 @@ export default async function handler(req, res) {
           },
         }
       ).then(r => r.ok ? r.json() : null).catch(() => null)
+    : Promise.resolve(null);
+
+  // ── 0b. Library agent search — runs in parallel with brain fetch ───────────
+  // Searches shared course_content for relevant lecture notes, syllabus, announcements
+  const LIBRARY_SIGNALS = [
+    "syllabus", "lecture", "notes", "slides", "professor", "prof",
+    "rubric", "module", "week", "reading", "chapter", "announcement",
+    "said", "mentioned", "covered", "taught", "according to", "from class",
+    "what is", "what are", "explain", "define", "how does", "why does",
+  ];
+  const lowerMsg = userMessage.toLowerCase();
+  const isLibraryQuery = LIBRARY_SIGNALS.some(s => lowerMsg.includes(s));
+
+  const libraryFetch = (isLibraryQuery && supabaseUrl && supabaseKey)
+    ? (async () => {
+        try {
+          // Extract keywords for search
+          const stopWords = new Set(["the","a","an","is","are","was","were","be","have","has","do","does","will","would","could","should","i","my","me","we","you","it","this","that","and","or","but","for","in","on","at","to","of","with","about","from"]);
+          const keywords = userMessage.toLowerCase().replace(/[^\w\s]/g, " ").split(/\s+/).filter(w => w.length > 2 && !stopWords.has(w)).slice(0, 6);
+
+          if (!keywords.length) return null;
+
+          // Build course filter
+          const courseFilter = activeCourseId
+            ? `course_id=eq.${activeCourseId}`
+            : courseIds.length > 0
+              ? `course_id=in.(${courseIds.join(",")})`
+              : null;
+
+          if (!courseFilter) return null;
+
+          const libUrl = `${supabaseUrl}/rest/v1/course_content?${courseFilter}&is_private=eq.false&select=content_type,text,summary,module_name,week_number,seen_by_count&order=seen_by_count.desc&limit=20`;
+          const libResp = await fetch(libUrl, { headers: sbHeaders });
+          if (!libResp.ok) return null;
+
+          const rows = await libResp.json();
+          if (!rows?.length) return null;
+
+          // Score by keyword relevance
+          const scored = rows.map(row => {
+            const searchText = `${row.text || ""} ${row.summary || ""} ${row.module_name || ""}`.toLowerCase();
+            let score = keywords.reduce((s, kw) => s + (searchText.match(new RegExp(kw, "g")) || []).length * 2, 0);
+            score += Math.log1p(row.seen_by_count || 0) * 0.5;
+            if (row.content_type === "syllabus") score += 5;
+            if (row.content_type === "lecture") score += 3;
+            if (row.content_type === "announcement") score += 2;
+            return { ...row, score };
+          }).filter(r => r.score > 0).sort((a, b) => b.score - a.score).slice(0, 3);
+
+          if (!scored.length) return null;
+
+          const snippets = scored.map(r => {
+            const src = r.content_type === "syllabus" ? "Course Syllabus"
+              : r.content_type === "lecture" ? `Lecture Notes${r.week_number ? ` (Week ${r.week_number})` : ""}${r.module_name ? ` — ${r.module_name}` : ""}`
+              : r.content_type === "announcement" ? "Course Announcement"
+              : r.content_type;
+            const text = r.summary || (r.text ? r.text.slice(0, 400) : "");
+            return `[${src}]: ${text}`;
+          });
+
+          return snippets.join("\n\n");
+        } catch { return null; }
+      })()
     : Promise.resolve(null);
 
   // ── 1. Classify the query ──────────────────────────────────────────────────
@@ -109,8 +179,8 @@ Examples:
     }
   } catch { /* fall through to none */ }
 
-  // Await brain context (was fetched in parallel with classification)
-  const brainRows = await brainFetch;
+  // Await brain context and library (both fetched in parallel with classification)
+  const [brainRows, librarySnippets] = await Promise.all([brainFetch, libraryFetch]);
   const brainWindow = brainRows?.[0] ?? null;
   if (brainWindow) {
     const parts = [];
@@ -125,9 +195,16 @@ Examples:
     }
   }
 
+  // Build library context block
+  let libraryContext = null;
+  if (librarySnippets) {
+    libraryContext = `COURSE LIBRARY (from your actual course materials):\n${librarySnippets}`;
+  }
+
   if (queryType === "none") {
-    // Even if no DB query needed, return brain context if available
-    return res.status(200).json({ context: brainContext });
+    // Even if no DB query needed, return brain + library context if available
+    const parts = [brainContext, libraryContext].filter(Boolean);
+    return res.status(200).json({ context: parts.length ? parts.join("\n\n") : null });
   }
 
   // ── 2. Fetch relevant data ─────────────────────────────────────────────────
@@ -217,12 +294,7 @@ Examples:
     console.error("[tutor-context] fetch error:", err.message);
   }
 
-  // Merge brain context with DB context
-  if (brainContext && context) {
-    context = `${brainContext}\n\n${context}`;
-  } else if (brainContext) {
-    context = brainContext;
-  }
-
-  return res.status(200).json({ context });
+  // Merge all context layers: brain + library + DB
+  const contextParts = [brainContext, libraryContext, context].filter(Boolean);
+  return res.status(200).json({ context: contextParts.length ? contextParts.join("\n\n") : null });
 }

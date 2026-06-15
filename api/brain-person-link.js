@@ -72,7 +72,7 @@ export default async function handler(req, res) {
     let existingPersonId = null;
     if (user.email) {
       const checkRes = await fetch(
-        `${brainUrl}/rest/v1/neuro.persons?email=eq.${encodeURIComponent(user.email)}&select=id&limit=1`,
+        `${brainUrl}/rest/v1/persons?email=eq.${encodeURIComponent(user.email)}&select=id&limit=1`,
         { headers: brainHeaders }
       );
       if (checkRes.ok) {
@@ -85,7 +85,7 @@ export default async function handler(req, res) {
 
     // ── 4. Create neuro.persons record in Brain DB (if not already exists) ───
     if (!brainPersonId) {
-      const createRes = await fetch(`${brainUrl}/rest/v1/neuro.persons`, {
+      const createRes = await fetch(`${brainUrl}/rest/v1/persons`, {
         method:  "POST",
         headers: { ...brainHeaders, "Prefer": "return=representation" },
         body: JSON.stringify({

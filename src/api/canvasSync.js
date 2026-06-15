@@ -572,7 +572,7 @@ async function syncToBrainDB(userId, courses, assignments, courseIdMap, now) {
       synced_at:        now,
     }));
 
-    await fetch(`${brainUrl}/rest/v1/fschool.courses`, {
+    await fetch(`${brainUrl}/rest/v1/fschool_assignments`, {
       method:  'POST',
       headers: brainHeaders,
       body:    JSON.stringify(courseRows),
@@ -599,7 +599,7 @@ async function syncToBrainDB(userId, courses, assignments, courseIdMap, now) {
       synced_at:            now,
     }));
 
-    await fetch(`${brainUrl}/rest/v1/fschool.assignments`, {
+    await fetch(`${brainUrl}/rest/v1/fschool_assignments`, {
       method:  'POST',
       headers: brainHeaders,
       body:    JSON.stringify(assignRows),

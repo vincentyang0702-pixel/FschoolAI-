@@ -349,7 +349,10 @@ create table if not exists public.users (
   gpa                float,
   favorite_song      text,
   leaderboard_opt_in boolean  default false,
-  canvas_synced_at   timestamptz
+  canvas_synced_at   timestamptz,
+  -- Brain integration (added Jun 2026)
+  brain_person_id    text,    -- links to NeuroAGI Brain DB persons.id
+  discord_user_id    text     -- Discord snowflake ID for DM interventions
 );
 
 create table if not exists public.canvas_data (

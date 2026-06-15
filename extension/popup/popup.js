@@ -1,42 +1,24 @@
 // popup.js — NeuroAgi extension popup
 // Handles auth and triggers page capture via background service worker.
 
-const SUPABASE_URL  = "https://wqgxpouhbwhwpzudrptp.supabase.co";
-const SUPABASE_ANON = "sb_publishable_e-3KMudaL-iXf5GGsuiQaA_VW21ZZFA";
+// ── Secure proxy — no Supabase keys in the extension bundle ──────────────────
+const AUTH_PROXY = "https://fschoolai.com/api/extension-auth";
 
-// Use the public schema — where all app data (users, courses, assignments) lives.
-// The app's Supabase client (src/api/supabase.js) targets public; the popup must match
-// or login queries hit the wrong schema and return empty rows.
-const SB_PROFILE = { "Accept-Profile": "public", "Content-Profile": "public" };
+async function authProxy(action, payload = {}) {
+  const res = await fetch(AUTH_PROXY, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ action, ...payload }),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json?.error ?? `extension-auth ${res.status}`);
+  return json;
+}
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function sha256(text) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-}
-
-async function sbFetch(path, opts = {}) {
-  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
-    ...opts,
-    headers: {
-      "apikey": SUPABASE_ANON,
-      "Authorization": `Bearer ${SUPABASE_ANON}`,
-      "Content-Type": "application/json",
-      "Prefer": "return=representation",
-      ...SB_PROFILE,
-      ...(opts.headers ?? {}),
-    },
-  });
-  const text = await res.text();
-  const json = text ? JSON.parse(text) : null;
-  if (!res.ok) throw new Error(json?.message ?? json?.error ?? `Supabase ${res.status}`);
-  return json;
-}
-
-function randomUUID() {
-  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
-    (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16)
-  );
 }
 
 // ── Screen helpers ────────────────────────────────────────────────────────────
@@ -53,24 +35,15 @@ function clearError(id) { document.getElementById(id).classList.remove("visible"
 // ── Auth ──────────────────────────────────────────────────────────────────────
 async function login(email, password) {
   const hash = await sha256(password);
-  const rows = await sbFetch(
-    `users?email=eq.${encodeURIComponent(email.toLowerCase())}&password_hash=eq.${hash}&select=id,name,email`,
-    { method: "GET" }
-  );
-  if (!rows?.length) throw new Error("Incorrect email or password");
-  return rows[0];
+  const { user } = await authProxy("login", { email, passwordHash: hash });
+  return user;
 }
 
 async function signup(name, email, password) {
   const hash = await sha256(password);
-  const id   = randomUUID();
-  const rows = await sbFetch("users", {
-    method: "POST",
-    body: JSON.stringify({ id, name, email: email.toLowerCase(), password_hash: hash }),
-  });
-  return rows?.[0] ?? { id, name, email };
+  const { user } = await authProxy("signup", { email, passwordHash: hash, name });
+  return user;
 }
-
 async function saveSession(user) { await chrome.storage.local.set({ neuroagi_user: user }); }
 async function getSession()      { const { neuroagi_user } = await chrome.storage.local.get("neuroagi_user"); return neuroagi_user ?? null; }
 async function clearSession()    { await chrome.storage.local.remove(["neuroagi_user", "neuroagi_captures", "neuroagi_stats", "neuroagi_captured_urls"]); }

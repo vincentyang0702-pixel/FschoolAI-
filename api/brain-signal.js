@@ -60,7 +60,7 @@ export default async function handler(req, res) {
       created_at:  new Date().toISOString(),
     };
 
-    const writeRes = await fetch(`${brainUrl}/rest/v1/brain.signals`, {
+    const writeRes = await fetch(`${brainUrl}/rest/v1/signals`, {
       method:  "POST",
       headers: brainHeaders,
       body:    JSON.stringify(signalRow),

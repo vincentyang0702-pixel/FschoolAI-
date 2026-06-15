@@ -96,8 +96,134 @@ async function lmsApiSync() {
           }
         } catch { /* files tab disabled for this course */ }
       }));
-      D("Canvas synced — courses", courses.length, "| assignments", assignments.length, "| files", files.length, "| graded courses", courses.filter(c => c.current_score != null).length);
-      return { lms: "canvas", courses, assignments, files };
+      // ── ANNOUNCEMENTS ────────────────────────────────────────────────────
+      // Last 30 announcements per course — professor posts, deadline reminders,
+      // grade releases. Stored as content_type "announcement" in the library.
+      const announcements = [];
+      await Promise.all(courses.map(async (c) => {
+        try {
+          const raw = await pageAll(`/courses/${c.id}/discussion_topics?only_announcements=true&order_by=posted_at&per_page=30`);
+          for (const a of raw) {
+            const body = a.message ? String(a.message).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 8000) : "";
+            if (!body) continue;
+            announcements.push({
+              course_ref: c.id,
+              id: "canvas_ann_" + a.id,
+              title: a.title || "Announcement",
+              content: body,
+              posted_at: a.posted_at || null,
+              author: a.author?.display_name || null,
+            });
+          }
+        } catch { /* announcements disabled */ }
+      }));
+
+      // ── MODULES + PAGES (lecture notes, readings, slides) ────────────────
+      // Module items of type "Page" contain the actual HTML content professors
+      // write (lecture notes, weekly readings). ExternalUrl items are linked
+      // slides/PDFs hosted outside Canvas (Google Slides, external PDFs).
+      const pages = [];
+      await Promise.all(courses.map(async (c) => {
+        try {
+          const modules = await pageAll(`/courses/${c.id}/modules?include[]=items&per_page=50`);
+          for (const mod of modules) {
+            for (const item of (mod.items || [])) {
+              if (item.type === "Page" && item.page_url) {
+                try {
+                  const pg = await (await fetch(origin + `/api/v1/courses/${c.id}/pages/${item.page_url}`, { credentials: "include" })).json();
+                  const body = pg.body ? String(pg.body).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 12000) : "";
+                  if (body.length > 50) {
+                    pages.push({
+                      course_ref: c.id,
+                      id: "canvas_page_" + pg.page_id,
+                      title: pg.title || item.title || "Page",
+                      content: body,
+                      module_name: mod.name || null,
+                      updated_at: pg.updated_at || null,
+                    });
+                  }
+                } catch { /* skip page */ }
+              }
+              // External URLs (linked slides, external readings) → file reference
+              if (item.type === "ExternalUrl" && item.external_url) {
+                files.push({
+                  course_ref: c.id, assignment_ref: null,
+                  id: "canvas_exturl_" + item.id,
+                  name: item.title || "External Link",
+                  file_type: "link",
+                  size_bytes: null,
+                  source_url: item.external_url,
+                  folder: mod.name || null,
+                  status: "course_material",
+                });
+              }
+            }
+          }
+        } catch { /* modules disabled */ }
+
+        // ── SYLLABUS + PROFESSOR NAME ─────────────────────────────────────
+        // Fetch syllabus body and teacher enrollments in one call per course.
+        try {
+          const courseDetail = await (await fetch(
+            origin + `/api/v1/courses/${c.id}?include[]=syllabus_body`,
+            { credentials: "include" }
+          )).json();
+          if (courseDetail.syllabus_body) {
+            const body = String(courseDetail.syllabus_body).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 12000);
+            if (body.length > 50) {
+              pages.push({
+                course_ref: c.id,
+                id: "canvas_syllabus_" + c.id,
+                title: "Course Syllabus",
+                content: body,
+                module_name: "Syllabus",
+                updated_at: null,
+              });
+            }
+          }
+        } catch { /* syllabus disabled */ }
+        // Professor name from teacher enrollments
+        try {
+          const teachers = await pageAll(`/courses/${c.id}/enrollments?type[]=TeacherEnrollment&per_page=10`);
+          if (teachers.length > 0) {
+            const idx = courses.findIndex(x => x.id === c.id);
+            if (idx !== -1) courses[idx].professor = teachers[0].user?.name || teachers[0].user?.short_name || null;
+          }
+        } catch { /* enrollments disabled */ }
+      }));
+
+      // ── INBOX / CONVERSATIONS ─────────────────────────────────────────────
+      // Canvas Inbox messages between student and professor. Last 20 threads,
+      // up to 5 messages per thread. Critical for "what did prof say about X".
+      const inbox = [];
+      try {
+        const convs = await pageAll("/conversations?scope=inbox&per_page=20");
+        for (const conv of convs) {
+          try {
+            const detail = await (await fetch(
+              origin + `/api/v1/conversations/${conv.id}`,
+              { credentials: "include", headers: { Accept: "application/json" } }
+            )).json();
+            for (const msg of (detail.messages || []).slice(0, 5)) {
+              const body = msg.body ? String(msg.body).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().slice(0, 3000) : "";
+              if (!body) continue;
+              inbox.push({
+                id: "canvas_msg_" + msg.id,
+                subject: conv.subject || "(no subject)",
+                from: msg.author?.name || "Unknown",
+                body,
+                created_at: msg.created_at || null,
+                course_ref: conv.context_code?.replace("course_", "") || null,
+              });
+            }
+          } catch { /* skip conversation */ }
+        }
+      } catch { /* inbox disabled */ }
+
+      D("Canvas synced — courses", courses.length, "| assignments", assignments.length, "| files", files.length,
+        "| announcements", announcements.length, "| pages", pages.length, "| inbox", inbox.length,
+        "| graded courses", courses.filter(c => c.current_score != null).length);
+      return { lms: "canvas", courses, assignments, files, announcements, pages, inbox };
     }
   } catch (e) { D("adapter error:", e && e.message); }
 
