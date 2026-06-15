@@ -45,10 +45,12 @@ export default async function handler(req, res) {
   if (!payload)       return res.status(200).json({ ok: false, reason: "payload required" });
 
   const brainHeaders = {
-    "apikey":        brainKey,
-    "Authorization": `Bearer ${brainKey}`,
-    "Content-Type":  "application/json",
-    "Prefer":        "return=minimal",
+    "apikey":          brainKey,
+    "Authorization":   `Bearer ${brainKey}`,
+    "Content-Type":    "application/json",
+    "Prefer":          "return=minimal",
+    "Accept-Profile":  "brain",   // signals table lives in brain schema
+    "Content-Profile": "brain",
   };
 
   try {

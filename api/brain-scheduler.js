@@ -20,18 +20,27 @@ const BRAIN_URL = process.env.BRAIN_SUPABASE_URL;
 const BRAIN_KEY = process.env.BRAIN_SUPABASE_KEY;
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
 
+// neuro schema: persons table
+const neuroHeaders = {
+  apikey:           BRAIN_KEY,
+  Authorization:    `Bearer ${BRAIN_KEY}`,
+  "Content-Type":   "application/json",
+  "Accept-Profile": "neuro",
+};
+// brain schema: signals, context_window tables
 const brainHeaders = {
-  apikey:        BRAIN_KEY,
-  Authorization: `Bearer ${BRAIN_KEY}`,
-  "Content-Type": "application/json",
+  apikey:           BRAIN_KEY,
+  Authorization:    `Bearer ${BRAIN_KEY}`,
+  "Content-Type":   "application/json",
+  "Accept-Profile": "brain",
 };
 
 // ── Fetch helpers ─────────────────────────────────────────────────────────────
 
 async function fetchPersons() {
   const res = await fetch(
-    `${BRAIN_URL}/rest/v1/neuro.persons?select=id,name,email,source&limit=200`,
-    { headers: brainHeaders }
+    `${BRAIN_URL}/rest/v1/persons?select=id,name,email,source&limit=200`,
+    { headers: neuroHeaders }
   );
   if (!res.ok) throw new Error(`fetchPersons ${res.status}`);
   return res.json();
@@ -40,7 +49,7 @@ async function fetchPersons() {
 async function fetchRecentSignals(personId) {
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   const res = await fetch(
-    `${BRAIN_URL}/rest/v1/brain.signals?person_id=eq.${personId}&created_at=gte.${since}&select=signal_type,source,payload,created_at&order=created_at.desc&limit=50`,
+    `${BRAIN_URL}/rest/v1/signals?person_id=eq.${personId}&created_at=gte.${since}&select=signal_type,source,payload,created_at&order=created_at.desc&limit=50`,
     { headers: brainHeaders }
   );
   if (!res.ok) return [];
@@ -51,7 +60,7 @@ async function fetchUpcomingAssignments(personId) {
   const now     = new Date().toISOString();
   const weekOut = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
   const res = await fetch(
-    `${BRAIN_URL}/rest/v1/fschool.assignments?person_id=eq.${personId}&due_at=gte.${now}&due_at=lte.${weekOut}&select=title,due_at,missing,score,points_possible&order=due_at.asc&limit=10`,
+    `${BRAIN_URL}/rest/v1/fschool_assignments?person_id=eq.${personId}&due_at=gte.${now}&due_at=lte.${weekOut}&select=title,due_at,missing,score,points_possible&order=due_at.asc&limit=10`,
     { headers: brainHeaders }
   );
   if (!res.ok) return [];
@@ -60,7 +69,7 @@ async function fetchUpcomingAssignments(personId) {
 
 async function fetchExistingContext(personId) {
   const res = await fetch(
-    `${BRAIN_URL}/rest/v1/brain.context_window?person_id=eq.${personId}&select=computed_at,stress_level&limit=1`,
+    `${BRAIN_URL}/rest/v1/context_window?person_id=eq.${personId}&select=computed_at,stress_level&limit=1`,
     { headers: brainHeaders }
   );
   if (!res.ok) return null;
@@ -183,7 +192,7 @@ async function writeContextWindow(personId, context) {
     expires_at:          new Date(Date.now() + 8 * 60 * 60 * 1000).toISOString(),
   };
 
-  const res = await fetch(`${BRAIN_URL}/rest/v1/brain.context_window`, {
+  const res = await fetch(`${BRAIN_URL}/rest/v1/context_window`, {
     method:  "POST",
     headers: { ...brainHeaders, Prefer: "resolution=merge-duplicates,return=minimal" },
     body:    JSON.stringify(row),

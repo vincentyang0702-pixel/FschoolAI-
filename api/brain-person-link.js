@@ -46,9 +46,11 @@ export default async function handler(req, res) {
     "Content-Type":  "application/json",
   };
   const brainHeaders = {
-    "apikey":        brainKey,
-    "Authorization": `Bearer ${brainKey}`,
-    "Content-Type":  "application/json",
+    "apikey":          brainKey,
+    "Authorization":   `Bearer ${brainKey}`,
+    "Content-Type":    "application/json",
+    "Accept-Profile":  "neuro",   // persons table lives in neuro schema
+    "Content-Profile": "neuro",
   };
 
   try {

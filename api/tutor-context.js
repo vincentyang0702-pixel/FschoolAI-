@@ -65,9 +65,10 @@ export default async function handler(req, res) {
         `${brainUrl}/rest/v1/context_window?person_id=eq.${brainPersonId}&select=stress_level,momentum_state,active_deadline,recent_summary,what_to_focus_on,what_not_to_mention&limit=1`,
         {
           headers: {
-            "apikey":        brainKey,
-            "Authorization": `Bearer ${brainKey}`,
-            "Content-Type":  "application/json",
+            "apikey":         brainKey,
+            "Authorization":  `Bearer ${brainKey}`,
+            "Content-Type":   "application/json",
+            "Accept-Profile": "brain",   // context_window lives in brain schema
           },
         }
       ).then(r => r.ok ? r.json() : null).catch(() => null)

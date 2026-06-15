@@ -22,7 +22,8 @@ const fschool = createClient(
 
 const brain = createClient(
   process.env.BRAIN_SUPABASE_URL,
-  process.env.BRAIN_SUPABASE_KEY
+  process.env.BRAIN_SUPABASE_KEY,
+  { db: { schema: "brain" } }   // signals + context_window live in brain schema
 );
 
 export default async function handler(req, res) {

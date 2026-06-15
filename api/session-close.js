@@ -188,10 +188,12 @@ RULES:
     // Only fires if brain env vars are set AND user has a brain_person_id
     if (brainUrl && brainKey && userProfile?.brain_person_id) {
       const brainHeaders = {
-        "apikey":        brainKey,
-        "Authorization": `Bearer ${brainKey}`,
-        "Content-Type":  "application/json",
-        "Prefer":        "return=minimal",
+        "apikey":          brainKey,
+        "Authorization":   `Bearer ${brainKey}`,
+        "Content-Type":    "application/json",
+        "Prefer":          "return=minimal",
+        "Accept-Profile":  "brain",   // signals + context_window live in brain schema
+        "Content-Profile": "brain",
       };
 
       // Write session_end signal to brain.signals
@@ -213,7 +215,7 @@ RULES:
         created_at:  new Date().toISOString(),
       };
 
-      fetch(`${brainUrl}/rest/v1/brain.signals`, {
+      fetch(`${brainUrl}/rest/v1/signals`, {
         method: "POST", headers: brainHeaders, body: JSON.stringify(brainSignal),
       }).catch(err => console.error("[session-close] brain signal write failed:", err.message));
 
@@ -226,7 +228,7 @@ RULES:
         momentum_state: "neutral",
         stress_level:   0.5,
       };
-      fetch(`${brainUrl}/rest/v1/brain.context_window`, {
+      fetch(`${brainUrl}/rest/v1/context_window`, {
         method: "POST",
         headers: { ...brainHeaders, "Prefer": "resolution=merge-duplicates,return=minimal" },
         body: JSON.stringify(contextUpdate),
