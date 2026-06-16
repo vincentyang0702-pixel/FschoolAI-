@@ -30,7 +30,7 @@ function TierBadge({ tier }) {
   );
 }
 
-const TABS  = ["University", "City", "Country", "Continent", "Global"];
+const TABS  = ["University", "City", "Country", "Global"];
 const SORTS = ["Tokens", "GPA", "Streak", "Study Time"]; // Tokens first = default
 
 const SORT_COL = { GPA: "gpa", Streak: "streak", "Study Time": "study_time", Tokens: "points" };
@@ -58,7 +58,6 @@ const TAB_FILTER_COL = {
   University: "school",
   City:       "city",
   Country:    "country",
-  Continent:  "continent",
   Global:     null,
 };
 
@@ -66,7 +65,6 @@ const TAB_SUBLABEL = {
   University: r => r.city ?? r.country ?? null,
   City:       r => r.school ?? null,
   Country:    r => r.city ?? null,
-  Continent:  r => r.country ?? null,
   Global:     r => r.school ?? null,
 };
 
@@ -225,7 +223,7 @@ export default function Leaderboard() {
   const scopeLabel = tabName === "Global" ? "Global" : `${tabName}: ${loc[TAB_FILTER_COL[tabName]] ?? "—"}`;
 
   return (
-    <div>
+    <div style={{ maxWidth: "800px", margin: "0 auto", width: "100%" }}>
       {/* Header */}
       <div style={{ marginBottom: "24px" }}>
         <h1 style={{ fontSize: "26px", fontWeight: "600", color: "var(--text-primary)", letterSpacing: "-0.3px", marginBottom: "4px" }}>
