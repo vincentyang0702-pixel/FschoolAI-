@@ -560,6 +560,11 @@ function RoomView({ room, onLeave, roomCounts }) {
   const [showGoalPrompt,     setShowGoalPrompt]     = useState(false);
   const [showSummary,        setShowSummary]        = useState(false);
   const [summaryDurationSecs,setSummaryDurationSecs]= useState(0);
+  // Phase 2C — AI Study Buddy
+  const [showBuddy,          setShowBuddy]          = useState(false);
+  const [buddyQAs,           setBuddyQAs]           = useState([]);
+  const [buddyStreaming,     setBuddyStreaming]     = useState(false);
+  const [courseName,         setCourseName]         = useState("");
 
   const channelRef          = useRef(null);
   const reqChRef            = useRef(null);
@@ -571,6 +576,8 @@ function RoomView({ room, onLeave, roomCounts }) {
   const pomoRef             = useRef(null);
   const pomoAutoAdvancedRef = useRef(null);
   const goalTextRef         = useRef("");
+  const buddyCallsRef       = useRef([]);   // timestamps for rate limiting (5/5min)
+  const buddyAbortRef       = useRef(null); // AbortController for current buddy stream
 
   const isHost = room.created_by === userId;
 
@@ -579,6 +586,7 @@ function RoomView({ room, onLeave, roomCounts }) {
     startSession();
     subscribePresence();
     fetchPomodoroState();
+    fetchCourseName();
     if (isHost) subscribeRequests();
     const timer = setInterval(() => setTick(n => n + 1), 1000);
     const handleUnload = () => void endSession();
@@ -587,6 +595,8 @@ function RoomView({ room, onLeave, roomCounts }) {
       clearInterval(timer);
       clearTimeout(workingOnDebounce.current);
       window.removeEventListener("beforeunload", handleUnload);
+      // Abort any in-flight buddy stream on unmount
+      buddyAbortRef.current?.abort();
       endSession();
     };
   }, []); // eslint-disable-line
@@ -701,6 +711,20 @@ function RoomView({ room, onLeave, roomCounts }) {
     .on("broadcast", { event: "pomodoro" }, ({ payload }) => {
       setPomo(payload);
     })
+    // AI Buddy — shared Q&A events
+    .on("broadcast", { event: "buddy_question" }, ({ payload }) => {
+      setBuddyQAs(prev => {
+        if (prev.some(q => q.id === payload.qaId)) return prev;
+        return [...prev, { id: payload.qaId, question: payload.question, askerName: payload.askerName, answer: "", done: false, streaming: true }];
+      });
+      setShowBuddy(true);
+    })
+    .on("broadcast", { event: "buddy_stream" }, ({ payload }) => {
+      setBuddyQAs(prev => prev.map(qa => qa.id === payload.qaId ? { ...qa, answer: payload.text } : qa));
+    })
+    .on("broadcast", { event: "buddy_done" }, ({ payload }) => {
+      setBuddyQAs(prev => prev.map(qa => qa.id === payload.qaId ? { ...qa, answer: payload.text, done: true, streaming: false } : qa));
+    })
     .subscribe(async (status) => {
       if (status === "SUBSCRIBED") await ch.track(presencePayload());
     });
@@ -801,6 +825,120 @@ function RoomView({ room, onLeave, roomCounts }) {
     onLeave();
   }
 
+  async function fetchCourseName() {
+    if (!room.course_id) return;
+    const { data } = await supabase.from("courses").select("name, course_code").eq("id", room.course_id).maybeSingle();
+    if (data) setCourseName(data.course_code ? `${data.course_code} — ${data.name}` : data.name);
+  }
+
+  async function handleBuddyAsk(question) {
+    if (buddyStreaming) return;
+    // Rate limit: 5 calls per 5-minute window, per client
+    const now = Date.now();
+    buddyCallsRef.current = buddyCallsRef.current.filter(t => now - t < 5 * 60 * 1000);
+    if (buddyCallsRef.current.length >= 5) return;
+    buddyCallsRef.current.push(now);
+
+    const qaId       = `${userId}-${now}`;
+    const askerName  = userData?.name ?? "Someone";
+
+    // Add to local state immediately (asker doesn't receive own broadcast)
+    setBuddyQAs(prev => [...prev, { id: qaId, question, askerName, answer: "", done: false, streaming: true }]);
+
+    // Notify room that a question was asked
+    if (channelRef.current) {
+      channelRef.current.send({ type: "broadcast", event: "buddy_question",
+        payload: { qaId, question, askerName } }).catch(() => {});
+    }
+
+    // System prompt: inject room context the buddy knows automatically
+    const workingOnLines = members
+      .filter(m => m.workingOn)
+      .map(m => `  • ${m.name}: ${m.workingOn}`)
+      .join("\n") || "  (no goals set yet)";
+    const system = [
+      "You are an AI study buddy in a shared study room. Be concise (2-4 sentences unless depth truly warrants more), encouraging, and academically accurate. Format for readability — use a short list if it helps, but default to prose.",
+      "",
+      "ROOM CONTEXT (injected automatically — do not repeat this back):",
+      `Course: ${courseName || "General study session"}`,
+      "Students currently studying:",
+      workingOnLines,
+      "",
+      "Answer the question directly. If you don't have enough information, say what you know and suggest where to find more.",
+    ].join("\n");
+
+    setBuddyStreaming(true);
+    buddyAbortRef.current = new AbortController();
+
+    try {
+      const resp = await fetch("/api/claude", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ stream: true, messages: [{ role: "user", content: question }], system, max_tokens: 600 }),
+        signal: buddyAbortRef.current.signal,
+      });
+
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        setBuddyQAs(prev => prev.map(qa => qa.id === qaId
+          ? { ...qa, answer: errData.error || "Sorry, I couldn't answer that right now. Try again.", done: true, streaming: false }
+          : qa));
+        return;
+      }
+
+      const reader  = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let sseBuffer = "", fullText = "";
+      let broadcastTimer = null;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split("\n");
+        sseBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          try {
+            const evt = JSON.parse(data);
+            if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta") {
+              fullText += evt.delta.text ?? "";
+              setBuddyQAs(prev => prev.map(qa => qa.id === qaId ? { ...qa, answer: fullText } : qa));
+              // Broadcast accumulated text every 300ms (debounced) — not per-token
+              clearTimeout(broadcastTimer);
+              broadcastTimer = setTimeout(() => {
+                if (channelRef.current) {
+                  channelRef.current.send({ type: "broadcast", event: "buddy_stream",
+                    payload: { qaId, text: fullText } }).catch(() => {});
+                }
+              }, 300);
+            }
+          } catch {}
+        }
+      }
+
+      // Final: mark done locally + broadcast complete answer
+      clearTimeout(broadcastTimer);
+      setBuddyQAs(prev => prev.map(qa => qa.id === qaId
+        ? { ...qa, answer: fullText, done: true, streaming: false } : qa));
+      if (channelRef.current) {
+        channelRef.current.send({ type: "broadcast", event: "buddy_done",
+          payload: { qaId, text: fullText } }).catch(() => {});
+      }
+    } catch (err) {
+      if (err?.name !== "AbortError") {
+        setBuddyQAs(prev => prev.map(qa => qa.id === qaId
+          ? { ...qa, answer: "Connection error. Please try again.", done: true, streaming: false }
+          : qa));
+      }
+    } finally {
+      setBuddyStreaming(false);
+      buddyAbortRef.current = null;
+    }
+  }
+
   async function handleCloseRoom() {
     await supabase.from("study_rooms").update({ is_active: false }).eq("id", room.id);
     if (channelRef.current) {
@@ -836,6 +974,17 @@ function RoomView({ room, onLeave, roomCounts }) {
           </p>
         </div>
         <div style={{ display:"flex", gap:"8px", flexShrink:0 }}>
+          <button
+            onClick={() => setShowBuddy(b => !b)}
+            style={{
+              ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px",
+              background: showBuddy ? "rgba(111,179,196,0.1)" : "none",
+              borderColor: showBuddy ? "rgba(111,179,196,0.3)" : "rgba(255,255,255,0.09)",
+              color: showBuddy ? "#6fb3c4" : "var(--text-dim)",
+            }}
+          >
+            🤖 AI
+          </button>
           <button
             onClick={() => setShowInvite(true)}
             style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px" }}
@@ -955,6 +1104,17 @@ function RoomView({ room, onLeave, roomCounts }) {
             <MemberCard key={m.userId} member={m} isMe={m.userId === userId} />
           ))}
         </div>
+      )}
+
+      {/* AI Study Buddy panel — collapsible, shared Q&A */}
+      {showBuddy && (
+        <BuddyPanel
+          qaItems={buddyQAs}
+          streaming={buddyStreaming}
+          callsLeft={Math.max(0, 5 - buddyCallsRef.current.filter(t => Date.now() - t < 5 * 60 * 1000).length)}
+          onAsk={handleBuddyAsk}
+          onClose={() => setShowBuddy(false)}
+        />
       )}
 
       {showInvite && (
@@ -1194,6 +1354,131 @@ function SessionSummaryModal({ durationSecs, goal, onConfirm, onBack }) {
             👍 Got it!
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BuddyPanel — AI Study Buddy: shared Q&A, streaming, rate-limited
+// ─────────────────────────────────────────────────────────────────────────────
+function BuddyPanel({ qaItems, streaming, callsLeft, onAsk, onClose }) {
+  const [input, setInput] = useState("");
+  const bottomRef = useRef(null);
+
+  // Auto-scroll to latest answer
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [qaItems]);
+
+  function handleSend() {
+    const q = input.trim();
+    if (!q || streaming || callsLeft <= 0) return;
+    setInput("");
+    onAsk(q);
+  }
+
+  return (
+    <div style={{
+      border: "1px solid rgba(111,179,196,0.2)",
+      borderRadius: "14px",
+      background: "rgba(111,179,196,0.03)",
+      marginBottom: "20px",
+      overflow: "hidden",
+    }}>
+      {/* Header */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "12px 16px",
+        borderBottom: "1px solid rgba(111,179,196,0.12)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <span style={{ fontSize: "15px" }}>🤖</span>
+          <span style={{ fontSize: "13px", fontWeight: "600", color: "#6fb3c4" }}>AI Study Buddy</span>
+          <span style={{ fontSize: "11px", color: "var(--text-dim)", background: "rgba(255,255,255,0.05)", borderRadius: "6px", padding: "2px 7px" }}>
+            shared with room
+          </span>
+        </div>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--text-dim)", fontSize: "18px", cursor: "pointer", lineHeight: 1, padding: "0 2px" }}>×</button>
+      </div>
+
+      {/* Q&A history */}
+      <div style={{ maxHeight: "340px", overflowY: "auto", padding: qaItems.length ? "12px 16px" : "0" }}>
+        {qaItems.length === 0 && !streaming && (
+          <div style={{ padding: "20px 16px", textAlign: "center" }}>
+            <p style={{ fontSize: "13px", color: "var(--text-dim)", lineHeight: 1.5 }}>
+              Ask anything about the coursework.<br />
+              <span style={{ fontSize: "12px", opacity: 0.7 }}>Everyone in the room sees the answer.</span>
+            </p>
+          </div>
+        )}
+        {qaItems.map((qa, i) => (
+          <div key={qa.id} style={{ marginBottom: i < qaItems.length - 1 ? "18px" : "4px" }}>
+            {/* Question */}
+            <div style={{ display: "flex", alignItems: "baseline", gap: "6px", marginBottom: "6px" }}>
+              <span style={{ fontSize: "11px", color: "var(--text-dim)", flexShrink: 0 }}>{qa.askerName}</span>
+              <p style={{ fontSize: "13px", color: "var(--text-primary)", fontWeight: "500", margin: 0 }}>{qa.question}</p>
+            </div>
+            {/* Answer */}
+            <div style={{
+              background: "rgba(111,179,196,0.06)", border: "1px solid rgba(111,179,196,0.12)",
+              borderRadius: "10px", padding: "10px 14px",
+              fontSize: "13px", color: "var(--text-secondary)", lineHeight: "1.65",
+              whiteSpace: "pre-wrap",
+            }}>
+              {qa.answer ? (
+                <>
+                  {qa.answer}
+                  {qa.streaming && <span style={{ opacity: 0.4, animation: "blink 1s step-end infinite" }}>|</span>}
+                </>
+              ) : (
+                <span style={{ color: "var(--text-dim)", fontStyle: "italic" }}>
+                  {qa.streaming ? "Thinking…" : "—"}
+                </span>
+              )}
+            </div>
+          </div>
+        ))}
+        <div ref={bottomRef} />
+      </div>
+
+      {/* Input */}
+      <div style={{ padding: "10px 16px 14px", borderTop: qaItems.length ? "1px solid rgba(255,255,255,0.05)" : "none" }}>
+        <div style={{ display: "flex", gap: "8px" }}>
+          <input
+            value={input}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && !e.shiftKey && handleSend()}
+            placeholder={callsLeft <= 0 ? "Rate limit reached — try again in a few minutes" : "Ask about the coursework…"}
+            disabled={streaming || callsLeft <= 0}
+            maxLength={400}
+            style={{
+              flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
+              borderRadius: "9px", padding: "9px 12px", color: "var(--text-primary)", fontSize: "13px",
+              outline: "none", fontFamily: "inherit", opacity: (streaming || callsLeft <= 0) ? 0.5 : 1,
+              transition: "border-color 0.15s",
+            }}
+            onFocus={e => (e.target.style.borderColor = "rgba(111,179,196,0.3)")}
+            onBlur={e  => (e.target.style.borderColor = "rgba(255,255,255,0.09)")}
+          />
+          <button
+            onClick={handleSend}
+            disabled={!input.trim() || streaming || callsLeft <= 0}
+            style={{
+              background: "rgba(111,179,196,0.12)", color: "#6fb3c4",
+              border: "1px solid rgba(111,179,196,0.28)", borderRadius: "9px",
+              padding: "9px 16px", fontSize: "13px", fontWeight: "600",
+              cursor: (!input.trim() || streaming || callsLeft <= 0) ? "default" : "pointer",
+              fontFamily: "inherit", opacity: (!input.trim() || streaming || callsLeft <= 0) ? 0.4 : 1,
+              flexShrink: 0,
+            }}
+          >
+            {streaming ? "…" : "Ask →"}
+          </button>
+        </div>
+        <p style={{ fontSize: "11px", color: "var(--text-dim)", marginTop: "6px" }}>
+          {callsLeft <= 0 ? "Rate limit reached — resets in a few minutes" : `${callsLeft} question${callsLeft === 1 ? "" : "s"} remaining this window`}
+        </p>
       </div>
     </div>
   );
