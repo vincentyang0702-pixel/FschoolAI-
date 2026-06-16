@@ -1,4 +1,4 @@
-// StudyRooms.jsx — Steps 2-4: live lobby, invite-only request/accept, friend invites.
+// StudyRooms.jsx — Phase 2A: Shared Pomodoro + Goals + Session Summary
 // Architecture: root manages global-studying presence channel once; Lobby +
 // RoomView receive counts as props. Keeps room core + friends layer modular.
 
@@ -15,18 +15,33 @@ function generateRoomCode() {
   return code;
 }
 
+// ── Pomodoro helpers ──────────────────────────────────────────────────────────
+// pomo shape: { phase:'focus'|'break'|'idle', paused:bool,
+//   startedAt:ms|null, durationSec:number, pausedRemaining:number|null }
+function getRemaining(p) {
+  if (!p || p.phase === "idle") return null;
+  if (p.paused) return p.pausedRemaining ?? p.durationSec;
+  const elapsed = (Date.now() - p.startedAt) / 1000;
+  return Math.max(0, p.durationSec - elapsed);
+}
+
+function formatPomoTime(secs) {
+  if (secs == null) return "--:--";
+  const total = Math.ceil(secs);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
+
 // ── Friends adapter ───────────────────────────────────────────────────────────
 // Wraps Siddharth's friends.js so the invite UI doesn't depend on its internals.
-// listFriends returns [{ friend_id, friends_since }] — enrich with names via
-// getUserProfiles. If the RPC doesn't exist yet (migrations 004/005 not run),
-// the RPC throws → caught here → returns [] gracefully.
 async function getFriendsForInvite(userId) {
   try {
     const { listFriends, getUserProfiles } = await import("../api/friends.js");
-    const rows = await listFriends(userId); // [{ friend_id, friends_since }]
+    const rows = await listFriends(userId);
     if (!rows?.length) return [];
     const ids      = rows.map(r => r.friend_id);
-    const profiles = await getUserProfiles(ids); // { [id]: { name, email } }
+    const profiles = await getUserProfiles(ids);
     return rows.map(r => ({
       id:           r.friend_id,
       name:         profiles[r.friend_id]?.name  ?? "Unknown",
@@ -34,7 +49,7 @@ async function getFriendsForInvite(userId) {
       friends_since: r.friends_since,
     }));
   } catch {
-    return []; // RPC missing (migrations not run) or user has no friends
+    return [];
   }
 }
 
@@ -46,11 +61,10 @@ export default function StudyRooms() {
   const [view,        setView]        = useState("lobby");
   const [activeRoom,  setActiveRoom]  = useState(null);
   const [globalState, setGlobalState] = useState({});
-  const [pendingInvites, setPendingInvites] = useState([]); // root-level so visible in room too
+  const [pendingInvites, setPendingInvites] = useState([]);
   const globalCh   = useRef(null);
   const personalCh = useRef(null);
 
-  // Global presence — stays alive across Lobby ↔ RoomView transitions
   useEffect(() => {
     if (!userId) return;
     const ch = supabase.channel("global-studying", {
@@ -71,8 +85,6 @@ export default function StudyRooms() {
     };
   }, [userId]);
 
-  // Personal channel — stays alive always so invites/nudges arrive in-room too.
-  // Previously only subscribed in Lobby, so users missed invites while in a room.
   useEffect(() => {
     if (!userId) return;
     const ch = supabase.channel(`user:${userId}`);
@@ -88,7 +100,6 @@ export default function StudyRooms() {
         }, ...prev].slice(0, 5));
       }
     })
-    // postgres_changes for nudges on personal channel (when sender/receiver may not both be online)
     .on("postgres_changes", {
       event: "INSERT", schema: "public", table: "nudges",
       filter: `to_user_id=eq.${userId}`,
@@ -111,13 +122,9 @@ export default function StudyRooms() {
     }
   }
 
-  // Count UNIQUE users (by key) — never double-count a user with multiple tabs/sessions.
-  // Supabase Presence keys by userId; each key can have multiple session entries.
-  // Object.keys gives unique users; Object.values().flat() inflates on multi-tab.
   const totalOnline = Object.keys(globalState).length;
   const roomCounts  = {};
   for (const sessions of Object.values(globalState)) {
-    // Take the first (latest) session's roomId for this user — one vote per user per room.
     const roomId = sessions?.[0]?.roomId;
     if (roomId) roomCounts[roomId] = (roomCounts[roomId] || 0) + 1;
   }
@@ -154,16 +161,15 @@ export default function StudyRooms() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Lobby — live room list + global count + join / request flow
+// Lobby
 // ─────────────────────────────────────────────────────────────────────────────
-// pendingInvites + onDismissInvite now come from root (so invites arrive even while in a room)
 function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismissInvite }) {
   const { userId, userData, courses } = useApp();
   const [rooms,       setRooms]       = useState([]);
   const [loading,     setLoading]     = useState(true);
   const [showCreate,  setShowCreate]  = useState(false);
   const [joiningId,    setJoiningId]    = useState(null);
-  const [pendingReqs,  setPendingReqs]  = useState({}); // roomId → 'requested'|'accepted'
+  const [pendingReqs,  setPendingReqs]  = useState({});
   const [codeInput,    setCodeInput]    = useState("");
   const [codeError,    setCodeError]    = useState("");
   const [codeLookingUp, setCodeLookingUp] = useState(false);
@@ -171,7 +177,6 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
   const onJoinRef       = useRef(onJoin);
   useEffect(() => { onJoinRef.current = onJoin; }, [onJoin]);
 
-  // Initial load — personal channel removed (now at root level)
   useEffect(() => {
     fetchRooms();
     fetchPendingRequests();
@@ -206,8 +211,6 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
 
   function subscribeToLobby() {
     const ch = supabase.channel("lobby-watch-" + userId);
-
-    // New rooms appear live
     ch.on("postgres_changes", {
       event: "INSERT", schema: "public", table: "study_rooms",
     }, (payload) => {
@@ -218,15 +221,12 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
         });
       }
     });
-
-    // Request accepted by host
     ch.on("postgres_changes", {
       event: "UPDATE", schema: "public", table: "room_members",
       filter: `user_id=eq.${userId}`,
     }, (payload) => {
       if (payload.new?.status === "joined" && pendingReqs[payload.new.room_id] === "requested") {
         setPendingReqs(p => ({ ...p, [payload.new.room_id]: "accepted" }));
-        // Find room and auto-enter after brief delay (show "Accepted!")
         setRooms(prev => {
           const room = prev.find(r => r.id === payload.new.room_id);
           if (room) setTimeout(() => onJoinRef.current(room), 1200);
@@ -234,15 +234,11 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
         });
       }
     });
-
     ch.subscribe();
     lobbyChannelRef.current = ch;
   }
-  // Note: personal channel (invites/nudges) is now at root StudyRooms level
-  // so invites arrive even when the user is inside a room.
 
   async function handleCreate({ name, courseId, roomType }) {
-    // Generate a unique join code — retry up to 5 times on collision
     let room = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const join_code = generateRoomCode();
@@ -258,13 +254,11 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
         .select()
         .single();
       if (!error) { room = data; break; }
-      // Unique violation on join_code → retry with a new code
       if (!error.message?.includes("unique") && !error.message?.includes("join_code")) {
         console.error("[rooms] create:", error.message); return;
       }
     }
     if (!room) { console.error("[rooms] create: failed to generate unique code"); return; }
-
     await supabase.from("room_members").upsert(
       { room_id: room.id, user_id: userId, role: "host", status: "joined" },
       { onConflict: "room_id,user_id" }
@@ -274,17 +268,13 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
   }
 
   async function handleJoin(room) {
-    if (pendingReqs[room.id] === "requested") return; // already requested, show waiting state
-    // Already joined (fetchPendingRequests returned 'joined') OR accepted → re-enter directly
+    if (pendingReqs[room.id] === "requested") return;
     if (pendingReqs[room.id] === "accepted" || pendingReqs[room.id] === "joined") {
       onJoin(room); return;
     }
     setJoiningId(room.id);
-
     const isHost = room.created_by === userId;
-
     if (room.room_type === "invite" && !isHost) {
-      // Non-host member requesting access to an invite-only room
       const { error } = await supabase.from("room_members").upsert(
         { room_id: room.id, user_id: userId, role: "member", status: "requested" },
         { onConflict: "room_id,user_id" }
@@ -299,8 +289,6 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
       setJoiningId(null);
       return;
     }
-
-    // Host of an invite-only room OR any public room — join directly as correct role
     const { error } = await supabase.from("room_members").upsert(
       { room_id: room.id, user_id: userId,
         role: isHost ? "host" : "member", status: "joined" },
@@ -311,7 +299,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
   }
 
   async function acceptInvite(invite) {
-    onDismissInvite?.(invite.id); // remove from root state
+    onDismissInvite?.(invite.id);
     await supabase.from("room_members").upsert(
       { room_id: invite.room_id, user_id: userId, role: "member", status: "joined" },
       { onConflict: "room_id,user_id" }
@@ -334,7 +322,6 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
       .maybeSingle();
     setCodeLookingUp(false);
     if (!room) { setCodeError("No active room found with that code."); return; }
-    // Code is the authorization — join directly regardless of room_type
     await supabase.from("room_members").upsert(
       { room_id: room.id, user_id: userId, role: "member", status: "joined" },
       { onConflict: "room_id,user_id" }
@@ -347,7 +334,6 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
 
   return (
     <div>
-      {/* Header */}
       <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:"28px" }}>
         <div>
           <p style={S.sectionLabel}>Study Rooms</p>
@@ -368,7 +354,6 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
         </button>
       </div>
 
-      {/* Pending invites banner — driven by root-level pendingInvites */}
       {pendingInvites.length > 0 && (
         <div style={{ marginBottom:"16px", display:"flex", flexDirection:"column", gap:"8px" }}>
           {pendingInvites.map(inv => (
@@ -389,17 +374,12 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
         </div>
       )}
 
-      {/* Rooms */}
       {loading ? (
         <p style={{ color:"var(--text-dim)", fontSize:"14px" }}>Loading rooms…</p>
       ) : rooms.length === 0 ? (
         <div style={S.emptyState}>
-          <p style={{ color:"var(--text-secondary)", fontSize:"15px", fontWeight:"500", marginBottom:"6px" }}>
-            No active rooms
-          </p>
-          <p style={{ color:"var(--text-dim)", fontSize:"13px" }}>
-            Create one and invite friends to study together.
-          </p>
+          <p style={{ color:"var(--text-secondary)", fontSize:"15px", fontWeight:"500", marginBottom:"6px" }}>No active rooms</p>
+          <p style={{ color:"var(--text-dim)", fontSize:"13px" }}>Create one and invite friends to study together.</p>
         </div>
       ) : (
         <div style={{ display:"flex", flexDirection:"column", gap:"10px" }}>
@@ -418,7 +398,6 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
 
       <div style={{ display:"flex", alignItems:"center", gap:"8px", marginTop:"16px", marginBottom:"4px" }}>
         <button onClick={fetchRooms} style={{ ...S.ghostBtn, marginTop:0 }}>↻ Refresh</button>
-        {/* Join with code — works for private rooms, bypasses host approval */}
         <div style={{ display:"flex", gap:"6px", flex:1 }}>
           <input
             value={codeInput}
@@ -429,8 +408,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
             style={{
               flex:1, background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.09)",
               borderRadius:"8px", padding:"7px 12px", color:"var(--text-primary)", fontSize:"13px",
-              outline:"none", fontFamily:"monospace", letterSpacing:"2px",
-              transition:"border-color 0.15s",
+              outline:"none", fontFamily:"monospace", letterSpacing:"2px", transition:"border-color 0.15s",
             }}
             onFocus={e => (e.target.style.borderColor="rgba(255,255,255,0.22)")}
             onBlur={e  => (e.target.style.borderColor="rgba(255,255,255,0.09)")}
@@ -438,10 +416,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
           <button
             onClick={handleJoinByCode}
             disabled={codeInput.length < 6 || codeLookingUp}
-            style={{
-              ...S.accentBtn, padding:"7px 14px", fontSize:"12px",
-              opacity: codeInput.length < 6 ? 0.4 : 1,
-            }}
+            style={{ ...S.accentBtn, padding:"7px 14px", fontSize:"12px", opacity: codeInput.length < 6 ? 0.4 : 1 }}
           >
             {codeLookingUp ? "…" : "Join"}
           </button>
@@ -463,7 +438,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RoomCard — with live member count + pending states
+// RoomCard
 // ─────────────────────────────────────────────────────────────────────────────
 function RoomCard({ room, liveCount, joining, pendingStatus, onJoin }) {
   const S = styles;
@@ -473,9 +448,7 @@ function RoomCard({ room, liveCount, joining, pendingStatus, onJoin }) {
     pendingStatus === "requested" ? "Waiting for host…" :
     joining                       ? "Joining…" :
     room.room_type === "invite"   ? "Request to join" : "Join";
-
   const btnDisabled = joining || pendingStatus === "requested" || pendingStatus === "accepted";
-
   return (
     <div style={S.card}>
       <div style={{ flex:1, minWidth:0 }}>
@@ -495,13 +468,7 @@ function RoomCard({ room, liveCount, joining, pendingStatus, onJoin }) {
       <button
         onClick={onJoin}
         disabled={btnDisabled}
-        style={{
-          ...S.accentBtn,
-          opacity: btnDisabled ? 0.5 : 1,
-          cursor:  btnDisabled ? "default" : "pointer",
-          fontSize: "12px",
-          padding: "7px 14px",
-        }}
+        style={{ ...S.accentBtn, opacity: btnDisabled ? 0.5 : 1, cursor: btnDisabled ? "default" : "pointer", fontSize:"12px", padding:"7px 14px" }}
       >
         {btnLabel}
       </button>
@@ -510,7 +477,7 @@ function RoomCard({ room, liveCount, joining, pendingStatus, onJoin }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CreateRoomModal — course_id fix: Number() parse, null when empty
+// CreateRoomModal
 // ─────────────────────────────────────────────────────────────────────────────
 function CreateRoomModal({ courses, onCreate, onClose }) {
   const [name,     setName]     = useState("");
@@ -532,7 +499,6 @@ function CreateRoomModal({ courses, onCreate, onClose }) {
         <h2 style={{ fontSize:"20px", fontWeight:"700", color:"var(--text-primary)", marginBottom:"22px" }}>
           Create a Room
         </h2>
-
         <label style={S.fieldLabel}>Room name</label>
         <input
           autoFocus
@@ -542,21 +508,15 @@ function CreateRoomModal({ courses, onCreate, onClose }) {
           placeholder="e.g. CDS151 Study Session"
           style={S.input}
         />
-
         <label style={S.fieldLabel}>Course (optional)</label>
         <select value={courseId} onChange={e => setCourseId(e.target.value)} style={S.input}>
           <option value="">No course / general</option>
           {(courses || []).map(c => (
-            // Only use c.dbId (the actual DB BIGINT pk) as the value.
-            // If dbId is absent (courses from syncCanvasData before the next
-            // loadCanvasData runs), value="" so handleCreate sends null — never
-            // a canvas_course_id string that would FK-fail.
             <option key={c.dbId ?? c.id} value={c.dbId || ""} disabled={!c.dbId}>
               {c.courseCode ? `${c.courseCode} — ${c.name}` : c.name}{!c.dbId ? " (sync to link)" : ""}
             </option>
           ))}
         </select>
-
         <div style={{ display:"flex", gap:"8px", marginBottom:"22px" }}>
           {["public","invite"].map(t => (
             <button key={t} onClick={() => setRoomType(t)} style={{
@@ -571,7 +531,6 @@ function CreateRoomModal({ courses, onCreate, onClose }) {
             </button>
           ))}
         </div>
-
         <div style={{ display:"flex", gap:"10px" }}>
           <button onClick={onClose} style={S.ghostBtnLarge}>Cancel</button>
           <button
@@ -588,38 +547,126 @@ function CreateRoomModal({ courses, onCreate, onClose }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RoomView — presence + requests (host) + invite friends
+// RoomView — Phase 2A: + Pomodoro, Goal prompt, Session summary
 // ─────────────────────────────────────────────────────────────────────────────
 function RoomView({ room, onLeave, roomCounts }) {
   const { userId, userData } = useApp();
-  const [members,       setMembers]       = useState([]);
-  const [workingOn,     setWorkingOn]     = useState("");
-  const [requests,      setRequests]      = useState([]); // pending join requests (host only)
-  const [showInvite,    setShowInvite]    = useState(false);
-  const [tick,          setTick]          = useState(0);
-  const channelRef        = useRef(null);
-  const reqChRef          = useRef(null);
-  const sessionIdRef      = useRef(null);
-  const joinedAtRef       = useRef(Date.now());
-  const workingOnRef      = useRef("");
-  const leftRef           = useRef(false);
-  const workingOnDebounce = useRef(null);   // debounce timer for presence track
-  const isHost            = room.created_by === userId;
+  const [members,            setMembers]            = useState([]);
+  const [workingOn,          setWorkingOn]          = useState("");
+  const [requests,           setRequests]           = useState([]);
+  const [showInvite,         setShowInvite]         = useState(false);
+  const [tick,               setTick]               = useState(0);
+  const [pomo,               setPomo]               = useState(null);
+  const [showGoalPrompt,     setShowGoalPrompt]     = useState(false);
+  const [showSummary,        setShowSummary]        = useState(false);
+  const [summaryDurationSecs,setSummaryDurationSecs]= useState(0);
 
+  const channelRef          = useRef(null);
+  const reqChRef            = useRef(null);
+  const sessionIdRef        = useRef(null);
+  const joinedAtRef         = useRef(Date.now());
+  const workingOnRef        = useRef("");
+  const leftRef             = useRef(false);
+  const workingOnDebounce   = useRef(null);
+  const pomoRef             = useRef(null);
+  const pomoAutoAdvancedRef = useRef(null);
+  const goalTextRef         = useRef("");
+
+  const isHost = room.created_by === userId;
+
+  // Main setup
   useEffect(() => {
     startSession();
     subscribePresence();
+    fetchPomodoroState();
     if (isHost) subscribeRequests();
     const timer = setInterval(() => setTick(n => n + 1), 1000);
     const handleUnload = () => void endSession();
     window.addEventListener("beforeunload", handleUnload);
     return () => {
       clearInterval(timer);
-      clearTimeout(workingOnDebounce.current); // cancel any pending presence update
+      clearTimeout(workingOnDebounce.current);
       window.removeEventListener("beforeunload", handleUnload);
       endSession();
     };
   }, []); // eslint-disable-line
+
+  // Keep pomoRef in sync for use in effects without stale closure
+  useEffect(() => { pomoRef.current = pomo; }, [pomo]);
+
+  // Show goal prompt 500ms after entering, only once
+  useEffect(() => {
+    const t = setTimeout(() => setShowGoalPrompt(true), 500);
+    return () => clearTimeout(t);
+  }, []);
+
+  // Host: auto-advance timer phase when countdown hits zero
+  useEffect(() => {
+    if (!isHost) return;
+    const p = pomoRef.current;
+    if (!p || p.phase === "idle" || p.paused) return;
+    const rem = getRemaining(p);
+    if (rem !== null && rem <= 0 && pomoAutoAdvancedRef.current !== p.startedAt) {
+      pomoAutoAdvancedRef.current = p.startedAt;
+      const nextPhase = p.phase === "focus" ? "break" : "focus";
+      const nextDur   = nextPhase === "focus" ? 25 * 60 : 5 * 60;
+      const next = { phase: nextPhase, paused: false, startedAt: Date.now(), durationSec: nextDur, pausedRemaining: null };
+      setPomo(next);
+      pomoRef.current = next;
+      if (channelRef.current) {
+        channelRef.current.send({ type: "broadcast", event: "pomodoro", payload: next }).catch(() => {});
+      }
+      supabase.from("study_rooms").update({ pomodoro_state: next }).eq("id", room.id).then(() => {});
+    }
+  }, [tick]); // eslint-disable-line
+
+  async function fetchPomodoroState() {
+    const { data } = await supabase
+      .from("study_rooms").select("pomodoro_state").eq("id", room.id).single();
+    if (data?.pomodoro_state) {
+      const p = data.pomodoro_state;
+      const rem = getRemaining(p);
+      // If the phase expired while the user was navigating in, treat as idle
+      if (p.phase !== "idle" && !p.paused && rem !== null && rem <= 0) {
+        setPomo({ phase: "idle", paused: false, startedAt: null, durationSec: 25 * 60, pausedRemaining: null });
+      } else {
+        setPomo(p);
+      }
+    }
+  }
+
+  function broadcastAndSavePomo(state) {
+    setPomo(state);
+    pomoRef.current = state;
+    if (channelRef.current) {
+      channelRef.current.send({ type: "broadcast", event: "pomodoro", payload: state }).catch(() => {});
+    }
+    supabase.from("study_rooms").update({ pomodoro_state: state }).eq("id", room.id).then(() => {});
+  }
+
+  function handlePomoStart() {
+    broadcastAndSavePomo({ phase: "focus", paused: false, startedAt: Date.now(), durationSec: 25 * 60, pausedRemaining: null });
+  }
+  function handlePomoPause() {
+    const p = pomoRef.current;
+    if (!p || p.phase === "idle" || p.paused) return;
+    broadcastAndSavePomo({ ...p, paused: true, pausedRemaining: Math.max(0, getRemaining(p)) });
+  }
+  function handlePomoResume() {
+    const p = pomoRef.current;
+    if (!p || !p.paused) return;
+    broadcastAndSavePomo({ phase: p.phase, paused: false, startedAt: Date.now(), durationSec: p.pausedRemaining ?? p.durationSec, pausedRemaining: null });
+  }
+  function handlePomoReset() {
+    broadcastAndSavePomo({ phase: "idle", paused: false, startedAt: null, durationSec: 25 * 60, pausedRemaining: null });
+  }
+  function handlePomoSkip() {
+    const p = pomoRef.current;
+    if (!p || p.phase === "idle") return;
+    const nextPhase = p.phase === "focus" ? "break" : "focus";
+    const nextDur   = nextPhase === "focus" ? 25 * 60 : 5 * 60;
+    broadcastAndSavePomo({ phase: nextPhase, paused: false, startedAt: Date.now(), durationSec: nextDur, pausedRemaining: null });
+  }
 
   async function startSession() {
     const { data } = await supabase
@@ -648,11 +695,11 @@ function RoomView({ room, onLeave, roomCounts }) {
     ch.on("presence", { event: "sync" }, () => {
       setMembers(Object.values(ch.presenceState()).flat());
     })
-    // Host broadcast: room was closed — all non-host members leave cleanly
     .on("broadcast", { event: "room_closed" }, () => {
-      if (!leftRef.current) {
-        endSession().then(() => onLeave());
-      }
+      if (!leftRef.current) endSession().then(() => onLeave());
+    })
+    .on("broadcast", { event: "pomodoro" }, ({ payload }) => {
+      setPomo(payload);
     })
     .subscribe(async (status) => {
       if (status === "SUBSCRIBED") await ch.track(presencePayload());
@@ -661,24 +708,17 @@ function RoomView({ room, onLeave, roomCounts }) {
   }
 
   function subscribeRequests() {
-    // Load existing pending requests
     supabase.from("room_members")
       .select("user_id, joined_at")
       .eq("room_id", room.id)
       .eq("status", "requested")
-      .then(({ data }) => {
-        if (data?.length) enrichRequests(data);
-      });
-
-    // Watch for new requests in real time
+      .then(({ data }) => { if (data?.length) enrichRequests(data); });
     const ch = supabase.channel("requests-" + room.id);
     ch.on("postgres_changes", {
       event: "*", schema: "public", table: "room_members",
       filter: `room_id=eq.${room.id}`,
     }, (payload) => {
-      if (payload.new?.status === "requested") {
-        enrichRequests([payload.new]);
-      }
+      if (payload.new?.status === "requested") enrichRequests([payload.new]);
       if (payload.eventType === "DELETE" || payload.new?.status === "joined" || payload.new?.status === "declined") {
         setRequests(prev => prev.filter(r => r.userId !== (payload.new?.user_id || payload.old?.user_id)));
       }
@@ -688,8 +728,7 @@ function RoomView({ room, onLeave, roomCounts }) {
 
   async function enrichRequests(rows) {
     const ids = rows.map(r => r.user_id);
-    const { data: users } = await supabase
-      .from("users").select("id, name").in("id", ids);
+    const { data: users } = await supabase.from("users").select("id, name").in("id", ids);
     const nameMap = {};
     (users || []).forEach(u => { nameMap[u.id] = u.name; });
     setRequests(prev => {
@@ -705,18 +744,16 @@ function RoomView({ room, onLeave, roomCounts }) {
     await supabase.from("room_members")
       .update({ status: "joined" })
       .eq("room_id", room.id).eq("user_id", requesterId);
-    // Notify via nudges table (requester's lobby watches this)
     setRequests(prev => prev.filter(r => r.userId !== requesterId));
   }
 
   async function declineRequest(requesterId) {
     await supabase.from("room_members")
-      .delete()
-      .eq("room_id", room.id).eq("user_id", requesterId);
+      .delete().eq("room_id", room.id).eq("user_id", requesterId);
     setRequests(prev => prev.filter(r => r.userId !== requesterId));
   }
 
-  async function endSession() {
+  async function endSession(goalMet = null) {
     if (leftRef.current) return;
     leftRef.current = true;
     if (channelRef.current) {
@@ -731,9 +768,11 @@ function RoomView({ room, onLeave, roomCounts }) {
     if (sessionIdRef.current) {
       const durSecs = Math.round((Date.now() - joinedAtRef.current) / 1000);
       supabase.from("room_sessions").update({
-        left_at: new Date().toISOString(),
+        left_at:       new Date().toISOString(),
         duration_secs: durSecs,
-        working_on: workingOnRef.current || null,
+        working_on:    workingOnRef.current || null,
+        goal_text:     goalTextRef.current || workingOnRef.current || null,
+        goal_met:      goalMet,
       }).eq("id", sessionIdRef.current).then(() => {});
     }
     supabase.from("room_members").delete()
@@ -741,12 +780,8 @@ function RoomView({ room, onLeave, roomCounts }) {
   }
 
   function handleWorkingOnChange(val) {
-    // Update local state immediately (smooth typing)
     setWorkingOn(val);
     workingOnRef.current = val;
-    // Debounce presence track: fires 500ms after the user STOPS typing.
-    // This means re-track REPLACES the single presence entry (same userId key)
-    // without broadcasting on every keystroke — no duplicate names, no flicker.
     clearTimeout(workingOnDebounce.current);
     workingOnDebounce.current = setTimeout(async () => {
       if (channelRef.current) {
@@ -756,30 +791,33 @@ function RoomView({ room, onLeave, roomCounts }) {
   }
 
   async function handleLeave() {
-    await endSession();
+    setSummaryDurationSecs(Math.round((Date.now() - joinedAtRef.current) / 1000));
+    setShowSummary(true);
+  }
+
+  async function confirmLeave(goalMet) {
+    setShowSummary(false);
+    await endSession(goalMet);
     onLeave();
   }
 
   async function handleCloseRoom() {
-    // 1. Mark room inactive so it disappears from the lobby
     await supabase.from("study_rooms").update({ is_active: false }).eq("id", room.id);
-    // 2. Broadcast room_closed to all members on the presence channel
     if (channelRef.current) {
       try {
         await channelRef.current.send({ type: "broadcast", event: "room_closed", payload: {} });
       } catch {}
     }
-    // 3. Host's own cleanup and exit
     await endSession();
     onLeave();
   }
 
-  // Collective session stats
   const totalFocusMins = members.reduce((sum, m) => {
     return sum + Math.floor((Date.now() - m.joinedAt) / 60000);
   }, 0);
 
   const S = styles;
+  const remaining = getRemaining(pomo);
 
   return (
     <div>
@@ -821,6 +859,18 @@ function RoomView({ room, onLeave, roomCounts }) {
         </div>
       </div>
 
+      {/* Pomodoro Timer — centerpiece */}
+      <PomodoroPanel
+        pomo={pomo}
+        remaining={remaining}
+        isHost={isHost}
+        onStart={handlePomoStart}
+        onPause={handlePomoPause}
+        onResume={handlePomoResume}
+        onReset={handlePomoReset}
+        onSkip={handlePomoSkip}
+      />
+
       {/* Collective focus strip */}
       {members.length > 1 && (
         <div style={{
@@ -831,18 +881,14 @@ function RoomView({ room, onLeave, roomCounts }) {
           <span style={{ fontSize:"12px", color:"var(--text-secondary)" }}>
             Focus pact · {members.length} people, {totalFocusMins} min total this session
           </span>
-          <span style={{ fontSize:"12px", fontWeight:"600", color:"var(--color-accent)" }}>
-            Together 💪
-          </span>
+          <span style={{ fontSize:"12px", fontWeight:"600", color:"var(--color-accent)" }}>Together 💪</span>
         </div>
       )}
 
       {/* Pending requests (host only) */}
       {isHost && requests.length > 0 && (
         <div style={{ marginBottom:"18px" }}>
-          <p style={{ ...S.sectionLabel, marginBottom:"10px" }}>
-            Requests to join ({requests.length})
-          </p>
+          <p style={{ ...S.sectionLabel, marginBottom:"10px" }}>Requests to join ({requests.length})</p>
           <div style={{ display:"flex", flexDirection:"column", gap:"8px" }}>
             {requests.map(r => (
               <RequestCard
@@ -856,7 +902,7 @@ function RoomView({ room, onLeave, roomCounts }) {
         </div>
       )}
 
-      {/* Working-on */}
+      {/* Working-on / session goal */}
       <div style={{ marginBottom:"20px" }}>
         <p style={{ ...S.sectionLabel, marginBottom:"8px" }}>What I'm working on</p>
         <input
@@ -873,7 +919,7 @@ function RoomView({ room, onLeave, roomCounts }) {
         </p>
       </div>
 
-      {/* Room code — share to invite anyone directly */}
+      {/* Room code */}
       {room.join_code && (
         <div style={{
           display:"flex", alignItems:"center", justifyContent:"space-between",
@@ -900,12 +946,8 @@ function RoomView({ room, onLeave, roomCounts }) {
       <p style={{ ...S.sectionLabel, marginBottom:"12px" }}>In this room</p>
       {members.length === 0 ? (
         <div style={S.emptyState}>
-          <p style={{ color:"var(--text-secondary)", fontSize:"14px", fontWeight:"500", marginBottom:"5px" }}>
-            You're the first one here
-          </p>
-          <p style={{ color:"var(--text-dim)", fontSize:"12px" }}>
-            Invite friends or share the room name.
-          </p>
+          <p style={{ color:"var(--text-secondary)", fontSize:"14px", fontWeight:"500", marginBottom:"5px" }}>You're the first one here</p>
+          <p style={{ color:"var(--text-dim)", fontSize:"12px" }}>Invite friends or share the room code.</p>
         </div>
       ) : (
         <div style={{ display:"flex", flexDirection:"column", gap:"10px" }}>
@@ -916,11 +958,28 @@ function RoomView({ room, onLeave, roomCounts }) {
       )}
 
       {showInvite && (
-        <InviteModal
-          room={room}
-          userId={userId}
-          userData={userData}
-          onClose={() => setShowInvite(false)}
+        <InviteModal room={room} userId={userId} userData={userData} onClose={() => setShowInvite(false)} />
+      )}
+
+      {/* Goal prompt on enter */}
+      {showGoalPrompt && (
+        <GoalPromptModal
+          onSet={(goal) => {
+            goalTextRef.current = goal;
+            handleWorkingOnChange(goal);
+            setShowGoalPrompt(false);
+          }}
+          onSkip={() => setShowGoalPrompt(false)}
+        />
+      )}
+
+      {/* Session summary on leave */}
+      {showSummary && (
+        <SessionSummaryModal
+          durationSecs={summaryDurationSecs}
+          goal={goalTextRef.current || workingOn}
+          onConfirm={confirmLeave}
+          onBack={() => setShowSummary(false)}
         />
       )}
     </div>
@@ -928,7 +987,220 @@ function RoomView({ room, onLeave, roomCounts }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// RequestCard — host sees pending join requests
+// PomodoroPanel — synced timer display + host controls
+// ─────────────────────────────────────────────────────────────────────────────
+function pomoCtrlStyle(variant) {
+  const v = {
+    dim:    { bg:"rgba(255,255,255,0.05)", color:"var(--text-dim)",      border:"rgba(255,255,255,0.09)" },
+    accent: { bg:"rgba(196,154,60,0.12)", color:"#C49A3C",              border:"rgba(196,154,60,0.3)"   },
+    red:    { bg:"rgba(255,59,48,0.07)",  color:"rgba(255,100,90,0.7)", border:"rgba(255,59,48,0.18)"   },
+  }[variant] || { bg:"rgba(255,255,255,0.05)", color:"var(--text-dim)", border:"rgba(255,255,255,0.09)" };
+  return {
+    background:v.bg, color:v.color, border:`1px solid ${v.border}`,
+    borderRadius:"8px", padding:"8px 16px", fontSize:"12px", fontWeight:"500",
+    cursor:"pointer", fontFamily:"inherit",
+  };
+}
+
+function PomodoroPanel({ pomo, remaining, isHost, onStart, onPause, onResume, onReset, onSkip }) {
+  const isIdle    = !pomo || pomo.phase === "idle";
+  const isFocus   = pomo?.phase === "focus";
+  const isBreak   = pomo?.phase === "break";
+  const isPaused  = !!pomo?.paused;
+  const isRunning = !isIdle && !isPaused;
+
+  const accentColor = isFocus ? "#C49A3C" : isBreak ? "#6fb3c4" : "var(--text-dim)";
+  const bgColor     = isFocus ? "rgba(196,154,60,0.05)" : isBreak ? "rgba(111,179,196,0.05)" : "rgba(255,255,255,0.02)";
+  const borderColor = isFocus ? "rgba(196,154,60,0.18)" : isBreak ? "rgba(111,179,196,0.18)" : "rgba(255,255,255,0.07)";
+  const phaseLabel  = isFocus ? "Focus" : isBreak ? "Break" : "Pomodoro";
+  const phaseEmoji  = isFocus ? "🍅" : isBreak ? "☕" : "⏱";
+
+  return (
+    <div style={{
+      background:bgColor, border:`1px solid ${borderColor}`,
+      borderRadius:"14px", padding:"20px 20px 16px", marginBottom:"18px",
+      transition:"background 0.4s, border-color 0.4s",
+    }}>
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"10px" }}>
+        <span style={{ fontSize:"11px", letterSpacing:"2px", textTransform:"uppercase", color:accentColor, fontWeight:"600" }}>
+          {phaseEmoji} {phaseLabel}{isPaused ? " · Paused" : ""}
+        </span>
+        <span style={{ fontSize:"11px", color:"var(--text-dim)" }}>
+          {isIdle ? "25 min focus / 5 min break" : isFocus ? "Stay focused" : "Rest up ☕"}
+        </span>
+      </div>
+
+      {/* Countdown */}
+      <div style={{ textAlign:"center", margin:"4px 0 14px" }}>
+        <span style={{
+          fontSize:"56px", fontWeight:"700", letterSpacing:"-2px",
+          fontVariantNumeric:"tabular-nums", display:"block", lineHeight:1,
+          color: isIdle ? "rgba(255,255,255,0.15)" : accentColor,
+          opacity: isPaused ? 0.55 : 1,
+          transition:"color 0.4s",
+        }}>
+          {isIdle ? "25:00" : formatPomoTime(remaining)}
+        </span>
+      </div>
+
+      {/* Controls */}
+      {isHost ? (
+        <div style={{ display:"flex", gap:"8px", justifyContent:"center", flexWrap:"wrap" }}>
+          {isIdle && (
+            <button onClick={onStart} style={{
+              background:"rgba(196,154,60,0.14)", color:"#C49A3C",
+              border:"1px solid rgba(196,154,60,0.35)", borderRadius:"9px",
+              padding:"9px 24px", fontSize:"13px", fontWeight:"600",
+              cursor:"pointer", fontFamily:"inherit",
+            }}>
+              Start Focus →
+            </button>
+          )}
+          {isRunning && (
+            <>
+              <button onClick={onPause}  style={pomoCtrlStyle("dim")}>Pause</button>
+              <button onClick={onSkip}   style={pomoCtrlStyle("dim")}>Skip ›</button>
+              <button onClick={onReset}  style={pomoCtrlStyle("red")}>Reset</button>
+            </>
+          )}
+          {isPaused && (
+            <>
+              <button onClick={onResume} style={pomoCtrlStyle("accent")}>Resume</button>
+              <button onClick={onReset}  style={pomoCtrlStyle("red")}>Reset</button>
+            </>
+          )}
+        </div>
+      ) : (
+        <p style={{ textAlign:"center", fontSize:"12px", color:"var(--text-dim)", margin:0 }}>
+          {isIdle ? "Waiting for host to start the timer…" :
+           isFocus ? "Stay focused — you've got this." :
+           "Enjoy your break!"}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// GoalPromptModal — appears ~500ms after joining, skippable
+// ─────────────────────────────────────────────────────────────────────────────
+function GoalPromptModal({ onSet, onSkip }) {
+  const [goal, setGoal] = useState("");
+  const S = styles;
+  return (
+    <div style={S.modalOverlay}>
+      <div style={{ ...S.modalCard, maxWidth:"360px" }}>
+        <div style={{ textAlign:"center", marginBottom:"20px" }}>
+          <p style={{ fontSize:"30px", marginBottom:"10px" }}>🎯</p>
+          <h2 style={{ fontSize:"18px", fontWeight:"700", color:"var(--text-primary)", marginBottom:"6px" }}>
+            Set your session goal
+          </h2>
+          <p style={{ fontSize:"13px", color:"var(--text-dim)", lineHeight:1.5 }}>
+            What will you finish today? Everyone in the room will see this.
+          </p>
+        </div>
+        <input
+          autoFocus
+          value={goal}
+          onChange={e => setGoal(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && goal.trim() && onSet(goal.trim())}
+          placeholder="e.g. Finish CDS151 lab question 3"
+          maxLength={80}
+          style={S.input}
+          onFocus={e => (e.target.style.borderColor="rgba(255,255,255,0.22)")}
+          onBlur={e  => (e.target.style.borderColor="rgba(255,255,255,0.1)")}
+        />
+        <div style={{ display:"flex", gap:"10px" }}>
+          <button onClick={onSkip} style={S.ghostBtnLarge}>Skip</button>
+          <button
+            onClick={() => goal.trim() && onSet(goal.trim())}
+            disabled={!goal.trim()}
+            style={{ ...S.primaryBtnLarge, opacity: goal.trim() ? 1 : 0.4 }}
+          >
+            Let's go →
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SessionSummaryModal — leave flow with goal completion self-report
+// ─────────────────────────────────────────────────────────────────────────────
+function SessionSummaryModal({ durationSecs, goal, onConfirm, onBack }) {
+  const hours   = Math.floor(durationSecs / 3600);
+  const mins    = Math.floor((durationSecs % 3600) / 60);
+  const secs    = durationSecs % 60;
+  const timeStr = hours > 0 ? `${hours}h ${mins}m` : mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+  const S = styles;
+  return (
+    <div style={S.modalOverlay}>
+      <div style={{ ...S.modalCard, maxWidth:"340px", textAlign:"center", position:"relative" }}>
+        <button
+          onClick={onBack}
+          title="Back to room"
+          style={{ position:"absolute", top:"14px", right:"18px", background:"none", border:"none", color:"var(--text-dim)", fontSize:"20px", cursor:"pointer", lineHeight:1, padding:"2px 4px" }}
+        >
+          ×
+        </button>
+
+        <p style={{ fontSize:"34px", marginBottom:"8px" }}>
+          {durationSecs >= 1200 ? "🔥" : "⏱"}
+        </p>
+        <h2 style={{ fontSize:"19px", fontWeight:"700", color:"var(--text-primary)", marginBottom:"6px" }}>
+          {durationSecs >= 1200 ? "Great session!" : "Session complete"}
+        </h2>
+
+        <div style={{
+          background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.07)",
+          borderRadius:"10px", padding:"14px 16px", margin:"16px 0", textAlign:"left",
+        }}>
+          <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: goal ? "10px" : 0 }}>
+            <span style={{ fontSize:"12px", color:"var(--text-dim)" }}>Time focused</span>
+            <span style={{ fontSize:"14px", fontWeight:"700", color:"var(--color-accent)" }}>{timeStr}</span>
+          </div>
+          {goal && (
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", gap:"12px" }}>
+              <span style={{ fontSize:"12px", color:"var(--text-dim)", flexShrink:0 }}>Goal</span>
+              <span style={{ fontSize:"12px", color:"var(--text-secondary)", textAlign:"right" }}>{goal}</span>
+            </div>
+          )}
+        </div>
+
+        <p style={{ fontSize:"13px", color:"var(--text-secondary)", marginBottom:"14px" }}>
+          Did you finish your goal?
+        </p>
+
+        <div style={{ display:"flex", gap:"10px" }}>
+          <button
+            onClick={() => onConfirm(false)}
+            style={{
+              flex:1, background:"rgba(255,255,255,0.04)", border:"1px solid rgba(255,255,255,0.09)",
+              borderRadius:"10px", padding:"12px", fontSize:"14px",
+              cursor:"pointer", fontFamily:"inherit", color:"var(--text-dim)",
+            }}
+          >
+            👎 Not quite
+          </button>
+          <button
+            onClick={() => onConfirm(true)}
+            style={{
+              flex:1, background:"rgba(196,154,60,0.12)", border:"1px solid rgba(196,154,60,0.3)",
+              borderRadius:"10px", padding:"12px", fontSize:"14px", fontWeight:"600",
+              cursor:"pointer", fontFamily:"inherit", color:"var(--color-accent)",
+            }}
+          >
+            👍 Got it!
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RequestCard
 // ─────────────────────────────────────────────────────────────────────────────
 function RequestCard({ request, onAccept, onDecline }) {
   const COLORS = [
@@ -954,29 +1226,19 @@ function RequestCard({ request, onAccept, onDecline }) {
         <p style={{ fontSize:"11px", color:"var(--text-dim)", marginTop:"2px" }}>Wants to join</p>
       </div>
       <div style={{ display:"flex", gap:"8px", flexShrink:0 }}>
-        <button
-          onClick={onAccept}
-          style={{ ...S.accentBtn, padding:"6px 14px", fontSize:"12px" }}
-        >
-          Accept
-        </button>
-        <button
-          onClick={onDecline}
-          style={{ ...S.ghostBtn, marginTop:0, padding:"6px 12px", fontSize:"12px", color:"rgba(255,100,90,0.7)" }}
-        >
-          Decline
-        </button>
+        <button onClick={onAccept}  style={{ ...S.accentBtn, padding:"6px 14px", fontSize:"12px" }}>Accept</button>
+        <button onClick={onDecline} style={{ ...S.ghostBtn, marginTop:0, padding:"6px 12px", fontSize:"12px", color:"rgba(255,100,90,0.7)" }}>Decline</button>
       </div>
     </div>
   );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// InviteModal — friends picker with live status, invite + nudge
+// InviteModal
 // ─────────────────────────────────────────────────────────────────────────────
 function InviteModal({ room, userId, userData, onClose }) {
-  const [friends, setFriends] = useState(null); // null = loading
-  const [invited, setInvited] = useState({});   // friendId → true
+  const [friends, setFriends] = useState(null);
+  const [invited, setInvited] = useState({});
   const S = styles;
 
   useEffect(() => {
@@ -985,22 +1247,13 @@ function InviteModal({ room, userId, userData, onClose }) {
 
   async function handleInvite(friend) {
     setInvited(i => ({ ...i, [friend.id]: "sending" }));
-
-    // Insert nudge row (kind='invite')
     await supabase.from("nudges").insert({
-      from_user_id: userId,
-      to_user_id:   friend.id,
-      room_id:      room.id,
-      kind:         "invite",
+      from_user_id: userId, to_user_id: friend.id, room_id: room.id, kind: "invite",
     });
-
-    // Pre-approve: insert room_members as 'invited' so they can join without request
     await supabase.from("room_members").upsert(
       { room_id: room.id, user_id: friend.id, role: "member", status: "invited" },
       { onConflict: "room_id,user_id" }
     );
-
-    // Broadcast to friend's personal channel if they're online
     supabase.channel(`user:${friend.id}`).send({
       type: "broadcast", event: "nudge",
       payload: {
@@ -1009,7 +1262,6 @@ function InviteModal({ room, userId, userData, onClose }) {
         roomId: room.id, roomName: room.name,
       },
     }).catch(() => {});
-
     setInvited(i => ({ ...i, [friend.id]: "sent" }));
   }
 
@@ -1017,12 +1269,9 @@ function InviteModal({ room, userId, userData, onClose }) {
     <div style={S.modalOverlay}>
       <div style={{ ...S.modalCard, maxWidth:"360px" }}>
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"18px" }}>
-          <h2 style={{ fontSize:"18px", fontWeight:"700", color:"var(--text-primary)" }}>
-            Invite friends
-          </h2>
+          <h2 style={{ fontSize:"18px", fontWeight:"700", color:"var(--text-primary)" }}>Invite friends</h2>
           <button onClick={onClose} style={{ background:"none", border:"none", color:"var(--text-dim)", fontSize:"18px", cursor:"pointer", padding:"0 4px" }}>×</button>
         </div>
-
         {friends === null ? (
           <p style={{ color:"var(--text-dim)", fontSize:"13px", textAlign:"center", padding:"24px 0" }}>Loading friends…</p>
         ) : friends.length === 0 ? (
@@ -1051,12 +1300,7 @@ function InviteModal({ room, userId, userData, onClose }) {
                   <button
                     onClick={() => handleInvite(f)}
                     disabled={!!status}
-                    style={{
-                      ...S.accentBtn,
-                      padding: "6px 14px", fontSize: "12px",
-                      opacity: status ? 0.5 : 1,
-                      cursor:  status ? "default" : "pointer",
-                    }}
+                    style={{ ...S.accentBtn, padding:"6px 14px", fontSize:"12px", opacity: status ? 0.5 : 1, cursor: status ? "default" : "pointer" }}
                   >
                     {status === "sent" ? "Invited ✓" : status === "sending" ? "…" : "Invite"}
                   </button>
@@ -1071,7 +1315,7 @@ function InviteModal({ room, userId, userData, onClose }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MemberCard — unchanged from Step 1
+// MemberCard
 // ─────────────────────────────────────────────────────────────────────────────
 function MemberCard({ member, isMe }) {
   const elapsed = Math.max(0, Math.floor((Date.now() - member.joinedAt) / 1000));
@@ -1133,18 +1377,18 @@ function MemberCard({ member, isMe }) {
 // Shared styles
 // ─────────────────────────────────────────────────────────────────────────────
 const styles = {
-  sectionLabel: { fontSize:"11px", color:"var(--text-dim)", letterSpacing:"2px", textTransform:"uppercase", marginBottom:"6px" },
-  pageTitle:    { fontSize:"26px", fontWeight:"600", color:"var(--text-primary)", letterSpacing:"-0.3px" },
-  card:         { background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-card)", boxShadow:"var(--depth-line)", padding:"16px 18px", display:"flex", alignItems:"center", gap:"14px" },
-  emptyState:   { background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-card)", padding:"32px 24px", textAlign:"center" },
-  input:        { display:"block", width:"100%", background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"10px", padding:"11px 14px", color:"var(--text-primary)", fontSize:"14px", outline:"none", fontFamily:"inherit", boxSizing:"border-box", marginTop:"6px", marginBottom:"14px", transition:"border-color 0.15s" },
-  primaryBtn:   { background:"var(--color-accent)", color:"#111", border:"none", borderRadius:"var(--radius-btn)", padding:"11px 18px", fontSize:"14px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit", flexShrink:0 },
-  accentBtn:    { background:"rgba(196,154,60,0.1)", color:"var(--color-accent)", border:"1px solid rgba(196,154,60,0.28)", borderRadius:"8px", padding:"8px 18px", fontSize:"13px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit", flexShrink:0 },
-  ghostBtn:     { marginTop:"16px", background:"none", border:"1px solid rgba(255,255,255,0.09)", borderRadius:"8px", padding:"8px 16px", color:"var(--text-dim)", fontSize:"12px", cursor:"pointer", fontFamily:"inherit" },
-  ghostBtnLarge:{ flex:1, background:"transparent", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"10px", padding:"12px", color:"var(--text-dim)", fontSize:"14px", cursor:"pointer", fontFamily:"inherit" },
+  sectionLabel:   { fontSize:"11px", color:"var(--text-dim)", letterSpacing:"2px", textTransform:"uppercase", marginBottom:"6px" },
+  pageTitle:      { fontSize:"26px", fontWeight:"600", color:"var(--text-primary)", letterSpacing:"-0.3px" },
+  card:           { background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-card)", boxShadow:"var(--depth-line)", padding:"16px 18px", display:"flex", alignItems:"center", gap:"14px" },
+  emptyState:     { background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"var(--radius-card)", padding:"32px 24px", textAlign:"center" },
+  input:          { display:"block", width:"100%", background:"rgba(255,255,255,0.05)", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"10px", padding:"11px 14px", color:"var(--text-primary)", fontSize:"14px", outline:"none", fontFamily:"inherit", boxSizing:"border-box", marginTop:"6px", marginBottom:"14px", transition:"border-color 0.15s" },
+  primaryBtn:     { background:"var(--color-accent)", color:"#111", border:"none", borderRadius:"var(--radius-btn)", padding:"11px 18px", fontSize:"14px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit", flexShrink:0 },
+  accentBtn:      { background:"rgba(196,154,60,0.1)", color:"var(--color-accent)", border:"1px solid rgba(196,154,60,0.28)", borderRadius:"8px", padding:"8px 18px", fontSize:"13px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit", flexShrink:0 },
+  ghostBtn:       { marginTop:"16px", background:"none", border:"1px solid rgba(255,255,255,0.09)", borderRadius:"8px", padding:"8px 16px", color:"var(--text-dim)", fontSize:"12px", cursor:"pointer", fontFamily:"inherit" },
+  ghostBtnLarge:  { flex:1, background:"transparent", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"10px", padding:"12px", color:"var(--text-dim)", fontSize:"14px", cursor:"pointer", fontFamily:"inherit" },
   primaryBtnLarge:{ flex:2, background:"var(--color-accent)", color:"#111", border:"none", borderRadius:"10px", padding:"12px", fontSize:"14px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit" },
-  leaveBtn:     { background:"rgba(255,59,48,0.1)", border:"1px solid rgba(255,59,48,0.22)", borderRadius:"8px", padding:"9px 16px", color:"rgba(255,100,90,0.9)", fontSize:"13px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit", flexShrink:0 },
-  modalOverlay: { position:"fixed", inset:0, zIndex:1000, background:"rgba(8,8,10,0.75)", backdropFilter:"blur(14px)", display:"flex", alignItems:"center", justifyContent:"center", padding:"24px" },
-  modalCard:    { width:"100%", maxWidth:"400px", background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"20px", padding:"28px 24px", boxShadow:"0 32px 80px rgba(0,0,0,0.5)" },
-  fieldLabel:   { fontSize:"12px", color:"var(--text-secondary)", fontWeight:"500" },
+  leaveBtn:       { background:"rgba(255,59,48,0.1)", border:"1px solid rgba(255,59,48,0.22)", borderRadius:"8px", padding:"9px 16px", color:"rgba(255,100,90,0.9)", fontSize:"13px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit", flexShrink:0 },
+  modalOverlay:   { position:"fixed", inset:0, zIndex:1000, background:"rgba(8,8,10,0.75)", backdropFilter:"blur(14px)", display:"flex", alignItems:"center", justifyContent:"center", padding:"24px" },
+  modalCard:      { width:"100%", maxWidth:"400px", background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"20px", padding:"28px 24px", boxShadow:"0 32px 80px rgba(0,0,0,0.5)" },
+  fieldLabel:     { fontSize:"12px", color:"var(--text-secondary)", fontWeight:"500" },
 };
