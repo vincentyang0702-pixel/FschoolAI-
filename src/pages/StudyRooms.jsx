@@ -7,13 +7,25 @@ import { useApp } from "../context/AppContext";
 import { supabase } from "../api/supabase";
 
 // ── Friends adapter ──────────────────────────────────────────────────────────
-// Thin wrapper so if Siddharth's friends API changes, only this changes.
+// Wraps Siddharth's friends.js so the invite UI doesn't depend on its internals.
+// listFriends returns [{ friend_id, friends_since }] — enrich with names via
+// getUserProfiles. If the RPC doesn't exist yet (migrations 004/005 not run),
+// the RPC throws → caught here → returns [] gracefully.
 async function getFriendsForInvite(userId) {
   try {
-    const { listFriends } = await import("../api/friends.js");
-    return await listFriends(userId) ?? [];
+    const { listFriends, getUserProfiles } = await import("../api/friends.js");
+    const rows = await listFriends(userId); // [{ friend_id, friends_since }]
+    if (!rows?.length) return [];
+    const ids      = rows.map(r => r.friend_id);
+    const profiles = await getUserProfiles(ids); // { [id]: { name, email } }
+    return rows.map(r => ({
+      id:           r.friend_id,
+      name:         profiles[r.friend_id]?.name  ?? "Unknown",
+      email:        profiles[r.friend_id]?.email ?? "",
+      friends_since: r.friends_since,
+    }));
   } catch {
-    return []; // graceful degradation
+    return []; // RPC missing (migrations not run) or user has no friends
   }
 }
 
@@ -21,13 +33,15 @@ async function getFriendsForInvite(userId) {
 // Root — owns global-studying presence channel shared across Lobby ↔ RoomView
 // ─────────────────────────────────────────────────────────────────────────────
 export default function StudyRooms() {
-  const { userId } = useApp();
-  const [view,       setView]       = useState("lobby");
-  const [activeRoom, setActiveRoom] = useState(null);
+  const { userId, userData } = useApp();
+  const [view,        setView]        = useState("lobby");
+  const [activeRoom,  setActiveRoom]  = useState(null);
   const [globalState, setGlobalState] = useState({});
-  const globalCh = useRef(null);
+  const [pendingInvites, setPendingInvites] = useState([]); // root-level so visible in room too
+  const globalCh   = useRef(null);
+  const personalCh = useRef(null);
 
-  // Set up global presence once
+  // Global presence — stays alive across Lobby ↔ RoomView transitions
   useEffect(() => {
     if (!userId) return;
     const ch = supabase.channel("global-studying", {
@@ -45,6 +59,40 @@ export default function StudyRooms() {
       try { ch.untrack(); } catch {}
       supabase.removeChannel(ch);
       globalCh.current = null;
+    };
+  }, [userId]);
+
+  // Personal channel — stays alive always so invites/nudges arrive in-room too.
+  // Previously only subscribed in Lobby, so users missed invites while in a room.
+  useEffect(() => {
+    if (!userId) return;
+    const ch = supabase.channel(`user:${userId}`);
+    ch.on("broadcast", { event: "nudge" }, ({ payload }) => {
+      if (payload?.kind === "invite") {
+        setPendingInvites(prev => [{
+          id: payload.id ?? `${payload.fromUserId}-${Date.now()}`,
+          from_user_id: payload.fromUserId,
+          fromName:     payload.fromName ?? "Someone",
+          room_id:      payload.roomId,
+          roomName:     payload.roomName,
+          created_at:   new Date().toISOString(),
+        }, ...prev].slice(0, 5));
+      }
+    })
+    // postgres_changes for nudges on personal channel (when sender/receiver may not both be online)
+    .on("postgres_changes", {
+      event: "INSERT", schema: "public", table: "nudges",
+      filter: `to_user_id=eq.${userId}`,
+    }, (payload) => {
+      if (payload.new?.kind === "invite") {
+        setPendingInvites(prev => [{ ...payload.new, fromName: null }, ...prev].slice(0, 5));
+      }
+    })
+    .subscribe();
+    personalCh.current = ch;
+    return () => {
+      supabase.removeChannel(ch);
+      personalCh.current = null;
     };
   }, [userId]);
 
@@ -72,38 +120,47 @@ export default function StudyRooms() {
     setView("lobby");
   }, [userId]); // eslint-disable-line
 
+  const dismissInviteRoot = useCallback((id) => {
+    setPendingInvites(prev => prev.filter(i => i.id !== id));
+    supabase.from("nudges").update({ seen: true }).eq("id", id).then(() => {});
+  }, []);
+
   if (view === "room" && activeRoom) {
     return <RoomView room={activeRoom} onLeave={handleLeave} roomCounts={roomCounts} />;
   }
-  return <Lobby onJoin={handleJoin} totalOnline={totalOnline} roomCounts={roomCounts} />;
+  return (
+    <Lobby
+      onJoin={handleJoin}
+      totalOnline={totalOnline}
+      roomCounts={roomCounts}
+      pendingInvites={pendingInvites}
+      onDismissInvite={dismissInviteRoot}
+    />
+  );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Lobby — live room list + global count + join / request flow
 // ─────────────────────────────────────────────────────────────────────────────
-function Lobby({ onJoin, totalOnline, roomCounts }) {
+// pendingInvites + onDismissInvite now come from root (so invites arrive even while in a room)
+function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismissInvite }) {
   const { userId, userData, courses } = useApp();
   const [rooms,       setRooms]       = useState([]);
   const [loading,     setLoading]     = useState(true);
   const [showCreate,  setShowCreate]  = useState(false);
   const [joiningId,   setJoiningId]   = useState(null);
   const [pendingReqs, setPendingReqs] = useState({}); // roomId → 'requested'|'accepted'
-  const [invites,     setInvites]     = useState([]); // incoming invite nudges
   const lobbyChannelRef = useRef(null);
-  const personalChRef   = useRef(null);
   const onJoinRef       = useRef(onJoin);
   useEffect(() => { onJoinRef.current = onJoin; }, [onJoin]);
 
-  // Initial load
+  // Initial load — personal channel removed (now at root level)
   useEffect(() => {
     fetchRooms();
     fetchPendingRequests();
-    fetchInvites();
     subscribeToLobby();
-    subscribePersonal();
     return () => {
       if (lobbyChannelRef.current) supabase.removeChannel(lobbyChannelRef.current);
-      if (personalChRef.current)   supabase.removeChannel(personalChRef.current);
     };
   }, []); // eslint-disable-line
 
@@ -128,18 +185,6 @@ function Lobby({ onJoin, totalOnline, roomCounts }) {
     const map = {};
     (data || []).forEach(r => { map[r.room_id] = r.status; });
     setPendingReqs(map);
-  }
-
-  async function fetchInvites() {
-    const { data } = await supabase
-      .from("nudges")
-      .select("id, from_user_id, room_id, created_at")
-      .eq("to_user_id", userId)
-      .eq("kind", "invite")
-      .eq("seen", false)
-      .order("created_at", { ascending: false })
-      .limit(5);
-    if (data?.length) setInvites(data);
   }
 
   function subscribeToLobby() {
@@ -173,34 +218,11 @@ function Lobby({ onJoin, totalOnline, roomCounts }) {
       }
     });
 
-    // Incoming invite nudge
-    ch.on("postgres_changes", {
-      event: "INSERT", schema: "public", table: "nudges",
-      filter: `to_user_id=eq.${userId}`,
-    }, (payload) => {
-      if (payload.new?.kind === "invite") {
-        setInvites(prev => [payload.new, ...prev].slice(0, 5));
-      }
-    });
-
     ch.subscribe();
     lobbyChannelRef.current = ch;
   }
-
-  function subscribePersonal() {
-    // Real-time invite/nudge broadcasts (when sender and receiver are both online)
-    const ch = supabase.channel(`user:${userId}`);
-    ch.on("broadcast", { event: "nudge" }, ({ payload }) => {
-      if (payload?.kind === "invite") {
-        setInvites(prev => [{
-          id: payload.id, from_user_id: payload.fromUserId,
-          room_id: payload.roomId, fromName: payload.fromName,
-          created_at: new Date().toISOString(),
-        }, ...prev].slice(0, 5));
-      }
-    }).subscribe();
-    personalChRef.current = ch;
-  }
+  // Note: personal channel (invites/nudges) is now at root StudyRooms level
+  // so invites arrive even when the user is inside a room.
 
   async function handleCreate({ name, courseId, roomType }) {
     const { data: room, error } = await supabase
@@ -255,9 +277,7 @@ function Lobby({ onJoin, totalOnline, roomCounts }) {
   }
 
   async function acceptInvite(invite) {
-    await supabase.from("nudges").update({ seen: true }).eq("id", invite.id);
-    setInvites(prev => prev.filter(i => i.id !== invite.id));
-    // Join the room directly (invited = host pre-approved)
+    onDismissInvite?.(invite.id); // remove from root state
     await supabase.from("room_members").upsert(
       { room_id: invite.room_id, user_id: userId, role: "member", status: "joined" },
       { onConflict: "room_id,user_id" }
@@ -265,11 +285,6 @@ function Lobby({ onJoin, totalOnline, roomCounts }) {
     const { data: room } = await supabase
       .from("study_rooms").select().eq("id", invite.room_id).single();
     if (room) onJoin(room);
-  }
-
-  async function dismissInvite(id) {
-    await supabase.from("nudges").update({ seen: true }).eq("id", id);
-    setInvites(prev => prev.filter(i => i.id !== id));
   }
 
   const S = styles;
@@ -297,10 +312,10 @@ function Lobby({ onJoin, totalOnline, roomCounts }) {
         </button>
       </div>
 
-      {/* Pending invites banner */}
-      {invites.length > 0 && (
+      {/* Pending invites banner — driven by root-level pendingInvites */}
+      {pendingInvites.length > 0 && (
         <div style={{ marginBottom:"16px", display:"flex", flexDirection:"column", gap:"8px" }}>
-          {invites.map(inv => (
+          {pendingInvites.map(inv => (
             <div key={inv.id} style={{
               background:"rgba(196,154,60,0.08)", border:"1px solid rgba(196,154,60,0.25)",
               borderRadius:"12px", padding:"12px 16px",
@@ -311,7 +326,7 @@ function Lobby({ onJoin, totalOnline, roomCounts }) {
               </p>
               <div style={{ display:"flex", gap:"8px", flexShrink:0 }}>
                 <button onClick={() => acceptInvite(inv)} style={{ ...S.accentBtn, padding:"6px 14px", fontSize:"12px" }}>Join</button>
-                <button onClick={() => dismissInvite(inv.id)} style={{ ...S.ghostBtn, marginTop:0, padding:"6px 12px", fontSize:"12px" }}>Dismiss</button>
+                <button onClick={() => onDismissInvite?.(inv.id)} style={{ ...S.ghostBtn, marginTop:0, padding:"6px 12px", fontSize:"12px" }}>Dismiss</button>
               </div>
             </div>
           ))}
@@ -442,8 +457,12 @@ function CreateRoomModal({ courses, onCreate, onClose }) {
         <select value={courseId} onChange={e => setCourseId(e.target.value)} style={S.input}>
           <option value="">No course / general</option>
           {(courses || []).map(c => (
-            <option key={c.id} value={c.id}>
-              {c.courseCode ? `${c.courseCode} — ${c.name}` : c.name}
+            // Only use c.dbId (the actual DB BIGINT pk) as the value.
+            // If dbId is absent (courses from syncCanvasData before the next
+            // loadCanvasData runs), value="" so handleCreate sends null — never
+            // a canvas_course_id string that would FK-fail.
+            <option key={c.dbId ?? c.id} value={c.dbId || ""} disabled={!c.dbId}>
+              {c.courseCode ? `${c.courseCode} — ${c.name}` : c.name}{!c.dbId ? " (sync to link)" : ""}
             </option>
           ))}
         </select>
