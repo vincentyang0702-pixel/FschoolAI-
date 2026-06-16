@@ -24,6 +24,7 @@ import Toolkit     from "./pages/Toolkit";
 import Identity    from "./pages/Identity";
 import Leaderboard from "./pages/Leaderboard";
 import Files       from "./pages/Files";
+import StudyRooms  from "./pages/StudyRooms";
 
 const PAGES = {
   work:        Work,
@@ -34,6 +35,7 @@ const PAGES = {
   identity:    Identity,
   leaderboard: Leaderboard,
   files:       Files,
+  rooms:       StudyRooms,
 };
 
 const LOGGED_IN_KEY = "fschool_logged_in";
