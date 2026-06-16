@@ -102,11 +102,16 @@ export default function StudyRooms() {
     }
   }
 
-  // Derived counts from global presence
-  const all        = Object.values(globalState).flat();
-  const totalOnline = all.length;
+  // Count UNIQUE users (by key) — never double-count a user with multiple tabs/sessions.
+  // Supabase Presence keys by userId; each key can have multiple session entries.
+  // Object.keys gives unique users; Object.values().flat() inflates on multi-tab.
+  const totalOnline = Object.keys(globalState).length;
   const roomCounts  = {};
-  all.forEach(p => { if (p.roomId) roomCounts[p.roomId] = (roomCounts[p.roomId] || 0) + 1; });
+  for (const sessions of Object.values(globalState)) {
+    // Take the first (latest) session's roomId for this user — one vote per user per room.
+    const roomId = sessions?.[0]?.roomId;
+    if (roomId) roomCounts[roomId] = (roomCounts[roomId] || 0) + 1;
+  }
 
   const handleJoin = useCallback(async (room) => {
     await trackGlobal(room.id);
@@ -247,18 +252,23 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
   }
 
   async function handleJoin(room) {
-    if (pendingReqs[room.id] === "requested") return; // already requested
-    if (pendingReqs[room.id] === "accepted")  { onJoin(room); return; }
+    if (pendingReqs[room.id] === "requested") return; // already requested, show waiting state
+    // Already joined (fetchPendingRequests returned 'joined') OR accepted → re-enter directly
+    if (pendingReqs[room.id] === "accepted" || pendingReqs[room.id] === "joined") {
+      onJoin(room); return;
+    }
     setJoiningId(room.id);
 
-    if (room.room_type === "invite") {
+    const isHost = room.created_by === userId;
+
+    if (room.room_type === "invite" && !isHost) {
+      // Non-host member requesting access to an invite-only room
       const { error } = await supabase.from("room_members").upsert(
         { room_id: room.id, user_id: userId, role: "member", status: "requested" },
         { onConflict: "room_id,user_id" }
       );
       if (!error) {
         setPendingReqs(p => ({ ...p, [room.id]: "requested" }));
-        // Notify host via nudge
         supabase.from("nudges").insert({
           from_user_id: userId, to_user_id: room.created_by,
           room_id: room.id, kind: "nudge",
@@ -268,8 +278,10 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
       return;
     }
 
+    // Host of an invite-only room OR any public room — join directly as correct role
     const { error } = await supabase.from("room_members").upsert(
-      { room_id: room.id, user_id: userId, role: "member", status: "joined" },
+      { room_id: room.id, user_id: userId,
+        role: isHost ? "host" : "member", status: "joined" },
       { onConflict: "room_id,user_id" }
     );
     setJoiningId(null);
@@ -291,8 +303,8 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
 
   return (
     <div>
-      {/* Hero header */}
-      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:"24px" }}>
+      {/* Header */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:"28px" }}>
         <div>
           <p style={S.sectionLabel}>Study Rooms</p>
           <h1 style={S.pageTitle}>Study Together</h1>
@@ -321,7 +333,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, pendingInvites = [], onDismiss
               borderRadius:"12px", padding:"12px 16px",
               display:"flex", alignItems:"center", justifyContent:"space-between", gap:"12px",
             }}>
-              <p style={{ fontSize:"13px", color:"var(--cream-dim)", flex:1, minWidth:0 }}>
+              <p style={{ fontSize:"13px", color:"var(--text-secondary)", flex:1, minWidth:0 }}>
                 📩 <b style={{ color:"var(--text-primary)" }}>{inv.fromName || "Someone"}</b> invited you to their study room
               </p>
               <div style={{ display:"flex", gap:"8px", flexShrink:0 }}>
@@ -380,6 +392,7 @@ function RoomCard({ room, liveCount, joining, pendingStatus, onJoin }) {
   const S = styles;
   const btnLabel =
     pendingStatus === "accepted"  ? "Accepted! Joining…" :
+    pendingStatus === "joined"    ? "Re-enter" :
     pendingStatus === "requested" ? "Waiting for host…" :
     joining                       ? "Joining…" :
     room.room_type === "invite"   ? "Request to join" : "Join";
