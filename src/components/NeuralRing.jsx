@@ -113,13 +113,27 @@ STRICT RULES — breaking any of these will cause a crash:
 9. Return ONLY the <artifact> block — no explanation, no markdown fences, nothing else.`;
 
 /** Log chat message to Supabase chat_logs (non-blocking) */
-async function logChat(userId, role, content, page) {
+async function logChat(userId, role, content, page, conversationId) {
   try {
     await supabase.from("chat_logs").insert({
       user_id: userId, role, content, page: page ?? null,
+      conversation_id: conversationId ?? null,
       created_at: new Date().toISOString(),
     });
   } catch { /* non-fatal */ }
+}
+
+/** Relative time label for the conversation list, e.g. "3h ago". */
+function relativeTime(iso) {
+  if (!iso) return "";
+  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1)    return "just now";
+  if (mins < 60)   return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24)    return `${hrs}h ago`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7)    return `${days}d ago`;
+  return new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 /** Lightweight inline formatter for streaming text — no block elements so partial HTML is safe */
@@ -174,15 +188,30 @@ function parseQuiz(text) {
   return cards.length > 0 ? cards : null;
 }
 
-/** Load last 20 chat messages for this user, oldest first */
-async function loadChatHistory(userId) {
+/** Load this user's conversations, most recently active first. */
+async function loadConversations(userId) {
+  try {
+    const { data } = await supabase
+      .from("chat_conversations")
+      .select("id, title, updated_at")
+      .eq("user_id", userId)
+      .order("updated_at", { ascending: false })
+      .limit(50);
+    return data ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/** Load one conversation's messages, oldest first. */
+async function loadConversationMessages(conversationId) {
   try {
     const { data } = await supabase
       .from("chat_logs")
       .select("role, content, created_at")
-      .eq("user_id", userId)
+      .eq("conversation_id", conversationId)
       .order("created_at", { ascending: true })
-      .limit(20);
+      .limit(100);
     return (data ?? []).map(r => ({ role: r.role, content: r.content }));
   } catch {
     return [];
@@ -1032,6 +1061,11 @@ export default function NeuralRing() {
     { label: "Open toolkit",      message: "Open toolkit" },
   ]);
   const historyLoadedRef = useRef(false); // guard: only load history once per mount
+  // ── Chat history (conversations) ──────────────────────────────────────────
+  const [conversations,        setConversations]        = useState([]);   // [{id,title,updated_at}]
+  const [currentConversationId, setCurrentConversationId] = useState(null);
+  const [historyOpen,          setHistoryOpen]          = useState(false);
+  const currentConvIdRef = useRef(null);  // mirror for async closures
   const [input,    setInput]    = useState("");
   const [loading,  setLoading]  = useState(false);
   // Thumbs reaction state — tracks per-message reactions + reason picker
@@ -1540,16 +1574,107 @@ export default function NeuralRing() {
 
     (async () => {
       if (userId) {
-        const history = await loadChatHistory(userId);
-        if (history.length > 0) {
-          setMessages(history);
-          return; // history loaded — skip greeting
+        const convos = await loadConversations(userId);
+        setConversations(convos);
+        if (convos.length > 0) {
+          const recent = convos[0];
+          const msgs = await loadConversationMessages(recent.id);
+          if (msgs.length > 0) {
+            currentConvIdRef.current = recent.id;
+            setCurrentConversationId(recent.id);
+            setMessages(msgs);
+            return; // most-recent conversation loaded — skip greeting
+          }
         }
       }
-      // No history → situation-aware greeting as first message bubble
+      // No history → situation-aware greeting (a fresh conversation is created
+      // lazily on the first user message, so greeting-only chats aren't saved).
       setMessages([{ role: "assistant", content: buildSituationGreeting(assignments, courses, userData) }]);
     })();
   }, [chatOpen, assignments, courses, userData, userId]);
+
+  // ── Conversation helpers ─────────────────────────────────────────────────
+  /** Fire the memory pipeline for a transcript (same as closing the sheet). */
+  const flushSession = useCallback((msgs) => {
+    if (!userId || !msgs || msgs.length < 1) return;
+    fetch("/api/session-close", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, sessionMessages: msgs, sessionStartedAt: sessionStartedAt.current }),
+    }).catch(() => {});
+  }, [userId]);
+
+  /** Ensure a conversation row exists (creating on the first message) and bump
+   *  its updated_at so it sorts to the top. Returns the conversation id. */
+  const ensureConversation = useCallback((firstMessage) => {
+    const nowIso = new Date().toISOString();
+    let id = currentConvIdRef.current;
+    if (!id) {
+      id = (crypto?.randomUUID?.() ?? `c-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+      currentConvIdRef.current = id;
+      setCurrentConversationId(id);
+      const title = ((firstMessage || "").trim().slice(0, 48)) || "New chat";
+      setConversations(prev => [{ id, title, updated_at: nowIso }, ...prev]);
+      supabase.from("chat_conversations")
+        .insert({ id, user_id: userId, title, created_at: nowIso, updated_at: nowIso })
+        .then(() => {}, () => {});
+    } else {
+      setConversations(prev => {
+        const found = prev.find(c => c.id === id);
+        if (!found) return prev;
+        return [{ ...found, updated_at: nowIso }, ...prev.filter(c => c.id !== id)];
+      });
+      supabase.from("chat_conversations").update({ updated_at: nowIso }).eq("id", id).then(() => {}, () => {});
+    }
+    return id;
+  }, [userId]);
+
+  /** Stop any in-flight typewriter/stream so it can't bleed into the new view. */
+  const haltStreaming = useCallback(() => {
+    if (typeTimerRef.current) { clearInterval(typeTimerRef.current); typeTimerRef.current = null; }
+    setStreamingMsg("");
+  }, []);
+
+  /** Start a fresh conversation, preserving memory from the current one.
+   *  Lands on the empty state (orb + smart chips) so it's clearly a NEW chat. */
+  const startNewChat = useCallback(() => {
+    flushSession(messagesRef.current);
+    haltStreaming();
+    sessionStartedAt.current = new Date().toISOString();
+    exchangeCountRef.current = 0;
+    currentConvIdRef.current = null;
+    setCurrentConversationId(null);
+    setHistoryOpen(false);
+    setReactions({});
+    setSmartChips(buildSmartChips(assignments, courses, userData));
+    setMessages([]); // empty → the fresh "new chat" interface
+  }, [flushSession, haltStreaming, assignments, courses, userData]);
+
+  /** Open a past conversation, preserving memory from the current one. */
+  const openConversation = useCallback(async (convId) => {
+    if (convId === currentConvIdRef.current) { setHistoryOpen(false); return; }
+    flushSession(messagesRef.current);
+    haltStreaming();
+    sessionStartedAt.current = new Date().toISOString();
+    exchangeCountRef.current = 0;
+    currentConvIdRef.current = convId;
+    setCurrentConversationId(convId);
+    setHistoryOpen(false);
+    setReactions({});
+    setMessages([]); // clear immediately so the switch is visible while loading
+    const loaded = await loadConversationMessages(convId);
+    // Guard against a stale switch if the user changed convos again mid-load
+    if (currentConvIdRef.current !== convId) return;
+    setMessages(loaded.length ? loaded : [{ role: "assistant", content: "This conversation is empty." }]);
+  }, [flushSession, haltStreaming]);
+
+  /** Delete a conversation (its messages cascade in the DB). */
+  const deleteConversation = useCallback(async (convId, e) => {
+    e?.stopPropagation?.();
+    setConversations(prev => prev.filter(c => c.id !== convId));
+    try { await supabase.from("chat_conversations").delete().eq("id", convId); } catch { /* non-fatal */ }
+    if (convId === currentConvIdRef.current) startNewChat();
+  }, [startNewChat]);
 
   // ── Typewriter ──────────────────────────────────────────────────────────────────────────
   const typewrite = useCallback((text, durationSecs) => {
@@ -1908,7 +2033,8 @@ export default function NeuralRing() {
     setMessages(m => [...m, userMsg]);
     setInput("");
     setLoading(true);
-    logChat(userId, "user", userMsg.content, null);
+    const convId = ensureConversation(userMsg.content);
+    logChat(userId, "user", userMsg.content, null, convId);
 
     // ── Brain behavioral signal (fire-and-forget) ─────────────────────────────
     // Every student message is a data point for the brain.
@@ -1949,7 +2075,7 @@ export default function NeuralRing() {
       const reply = voiceModeRef.current
         ? `Taking you to ${NAV_PAGE_LABELS[navMatch.page] || navMatch.page}.`
         : "On it.";
-      logChat(userId, "assistant", reply, null);
+      logChat(userId, "assistant", reply, null, currentConvIdRef.current);
       setMessages(m => [...m, { role: "assistant", content: reply }]);
       setLoading(false);
       if (voiceModeRef.current) {
@@ -2188,7 +2314,7 @@ export default function NeuralRing() {
           setVoiceQuizProgress({ current: 1, total: quizCards.length });
           const firstQ = quizCards[0];
           const intro  = `Alright, ${quizCards.length} questions. First one: ${firstQ.q}`;
-          logChat(userId, "assistant", intro, null);
+          logChat(userId, "assistant", intro, null, currentConvIdRef.current);
           setMessages(m => [...m, { role: "assistant", content: intro }]);
           setLoading(false);
           lastSpokenTextRef.current = intro;
@@ -2199,7 +2325,7 @@ export default function NeuralRing() {
         // ── Text mode: show full card set ────────────────────────────────
         const preText = rawClean.replace(/\[QUIZ_START\][\s\S]*?\[QUIZ_END\]/, "").trim();
         const display = preText || "Here's your quiz:";
-        logChat(userId, "assistant", display, null);
+        logChat(userId, "assistant", display, null, currentConvIdRef.current);
         setMessages(m => [...m, { role: "assistant", content: display, quiz: quizCards }]);
         setLoading(false);
         return;
@@ -2213,7 +2339,7 @@ export default function NeuralRing() {
         setTimeout(() => setPendingNav({ page: cmd.page }), 600);
       }
 
-      logChat(userId, "assistant", cleanText, null);
+      logChat(userId, "assistant", cleanText, null, currentConvIdRef.current);
       writeImpression(userId, userMsg.content, cleanText);
 
       // ── Self-write trigger — fires every 6th exchange ─────────────────────
@@ -2414,10 +2540,109 @@ export default function NeuralRing() {
                   </p>
                 </div>
 
+                {/* New chat */}
+                <button
+                  onClick={startNewChat}
+                  title="New chat"
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 32, height: 32, flexShrink: 0, borderRadius: "50%",
+                    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                    cursor: "pointer", outline: "none", WebkitTapHighlightColor: "transparent",
+                  }}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                </button>
+
+                {/* History */}
+                <button
+                  onClick={() => setHistoryOpen(true)}
+                  title="Chat history"
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 32, height: 32, flexShrink: 0, borderRadius: "50%",
+                    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                    cursor: "pointer", outline: "none", WebkitTapHighlightColor: "transparent",
+                  }}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M4 6h16M4 12h16M4 18h10" />
+                  </svg>
+                </button>
+
                 {/* Voice toggle */}
                 <VoiceToggle muted={muted} onClick={toggleMute} speaking={speaking} />
               </div>
             </div>
+
+            {/* ── Chat history panel ─────────────────────────────────────── */}
+            {historyOpen && (
+              <div style={{
+                position: "absolute", inset: 0, zIndex: 6,
+                background: "rgba(14,14,15,0.99)", borderRadius: "22px 22px 0 0",
+                display: "flex", flexDirection: "column",
+                animation: "nrHistIn 0.2s var(--ease-apple) both",
+              }}>
+                <style>{`@keyframes nrHistIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}`}</style>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px", padding: "18px 18px 14px", borderBottom: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
+                  <button
+                    onClick={() => setHistoryOpen(false)}
+                    title="Back"
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 30, height: 30, borderRadius: "50%", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)", cursor: "pointer", outline: "none" }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M15 18l-6-6 6-6" /></svg>
+                  </button>
+                  <span style={{ flex: 1, color: "var(--text-primary)", fontSize: "16px", fontWeight: 600, letterSpacing: "-0.2px" }}>Chats</span>
+                  <button
+                    onClick={startNewChat}
+                    style={{ display: "flex", alignItems: "center", gap: "5px", padding: "6px 12px", borderRadius: "20px", background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.14)", color: "rgba(255,255,255,0.7)", fontSize: "12px", fontWeight: 600, cursor: "pointer", fontFamily: "inherit", outline: "none" }}
+                  >
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round"><path d="M12 5v14M5 12h14" /></svg>
+                    New
+                  </button>
+                </div>
+                <div style={{ flex: 1, overflowY: "auto", padding: "8px" }}>
+                  {conversations.length === 0 ? (
+                    <p style={{ textAlign: "center", color: "rgba(255,255,255,0.3)", fontSize: "13px", marginTop: "40px" }}>
+                      No saved chats yet.
+                    </p>
+                  ) : conversations.map(c => {
+                    const active = c.id === currentConversationId;
+                    return (
+                      <div
+                        key={c.id}
+                        onClick={() => openConversation(c.id)}
+                        style={{
+                          display: "flex", alignItems: "center", gap: "10px",
+                          padding: "12px 12px", borderRadius: "12px", cursor: "pointer",
+                          background: active ? "rgba(255,255,255,0.07)" : "transparent",
+                          border: `1px solid ${active ? "rgba(255,255,255,0.12)" : "transparent"}`,
+                          marginBottom: "2px",
+                        }}
+                      >
+                        <div style={{ minWidth: 0, flex: 1 }}>
+                          <p style={{ color: "var(--text-primary)", fontSize: "14px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                            {c.title || "Untitled chat"}
+                          </p>
+                          <p style={{ color: "rgba(255,255,255,0.32)", fontSize: "11px", marginTop: "2px" }}>
+                            {relativeTime(c.updated_at)}
+                          </p>
+                        </div>
+                        <button
+                          onClick={(e) => deleteConversation(c.id, e)}
+                          title="Delete chat"
+                          style={{ flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: "8px", background: "none", border: "none", cursor: "pointer", outline: "none" }}
+                        >
+                          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.32)" strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /></svg>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
             {/* Messages */}
             <div style={{ flex: 1, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: "10px" }}>
