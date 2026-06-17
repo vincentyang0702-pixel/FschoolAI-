@@ -3,6 +3,7 @@
 
 const SUPABASE_URL  = "https://wqgxpouhbwhwpzudrptp.supabase.co";
 const SUPABASE_ANON = "sb_publishable_e-3KMudaL-iXf5GGsuiQaA_VW21ZZFA";
+const APP_ORIGIN    = "https://fschoolai.com"; // where /api/auth-migrate is deployed
 
 // Write to the isolated `neuroagi` schema — the SAME schema the app reads from
 // (src/supabase.js + every api/* route set schema = 'neuroagi'). Both sides MUST
@@ -51,25 +52,53 @@ function showError(id, msg) {
 }
 function clearError(id) { document.getElementById(id).classList.remove("visible"); }
 
-// ── Auth ──────────────────────────────────────────────────────────────────────
+// ── Auth (Supabase Auth / GoTrue) ──────────────────────────────────────────────
+// GoTrue password grant → { access_token, refresh_token, user }.
+async function authToken(email, password) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method:  "POST",
+    headers: { "apikey": SUPABASE_ANON, "Content-Type": "application/json" },
+    body:    JSON.stringify({ email: email.toLowerCase().trim(), password }),
+  });
+  const json = await res.json().catch(() => null);
+  if (!res.ok) { const e = new Error(json?.error_description ?? json?.msg ?? "auth failed"); e.status = res.status; throw e; }
+  return json;
+}
+
 async function login(email, password) {
-  const hash = await sha256(password);
+  let tok;
+  try {
+    tok = await authToken(email, password);
+  } catch {
+    // Pre-Auth account → lazy-migrate its SHA-256 hash via the web endpoint, then retry.
+    const res = await fetch(`${APP_ORIGIN}/api/auth-migrate?action=migrate`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ email: email.toLowerCase().trim(), password }),
+    });
+    if (!res.ok) throw new Error("Incorrect email or password");
+    tok = await authToken(email, password);
+  }
+  // Resolve the profile (text id) by auth_id, authenticated with the user's JWT.
   const rows = await sbFetch(
-    `users?email=eq.${encodeURIComponent(email.toLowerCase())}&password_hash=eq.${hash}&select=id,name,email`,
-    { method: "GET" }
+    `users?auth_id=eq.${tok.user.id}&select=id,name,email`,
+    { method: "GET", headers: { Authorization: `Bearer ${tok.access_token}` } }
   );
   if (!rows?.length) throw new Error("Incorrect email or password");
-  return rows[0];
+  return { ...rows[0], access_token: tok.access_token, refresh_token: tok.refresh_token };
 }
 
 async function signup(name, email, password) {
-  const hash = await sha256(password);
-  const id   = randomUUID();
-  const rows = await sbFetch("users", {
-    method: "POST",
-    body: JSON.stringify({ id, name, email: email.toLowerCase(), password_hash: hash }),
+  // Server creates the GoTrue user (bcrypt) + public.users profile, returns its id.
+  const res = await fetch(`${APP_ORIGIN}/api/auth-migrate?action=signup`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ name, email: email.toLowerCase().trim(), password }),
   });
-  return rows?.[0] ?? { id, name, email };
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || "Could not create your account");
+  const tok = await authToken(email, password);
+  return { id: body.userId, name, email, access_token: tok.access_token, refresh_token: tok.refresh_token };
 }
 
 async function saveSession(user) { await chrome.storage.local.set({ neuroagi_user: user }); }
