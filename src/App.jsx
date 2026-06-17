@@ -80,8 +80,8 @@ const SHELL_STYLES = `
   /* Tabs nav mode — web (≥768px): sidebar replaces the bottom bar, so shift
      content right to clear it (232px rail + 22px gutter) and drop the bottom pad. */
   @media (min-width: 768px) {
-    .app-nav-tabs .app-header { padding-left: 254px; }
-    .app-nav-tabs .app-main   { padding-left: 254px; padding-bottom: 100px; }
+    .app-nav-tabs .app-header { padding-left: calc(var(--nav-rail, 232px) + 22px); }
+    .app-nav-tabs .app-main   { padding-left: calc(var(--nav-rail, 232px) + 22px); padding-bottom: 100px; }
   }
 `;
 
@@ -107,6 +107,17 @@ export default function App() {
   const [onboardingInitName,  setOnboardingInitName] = useState("");
   const [currentPage,         setCurrentPage]        = useState("work");
   const [visible,             setVisible]            = useState(true);
+  // Web sidebar (tabs mode) collapse state — persisted.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => { try { return localStorage.getItem("fschool_sidebar_collapsed") === "1"; } catch { return false; } }
+  );
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed(v => {
+      const next = !v;
+      try { localStorage.setItem("fschool_sidebar_collapsed", next ? "1" : "0"); } catch { /* quota */ }
+      return next;
+    });
+  }, []);
 
   // ── Verify banner state ────────────────────────────────────────────────────
   const [verifyBanner, setVerifyBanner] = useState(() => {
@@ -554,6 +565,7 @@ export default function App() {
   return (
     <div
       className={navMode === "tabs" ? "app-shell app-nav-tabs" : "app-shell"}
+      style={{ "--nav-rail": sidebarCollapsed ? "64px" : "232px" }}
       {...(navMode === "tabs" ? {} : { onTouchStart, onTouchEnd })}
     >
       {overlays}
@@ -604,7 +616,12 @@ export default function App() {
       <NeuralRing />
 
       {navMode === "tabs" && (
-        <BottomNav currentPage={currentPage} onNavigate={navigate} />
+        <BottomNav
+          currentPage={currentPage}
+          onNavigate={navigate}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={toggleSidebar}
+        />
       )}
     </div>
   );

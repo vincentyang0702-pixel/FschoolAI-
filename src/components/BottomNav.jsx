@@ -59,25 +59,29 @@ function Icon({ name }) {
   }
 }
 
-// Vertical row for the sidebar.
-function SideItem({ pageKey, active, onClick }) {
+// Vertical row for the sidebar (icon-only when collapsed).
+function SideItem({ pageKey, active, collapsed, onClick }) {
   return (
     <button
       onClick={onClick}
+      title={collapsed ? ITEMS[pageKey].label : undefined}
       style={{
-        display: "flex", alignItems: "center", gap: "12px",
+        display: "flex", alignItems: "center", gap: collapsed ? 0 : "12px",
+        justifyContent: collapsed ? "center" : "flex-start",
         width: "100%", textAlign: "left", cursor: "pointer", fontFamily: "inherit",
         background: active ? "rgba(0,210,190,0.1)" : "transparent",
         border: "1px solid " + (active ? "rgba(0,210,190,0.28)" : "transparent"),
-        borderRadius: "12px", padding: "11px 13px",
+        borderRadius: "12px", padding: collapsed ? "11px 0" : "11px 13px",
         color: active ? ACCENT : INACTIVE,
         transition: "background 0.15s, color 0.15s, border-color 0.15s",
       }}
     >
       <Icon name={pageKey} />
-      <span style={{ fontSize: "14px", fontWeight: active ? 600 : 500 }}>
-        {ITEMS[pageKey].label}
-      </span>
+      {!collapsed && (
+        <span style={{ fontSize: "14px", fontWeight: active ? 600 : 500 }}>
+          {ITEMS[pageKey].label}
+        </span>
+      )}
     </button>
   );
 }
@@ -101,32 +105,58 @@ function BarItem({ pageKey, iconName, label, active, onClick }) {
   );
 }
 
-export default function BottomNav({ currentPage, onNavigate }) {
+export default function BottomNav({ currentPage, onNavigate, collapsed = false, onToggleCollapse }) {
   const isWide = useIsWide();
   const [moreOpen, setMoreOpen] = useState(false);
   const go = (key) => { setMoreOpen(false); onNavigate(key); };
 
-  // ── Web: left sidebar with every page ──────────────────────────────────────
+  // ── Web: collapsible left sidebar with every page ──────────────────────────
   if (isWide) {
+    const railW = collapsed ? 64 : RAIL_W;
     return (
       <aside style={{
-        position: "fixed", top: 0, left: 0, bottom: 0, zIndex: 90, width: `${RAIL_W}px`,
-        boxSizing: "border-box", padding: "24px 14px",
+        position: "fixed", top: 0, left: 0, bottom: 0, zIndex: 90, width: `${railW}px`,
+        boxSizing: "border-box", padding: collapsed ? "24px 8px" : "24px 14px",
         display: "flex", flexDirection: "column", gap: "4px",
         background: "rgba(12,13,16,0.86)",
         borderRight: "1px solid var(--color-border)",
         backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
-        overflowY: "auto",
+        overflowY: "auto", overflowX: "hidden",
+        transition: "width 0.2s var(--ease-apple), padding 0.2s var(--ease-apple)",
       }}>
-        <div style={{ padding: "4px 13px 16px", fontSize: "13px", fontWeight: 700, letterSpacing: "0.4px", color: "var(--text-primary)" }}>
-          FschoolAI
+        {/* Brand + collapse toggle */}
+        <div style={{
+          display: "flex", alignItems: "center",
+          justifyContent: collapsed ? "center" : "space-between",
+          padding: collapsed ? "0 0 16px" : "4px 9px 16px",
+        }}>
+          {!collapsed && (
+            <span style={{ fontSize: "13px", fontWeight: 700, letterSpacing: "0.4px", color: "var(--text-primary)" }}>
+              FschoolAI
+            </span>
+          )}
+          <button
+            onClick={onToggleCollapse}
+            title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+            style={{
+              display: "flex", alignItems: "center", justifyContent: "center",
+              width: 30, height: 30, flexShrink: 0, borderRadius: "8px",
+              background: "rgba(255,255,255,0.05)", border: "1px solid var(--color-border)",
+              cursor: "pointer", outline: "none",
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+              style={{ transform: collapsed ? "rotate(180deg)" : "none", transition: "transform 0.2s" }}>
+              <path d="M15 18l-6-6 6-6" />
+            </svg>
+          </button>
         </div>
         {PRIMARY.map(key => (
-          <SideItem key={key} pageKey={key} active={currentPage === key} onClick={() => go(key)} />
+          <SideItem key={key} pageKey={key} active={currentPage === key} collapsed={collapsed} onClick={() => go(key)} />
         ))}
-        <div style={{ height: "1px", background: "var(--color-border)", margin: "8px 13px" }} />
+        <div style={{ height: "1px", background: "var(--color-border)", margin: collapsed ? "8px 6px" : "8px 13px" }} />
         {SECONDARY.map(key => (
-          <SideItem key={key} pageKey={key} active={currentPage === key} onClick={() => go(key)} />
+          <SideItem key={key} pageKey={key} active={currentPage === key} collapsed={collapsed} onClick={() => go(key)} />
         ))}
       </aside>
     );
