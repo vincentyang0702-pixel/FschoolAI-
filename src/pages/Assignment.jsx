@@ -88,9 +88,13 @@ function formatDue(dueAt) {
 export default function Assignment() {
   const { assignments: liveAssignments, canvasToken, userId, userData } = useApp();
 
-  // Real assignments only — sorted by due date, unsubmitted
+  // Real assignments only — sorted by due date, unsubmitted.
+  // NOTE: don't gate on canvasToken — assignments can be synced by the browser
+  // extension (which writes straight to the DB, no Canvas OAuth token), so the
+  // Work/Courses pages show them. Gating here on canvasToken hid extension-synced
+  // assignments behind the "Connect Canvas" empty state even though they exist.
   const assignments = useMemo(() => {
-    if (!canvasToken || !liveAssignments.length) return [];
+    if (!liveAssignments.length) return [];
     return [...liveAssignments]
       .filter(a => !a.submission?.submittedAt)
       .sort((a, b) => {
@@ -100,7 +104,7 @@ export default function Assignment() {
         return new Date(a.dueAt) - new Date(b.dueAt);
       })
       .slice(0, 20);
-  }, [liveAssignments, canvasToken]);
+  }, [liveAssignments]);
 
   const [selected, setSelected]   = useState(null);
   const [draft, setDraft]         = useState("");
@@ -417,18 +421,14 @@ export default function Assignment() {
         Assignments
       </h1>
       <p style={{ color: "var(--text-dim)", fontSize: "14px", marginBottom: "28px" }}>
-        {!canvasToken
-          ? "Connect Canvas to see your assignments"
-          : assignments.length > 0
+        {assignments.length > 0
           ? `${assignments.length} pending assignment${assignments.length !== 1 ? "s" : ""}`
-          : "You're all caught up"}
+          : canvasToken
+          ? "You're all caught up"
+          : "Connect Canvas to see your assignments"}
       </p>
 
-      {!canvasToken ? (
-        <NoCanvasState />
-      ) : assignments.length === 0 ? (
-        <AllDoneState />
-      ) : (
+      {assignments.length > 0 ? (
         <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
           {assignments.map((a) => {
             const due = formatDue(a.dueAt);
@@ -459,6 +459,10 @@ export default function Assignment() {
             );
           })}
         </div>
+      ) : canvasToken ? (
+        <AllDoneState />
+      ) : (
+        <NoCanvasState />
       )}
     </div>
   );

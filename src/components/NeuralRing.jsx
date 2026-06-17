@@ -30,7 +30,14 @@ async function claudeTutor(messages, system, signal, tools) {
     signal,  // abort signal from stopResponse()
   });
   if (!res.ok) throw new Error(`Claude proxy ${res.status}`);
-  return await res.json();
+  // /api/claude returns { content, contentBlocks, stop_reason, usage }. The chat
+  // paths consume the joined text STRING (parseVoiceTags/nav parsing call .trim()
+  // etc.), and groq() returns a string too — so return the text to match that
+  // contract. Returning the raw object here made `raw` an object → parseVoiceTags'
+  // `cleaned.trim()` threw → "Something went wrong." (regression from the merge
+  // that dropped the tool-use loop, which was the only caller needing the object).
+  const data = await res.json();
+  return data.content ?? "";
 }
 
 // The agent's one data-fetch tool. The model calls it only when an answer needs
@@ -1735,14 +1742,20 @@ export default function NeuralRing() {
   // Fires before any API call so navigation feels instant. Claude's <nav> tags
   // handle all other nav (e.g. "I want to study calculus") — this is just a fast
   // path for the obvious verbs that never need AI interpretation.
+  // Each intent requires an EXPLICIT navigation verb before the page noun. The old
+  // patterns made the verb optional (e.g. `(go to|open)?\s*(my courses?)`), so any
+  // message merely CONTAINING "courses"/"assignments" was hijacked into a silent
+  // page-switch + "On it." and never reached the tutor. Real questions
+  // ("help me with my courses", "show me my courses") must fall through to Claude,
+  // which can still navigate on its own via <nav> tags when that's the right move.
   const NAV_INTENTS = [
-    { re: /\b(take me to|go to|open|let'?s|start)\s*(study|flashcard|flash card|review)\b/i,           page: "study"       },
-    { re: /\b(open|go to|take me to)?\s*toolkit\b|\bmy tools\b|\bbrain mode\b/i,                       page: "toolkit"     },
-    { re: /\b(show|open|go to|take me to)?\s*(leaderboard|ranking|scoreboard|my rank|standings)\b/i,  page: "leaderboard" },
-    { re: /\b(go to|open|sync|take me to)?\s*(canvas|my courses?|course page)\b/i,                    page: "canvas"      },
-    { re: /\b(go to|open|show|take me to)?\s*(assignments?|my assignments?|homework)\b/i,             page: "assignment"  },
-    { re: /\b(go home|take me home|open dashboard|go to dashboard|go to work|my work)\b/i,            page: "work"        },
-    { re: /\b(my profile|open profile|go to profile|settings|identity|go to identity)\b/i,            page: "identity"    },
+    { re: /\b(take me to|go to|open|navigate to|switch to)\s+(the\s+)?(study|flashcards?|flash card|review)\b/i,            page: "study"       },
+    { re: /\b(take me to|go to|open|navigate to|switch to)\s+(the\s+)?(toolkit|my tools|brain mode)\b/i,                    page: "toolkit"     },
+    { re: /\b(take me to|go to|open|navigate to|switch to)\s+(the\s+)?(leaderboard|ranking|scoreboard|standings|my rank)\b/i, page: "leaderboard" },
+    { re: /\b(take me to|go to|open|navigate to|switch to)\s+(the\s+)?(canvas|my courses?|courses? page|course page)\b/i,   page: "canvas"      },
+    { re: /\b(take me to|go to|open|navigate to|switch to)\s+(the\s+)?(assignments?|my assignments?|homework)\b/i,         page: "assignment"  },
+    { re: /\b(go home|take me home|open dashboard|go to dashboard|go to work)\b/i,                                          page: "work"        },
+    { re: /\b(take me to|go to|open|navigate to|switch to)\s+(my\s+|the\s+)?(profile|settings|identity)\b/i,               page: "identity"    },
   ];
   const NAV_PAGE_LABELS = {
     work:        "your dashboard",

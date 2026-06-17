@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { useApp }                    from "../context/AppContext";
+import { supabase }                  from "../api/supabase";
 import GradeGraph, { COURSE_COLORS } from "../components/GradeGraph";
 import ShareCard                     from "../components/ShareCard";
 import FriendsSection                from "../components/FriendsSection";
@@ -127,7 +128,9 @@ export default function Identity() {
     pct:  c.currentScore ?? c.finalScore ?? null,
   }));
 
-  function handleSignOut() {
+  async function handleSignOut() {
+    // End the Supabase Auth (GoTrue) session, then clear local state regardless.
+    try { await supabase.auth.signOut(); } catch { /* clear local state regardless */ }
     // Clear the FULL identity — especially fschool_uid. Leaving it behind made the
     // next signup reuse this user's id and overwrite their row (accounts collapsed).
     localStorage.removeItem("fschool_uid");

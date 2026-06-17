@@ -307,7 +307,40 @@ const fileUrlProxyPlugin = {
   },
 };
 
+// Auth-migrate proxy — runs the real serverless handler under the dev server so
+// signup / login lazy-migration / password reset work with `npm run dev`. The
+// handler builds its Supabase client at MODULE LOAD using process.env, so we set
+// env first and DYNAMICALLY import it per-request (a static import would evaluate
+// before env is injected and throw "supabaseUrl is required"). It reads ?action=.
+const authMigrateProxyPlugin = {
+  name: "auth-migrate-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/auth-migrate", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+      process.env.SUPABASE_URL         = loadEnvKey("SUPABASE_URL");
+      process.env.SUPABASE_SERVICE_KEY = loadEnvKey("SUPABASE_SERVICE_KEY");
+      const url = new URL(req.url, "http://localhost");
+      req.query = Object.fromEntries(url.searchParams.entries());
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try {
+          const { default: handler } = await import("./api/auth-migrate.js");
+          await handler(req, res);
+        } catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
 export default defineConfig({
-  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin],
+  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin],
   server:  { port: 5173, host: "0.0.0.0", allowedHosts: true },
 });
