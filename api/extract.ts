@@ -174,38 +174,63 @@ function youtubeId(url: string): string | null {
   return /^[A-Za-z0-9_-]{11}$/.test(String(url).trim()) ? String(url).trim() : null;
 }
 
-// YouTube → transcript. Best-effort: scrape the watch page for a caption track,
-// fetch its timedtext XML, and join the cues. Fails gracefully (no/blocked captions).
+// YouTube → transcript via the InnerTube ANDROID player. The caption URLs on the
+// public watch page are now "pot"-gated (they return 200 with an EMPTY body without
+// a proof-of-origin token). The ANDROID InnerTube client returns caption URLs that
+// aren't gated, so we go through it. Fails gracefully (no captions / blocked).
+const YT_INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"; // public web key (fallback)
+const YT_ANDROID_VER = "20.10.38";
+
 async function youtubeToPages(url: string) {
   const id = youtubeId(url);
   if (!id) throw new Error("Couldn't parse a YouTube video id from that link.");
-  const page = await (await fetch(`https://www.youtube.com/watch?v=${id}&hl=en`, {
-    headers: { "User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en" },
-  })).text();
-  const m = page.match(/"captionTracks":(\[.*?\]),"/);
-  if (!m) throw new Error("No captions are available for this video.");
-  let tracks: any[];
-  try { tracks = JSON.parse(m[1]); } catch { throw new Error("Couldn't read this video's captions."); }
-  const track = tracks.find(t => (t.languageCode || "").startsWith("en")) || tracks[0];
+  const base = { "User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en" };
+
+  // Pull the current InnerTube key from the watch page (falls back to the web key).
+  let key = YT_INNERTUBE_KEY;
+  try {
+    const page = await (await fetch(`https://www.youtube.com/watch?v=${id}&hl=en`, { headers: base })).text();
+    key = (page.match(/"INNERTUBE_API_KEY":"([^"]+)"/) || [])[1] || key;
+  } catch { /* use fallback key */ }
+
+  const pr = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${key}`, {
+    method:  "POST",
+    headers: {
+      ...base, "Content-Type": "application/json",
+      "X-YouTube-Client-Name": "3", "X-YouTube-Client-Version": YT_ANDROID_VER,
+      "User-Agent": `com.google.android.youtube/${YT_ANDROID_VER} (Linux; U; Android 14) gzip`,
+    },
+    body: JSON.stringify({
+      context: { client: { clientName: "ANDROID", clientVersion: YT_ANDROID_VER, androidSdkVersion: 34, hl: "en" } },
+      videoId: id,
+    }),
+  });
+  const pj: any = await pr.json().catch(() => ({}));
+  const tracks: any[] = pj?.captions?.playerCaptionsTracklistRenderer?.captionTracks || [];
+  if (!tracks.length) throw new Error("No captions are available for this video.");
+
+  // Prefer English, and prefer human captions over auto-generated (asr) when both exist.
+  const en = tracks.filter(t => (t.languageCode || "").startsWith("en"));
+  const pool = en.length ? en : tracks;
+  const track = pool.find(t => t.kind !== "asr") || pool[0];
   if (!track?.baseUrl) throw new Error("No caption track found.");
 
-  const ua = { "User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en" };
+  // The ANDROID caption URL bakes in &fmt=srv3 (XML). SET fmt=json3 (replacing srv3)
+  // for clean JSON; fall back to parsing srv3 <p>/<s> cues if json3 isn't returned.
   let text = "";
-
-  // json3 is far more reliable than the default timedtext XML, which YouTube now
-  // frequently returns EMPTY for the scraped baseUrl. Try json3 first.
   try {
-    const j: any = await (await fetch(`${track.baseUrl}&fmt=json3`, { headers: ua })).json();
+    const u = new URL(track.baseUrl); u.searchParams.set("fmt", "json3");
+    const j: any = await (await fetch(u.toString(), { headers: base })).json();
     text = (j.events ?? [])
       .flatMap((e: any) => (e.segs ?? []).map((s: any) => s.utf8 ?? ""))
       .join("").replace(/\s+/g, " ").trim();
-  } catch { /* fall back to XML */ }
+  } catch { /* fall back to srv3 XML */ }
 
   if (!text) {
-    const xml = await (await fetch(track.baseUrl, { headers: ua })).text();
-    text = [...xml.matchAll(/<text[^>]*>([\s\S]*?)<\/text>/g)]
-      .map(mm => decodeXml(mm[1].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim())
-      .filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
+    const xml = await (await fetch(track.baseUrl, { headers: base })).text();
+    text = [...xml.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/g)]
+      .map(mm => decodeXml(mm[1].replace(/<[^>]+>/g, ""))) // strip <s> tokens, keep their text + spacing
+      .join(" ").replace(/\s+/g, " ").trim();
   }
 
   if (!text) throw new Error("The transcript came back empty.");
