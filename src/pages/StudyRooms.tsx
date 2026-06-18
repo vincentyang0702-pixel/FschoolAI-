@@ -956,10 +956,13 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [wbPenWidth,         setWbPenWidth]         = useState(PEN_WIDTHS[1]);
   const [wbEraserSize,       setWbEraserSize]       = useState(ERASER_SIZES[1]);
   const [wbBg,               setWbBg]               = useState(DEFAULT_BG);
+  const [liveStrokes,        setLiveStrokes]        = useState<Record<string, { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }>>({});
   const boardLoadedRef = useRef(false);
+  const lastLiveSentRef = useRef(0);
 
   const channelRef          = useRef(null);
   const reqChRef            = useRef(null);
+  const wbChRef             = useRef(null);
   const sessionIdRef        = useRef(null);
   const joinedAtRef         = useRef(Date.now());
   const workingOnRef        = useRef("");
@@ -980,6 +983,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     fetchPomodoroState();
     fetchCourseName();
     if (isHost) subscribeRequests();
+    wbChRef.current = subscribeWhiteboard();
     const timer = setInterval(() => setTick(n => n + 1), 1000);
     const handleUnload = () => void endSession();
     window.addEventListener("beforeunload", handleUnload);
@@ -989,6 +993,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       window.removeEventListener("beforeunload", handleUnload);
       // Abort any in-flight buddy stream on unmount
       buddyAbortRef.current?.abort();
+      try { wbChRef.current?.unsubscribe(); } catch {}
       endSession();
     };
   }, []); // eslint-disable-line
@@ -1112,7 +1117,15 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           : (m.joinedAt ?? 0) >= (prev.joinedAt ?? 0);
         if (better) byUser.set(m.userId, m);
       }
-      setMembers(Array.from(byUser.values()));
+      const collapsed = Array.from(byUser.values());
+      setMembers(collapsed);
+      // Remove live strokes for users no longer present.
+      setLiveStrokes(prev => {
+        const presentIds = new Set(byUser.keys());
+        const next = { ...prev };
+        for (const id of Object.keys(next)) if (!presentIds.has(id)) delete next[id];
+        return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+      });
     })
     .on("broadcast", { event: "room_closed" }, () => {
       if (!leftRef.current) endSession().then(() => onLeave());
@@ -1143,17 +1156,6 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         return [...prev, payload as ChatMessage];
       });
     })
-    // Whiteboard — a peer completed a stroke
-    .on("broadcast", { event: "wb_stroke" }, ({ payload }) => {
-      setStrokes(prev => {
-        if (prev.some(s => s.id === payload.id)) return prev;
-        return [...prev, payload as Stroke];
-      });
-    })
-    // Whiteboard — a peer erased a single stroke (stroke eraser)
-    .on("broadcast", { event: "wb_delete" }, ({ payload }) => {
-      setStrokes(prev => prev.filter(s => s.id !== payload.id));
-    })
     // Whiteboard — a peer changed the background
     .on("broadcast", { event: "wb_bg" }, ({ payload }) => {
       setWbBg(payload.bg || DEFAULT_BG);
@@ -1162,6 +1164,12 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     .on("broadcast", { event: "wb_clear" }, () => {
       setStrokes([]);
       setWbBg(DEFAULT_BG);
+      setLiveStrokes({});
+    })
+    // Whiteboard — a peer is actively drawing (live preview)
+    .on("broadcast", { event: "wb_live" }, ({ payload }) => {
+      if (payload.userId === userId) return;
+      setLiveStrokes(prev => ({ ...prev, [payload.userId]: { mode: payload.mode, style: payload.style, color: payload.color, width: payload.width, points: payload.points } }));
     })
     .subscribe(async (status) => {
       if (status === "SUBSCRIBED") await ch.track(presencePayload());
@@ -1186,6 +1194,29 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       }
     }).subscribe();
     reqChRef.current = ch;
+  }
+
+  function subscribeWhiteboard() {
+    const ch = supabase.channel("wb-" + room.id);
+    ch.on("postgres_changes", {
+      event: "INSERT",
+      schema: "public",
+      table: "whiteboard_strokes",
+      filter: `room_id=eq.${room.id}`,
+    }, ({ new: row }) => {
+      setStrokes(prev => prev.some(s => s.id === row.id) ? prev : [...prev, row as Stroke]);
+      setLiveStrokes(prev => { const n = { ...prev }; delete n[row.user_id]; return n; });
+    })
+    .on("postgres_changes", {
+      event: "DELETE",
+      schema: "public",
+      table: "whiteboard_strokes",
+      filter: `room_id=eq.${room.id}`,
+    }, ({ old: row }) => {
+      setStrokes(prev => prev.filter(s => s.id !== row.id));
+    })
+    .subscribe();
+    return ch;
   }
 
   async function enrichRequests(rows) {
@@ -1451,9 +1482,8 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     setStrokes(prev => [...prev, optimistic]);
     try {
       const saved = await addStroke(userId, room.id, stroke.mode, stroke.style, stroke.color, stroke.width, stroke.points);
-      // Swap the temp ID for the real server ID.
+      // Swap the temp ID for the real server ID. Postgres CHANGES will fire and sync to peers.
       setStrokes(prev => prev.map(s => s.id === tempId ? saved : s));
-      channelRef.current?.send({ type: "broadcast", event: "wb_stroke", payload: saved }).catch(() => {});
     } catch (err) {
       console.error("[wb] stroke:", (err as any)?.message);
       // Leave the optimistic stroke in local state so it stays visible on the canvas,
@@ -1463,7 +1493,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
 
   async function handleEraseStroke(strokeId: string) {
     setStrokes(prev => prev.filter(s => s.id !== strokeId)); // optimistic
-    channelRef.current?.send({ type: "broadcast", event: "wb_delete", payload: { id: strokeId } }).catch(() => {});
+    // Postgres CHANGES will fire and sync deletion to peers
     try { await deleteStroke(userId, room.id, strokeId); }
     catch (err) { console.error("[wb] erase:", (err as any)?.message); }
   }
@@ -1473,6 +1503,14 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     channelRef.current?.send({ type: "broadcast", event: "wb_bg", payload: { bg } }).catch(() => {});
     try { await setBackground(userId, room.id, bg); }
     catch (err) { console.error("[wb] bg:", (err as any)?.message); }
+  }
+
+  function handleLiveStroke(draft: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] } | null) {
+    if (!draft) return; // stroke finished — wb_stroke broadcast clears peers' live preview
+    const now = Date.now();
+    if (now - lastLiveSentRef.current < 70) return; // ~14/s — under the 30/s realtime budget
+    lastLiveSentRef.current = now;
+    channelRef.current?.send({ type: "broadcast", event: "wb_live", payload: { userId, ...draft } }).catch(() => {});
   }
 
   async function handleClearBoard() {
@@ -1728,6 +1766,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       {showBoard && (
         <Whiteboard
           strokes={strokes}
+          liveStrokes={liveStrokes}
           tool={wbTool}
           style={wbStyle}
           color={wbColor}
@@ -1742,6 +1781,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           onBgChange={handleBgChange}
           onStrokeComplete={handleStrokeComplete}
           onEraseStroke={handleEraseStroke}
+          onLiveStroke={handleLiveStroke}
           onClear={handleClearBoard}
           onClose={() => setShowBoard(false)}
         />

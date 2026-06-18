@@ -1,18 +1,20 @@
-// Whiteboard.tsx — Phase 3 collaborative whiteboard (v2).
+// Whiteboard.tsx — Phase 3 collaborative whiteboard (v3).
 //
 // Coordinates live in a FIXED space (BOARD_W × BOARD_H) so every device renders the
 // same picture; the <canvas> buffer is that size and CSS scales it to fit.
 //
-// RENDERING — two-layer compositing:
-//   1. An offscreen "ink" canvas holds every stroke. Pen strokes paint normally;
-//      area-eraser strokes use destination-out (punching transparent holes).
-//   2. The visible canvas is filled with the chosen background, then the ink layer
-//      is drawn on top — so eraser holes reveal the *background colour*, not the page.
-//   The ink layer is rebuilt only when `strokes` changes; live drawing just
-//   re-composites (cheap) so dragging stays smooth on a busy board.
+// RENDERING — one canvas, one pass (no offscreen layers, no destination-out):
+//   Every render clears the canvas, fills the background, then draws every committed
+//   stroke in order followed by every in-progress (live) stroke. Strokes simply
+//   overlap — drawing always adds, never wipes. The area-eraser is just a stroke
+//   painted in the *current* background colour (source-over), so it covers whatever
+//   is beneath it and re-colours itself for free whenever the background changes.
+//   Redrawing from the stroke list on every change makes multi-user state
+//   impossible to desync, at the cost of a full redraw per frame (fine for the
+//   modest stroke counts a study board sees).
 //
 // TOOLS: pen (5 styles) · stroke-eraser (tap a line to delete it) · area-eraser
-// (circular destination-out brush).
+// (background-coloured brush).
 
 import { useEffect, useRef } from "react";
 import type { Point, Stroke, PenStyle } from "../api/whiteboard";
@@ -55,25 +57,26 @@ function dist(a: Point, b: Point) {
   return Math.hypot(a.x - b.x, a.y - b.y);
 }
 
-function drawStroke(ctx: CanvasRenderingContext2D, s: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) {
+function drawStroke(ctx: CanvasRenderingContext2D, s: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }, bgColor: string) {
   const pts = s.points;
   if (!pts || pts.length === 0) return;
   ctx.save();
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
+  ctx.globalCompositeOperation = "source-over";
 
-  // Area eraser: cut holes in the ink layer.
+  // Area eraser: paint over with the current background colour so it covers
+  // whatever is underneath. No destination-out, so it can never punch through
+  // to other users' strokes unexpectedly.
   if (s.mode === "erase") {
-    ctx.globalCompositeOperation = "destination-out";
-    ctx.strokeStyle = "rgba(0,0,0,1)";
-    ctx.fillStyle = "rgba(0,0,0,1)";
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = bgColor;
+    ctx.fillStyle = bgColor;
     ctx.lineWidth = s.width;
     strokePath(ctx, pts, s.width);
     ctx.restore();
     return;
   }
-
-  ctx.globalCompositeOperation = "source-over";
 
   switch (s.style) {
     case "highlighter":
@@ -168,11 +171,12 @@ function hitStroke(p: Point, s: Stroke, tol: number): boolean {
 }
 
 export default function Whiteboard({
-  strokes, tool, style, color, penWidth, eraserSize, bg,
+  strokes, liveStrokes, tool, style, color, penWidth, eraserSize, bg,
   onToolChange, onStyleChange, onColorChange, onPenWidthChange, onEraserSizeChange, onBgChange,
-  onStrokeComplete, onEraseStroke, onClear, onClose,
+  onStrokeComplete, onEraseStroke, onLiveStroke, onClear, onClose,
 }: {
   strokes: Stroke[];
+  liveStrokes?: Record<string, { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }>;
   tool: Tool; style: PenStyle; color: string; penWidth: number; eraserSize: number; bg: string;
   onToolChange: (t: Tool) => void;
   onStyleChange: (s: PenStyle) => void;
@@ -182,11 +186,11 @@ export default function Whiteboard({
   onBgChange: (c: string) => void;
   onStrokeComplete: (s: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) => void;
   onEraseStroke: (strokeId: string) => void;
+  onLiveStroke?: (s: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] } | null) => void;
   onClear: () => void;
   onClose: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const inkRef = useRef<HTMLCanvasElement | null>(null); // offscreen committed strokes
   const drawingRef = useRef(false);
   const currentRef = useRef<Point[]>([]);
   const erasedThisDragRef = useRef<Set<string>>(new Set());
@@ -198,18 +202,11 @@ export default function Whiteboard({
   const penWRef   = useRef(penWidth);   penWRef.current = penWidth;
   const eraserRef = useRef(eraserSize); eraserRef.current = eraserSize;
   const strokesRef = useRef(strokes);   strokesRef.current = strokes;
+  const liveStrokesRef = useRef(liveStrokes ?? {}); liveStrokesRef.current = liveStrokes ?? {};
 
-  // Rebuild the offscreen ink layer (only when committed strokes change).
-  function rebuildInk() {
-    let ink = inkRef.current;
-    if (!ink) { ink = document.createElement("canvas"); ink.width = BOARD_W; ink.height = BOARD_H; inkRef.current = ink; }
-    const ictx = ink.getContext("2d")!;
-    ictx.clearRect(0, 0, BOARD_W, BOARD_H);
-    for (const s of strokes) drawStroke(ictx, s);
-  }
-
-  // Composite background + ink + the in-progress stroke onto the visible canvas.
-  function composite() {
+  // Draw the whole board: background, every committed stroke in order, then every
+  // in-progress stroke (the local one + remote peers'). One pass, always additive.
+  function render() {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext("2d")!;
@@ -217,24 +214,29 @@ export default function Whiteboard({
     ctx.globalAlpha = 1;
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, BOARD_W, BOARD_H);
-    if (inkRef.current) ctx.drawImage(inkRef.current, 0, 0);
 
+    for (const s of strokes) drawStroke(ctx, s, bg);
+
+    // Remote peers' in-progress strokes.
+    for (const draft of Object.values(liveStrokesRef.current)) {
+      drawStroke(ctx, draft, bg);
+    }
+
+    // The local in-progress stroke, drawn last so it sits on top.
     if (drawingRef.current && currentRef.current.length && toolRef.current !== "stroke-erase") {
-      // For the live area-eraser preview we can't destination-out the page; show a
-      // translucent trail instead. The committed version will cut the ink properly.
-      if (toolRef.current === "area-erase") {
-        ctx.save();
-        ctx.globalAlpha = 0.5;
-        drawStroke(ctx, { mode: "pen", style: "normal", color: bg, width: eraserRef.current, points: currentRef.current });
-        ctx.restore();
-      } else {
-        drawStroke(ctx, { mode: "pen", style: styleRef.current, color: colorRef.current, width: penWRef.current, points: currentRef.current });
-      }
+      drawStroke(ctx, {
+        mode: toolRef.current === "area-erase" ? "erase" : "pen",
+        style: styleRef.current,
+        color: colorRef.current,
+        width: toolRef.current === "area-erase" ? eraserRef.current : penWRef.current,
+        points: currentRef.current,
+      }, bg);
     }
   }
 
-  useEffect(() => { rebuildInk(); composite(); }, [strokes]);   // eslint-disable-line
-  useEffect(() => { composite(); }, [bg]);                       // eslint-disable-line
+  useEffect(() => { render(); }, [strokes]);      // eslint-disable-line
+  useEffect(() => { render(); }, [bg]);           // eslint-disable-line
+  useEffect(() => { render(); }, [liveStrokes]);  // eslint-disable-line
 
   function toBoard(e: React.PointerEvent): Point {
     const r = canvasRef.current!.getBoundingClientRect();
@@ -269,7 +271,7 @@ export default function Whiteboard({
       return;
     }
     currentRef.current = [pt];
-    composite();
+    render();
   }
 
   function onPointerMove(e: React.PointerEvent) {
@@ -277,7 +279,14 @@ export default function Whiteboard({
     const pt = toBoard(e);
     if (toolRef.current === "stroke-erase") { eraseAt(pt); return; }
     currentRef.current.push(pt);
-    composite();
+    render();
+    onLiveStroke?.({
+      mode: toolRef.current === "area-erase" ? "erase" : "pen",
+      style: styleRef.current,
+      color: colorRef.current,
+      width: toolRef.current === "area-erase" ? eraserRef.current : penWRef.current,
+      points: currentRef.current,
+    });
   }
 
   function finishStroke() {
@@ -286,6 +295,7 @@ export default function Whiteboard({
     if (toolRef.current === "stroke-erase") { erasedThisDragRef.current = new Set(); return; }
     const points = currentRef.current;
     currentRef.current = [];
+    onLiveStroke?.(null);
     if (points.length === 0) return;
     const isErase = toolRef.current === "area-erase";
     const finished = {
@@ -295,11 +305,9 @@ export default function Whiteboard({
       width: isErase ? eraserRef.current : penWRef.current,
       points,
     };
-    // Commit to the ink layer immediately so the stroke stays put regardless of
-    // how long the save round-trips (or even if it fails) — a later rebuildInk()
-    // from the parent's strokes state is idempotent and stays consistent.
-    if (inkRef.current) drawStroke(inkRef.current.getContext("2d")!, finished);
-    composite();
+    // No render() here: the previous pointer-move frame already shows this stroke,
+    // and the parent's optimistic setStrokes triggers a render that draws it as a
+    // committed stroke — so it stays on screen with no flash.
     onStrokeComplete(finished);
   }
 
