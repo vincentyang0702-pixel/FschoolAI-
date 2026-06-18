@@ -3,6 +3,7 @@
 // RoomView receive counts as props. Keeps room core + friends layer modular.
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { useApp } from "../context/AppContext";
 import { supabase } from "../api/supabase";
 import { awardTokens } from "../api/tokens";
@@ -14,6 +15,9 @@ import {
 import type { AccessFilters } from "../api/rooms";
 import { loadRecentMessages, postRoomMessage } from "../api/chat";
 import type { ChatMessage } from "../api/chat";
+import { loadStrokes, addStroke, clearBoard } from "../api/whiteboard";
+import type { Stroke, Point } from "../api/whiteboard";
+import Whiteboard, { PEN_COLORS } from "../components/Whiteboard";
 import StudyOrb from "../components/StudyOrb";
 
 // ── Access filters ────────────────────────────────────────────────────────────
@@ -942,6 +946,12 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [chatInput,          setChatInput]          = useState("");
   const [chatSending,        setChatSending]        = useState(false);
   const chatLoadedRef = useRef(false);
+  // Phase 3 — Whiteboard
+  const [showBoard,          setShowBoard]          = useState(false);
+  const [strokes,            setStrokes]            = useState<Stroke[]>([]);
+  const [wbTool,             setWbTool]             = useState<"pen" | "erase">("pen");
+  const [wbColor,            setWbColor]            = useState(PEN_COLORS[0]);
+  const boardLoadedRef = useRef(false);
 
   const channelRef          = useRef(null);
   const reqChRef            = useRef(null);
@@ -1128,6 +1138,17 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         return [...prev, payload as ChatMessage];
       });
     })
+    // Whiteboard — a peer completed a stroke
+    .on("broadcast", { event: "wb_stroke" }, ({ payload }) => {
+      setStrokes(prev => {
+        if (prev.some(s => s.id === payload.id)) return prev;
+        return [...prev, payload as Stroke];
+      });
+    })
+    // Whiteboard — a peer cleared the board
+    .on("broadcast", { event: "wb_clear" }, () => {
+      setStrokes([]);
+    })
     .subscribe(async (status) => {
       if (status === "SUBSCRIBED") await ch.track(presencePayload());
     });
@@ -1183,6 +1204,14 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     if (leftRef.current) return;
     leftRef.current = true;
     if (channelRef.current) {
+      // Session-only whiteboard: if I'm the last present member, wipe the board.
+      // Read presence BEFORE untracking and clear BEFORE leaveRoom drops my
+      // membership (the clear RPC requires me to still be a joined member).
+      try {
+        const present = Object.values(channelRef.current.presenceState()).flat() as any[];
+        const othersOnline = new Set(present.map(p => p.userId).filter(id => id !== userId));
+        if (othersOnline.size === 0) await clearBoard(userId, room.id).catch(() => {});
+      } catch {}
       try { await channelRef.current.untrack(); } catch {}
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
@@ -1383,6 +1412,34 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     }
   }
 
+  function handleOpenBoard() {
+    setShowBoard(true);
+    if (!boardLoadedRef.current) {
+      boardLoadedRef.current = true;
+      loadStrokes(userId, room.id).then(setStrokes).catch(err => {
+        console.error("[wb] load:", (err as any)?.message);
+        boardLoadedRef.current = false; // allow retry on next open if it failed
+      });
+    }
+  }
+
+  async function handleStrokeComplete(stroke: { mode: "pen" | "erase"; color: string; width: number; points: Point[] }) {
+    try {
+      const saved = await addStroke(userId, room.id, stroke.mode, stroke.color, stroke.width, stroke.points);
+      setStrokes(prev => prev.some(s => s.id === saved.id) ? prev : [...prev, saved]);
+      channelRef.current?.send({ type: "broadcast", event: "wb_stroke", payload: saved }).catch(() => {});
+    } catch (err) {
+      console.error("[wb] stroke:", (err as any)?.message);
+    }
+  }
+
+  async function handleClearBoard() {
+    setStrokes([]);
+    channelRef.current?.send({ type: "broadcast", event: "wb_clear", payload: {} }).catch(() => {});
+    try { await clearBoard(userId, room.id); }
+    catch (err) { console.error("[wb] clear:", (err as any)?.message); }
+  }
+
   async function sendChatMessage() {
     const body = chatInput.trim();
     if (!body || chatSending) return;
@@ -1452,6 +1509,17 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
             }}
           >
             💬 Chat
+          </button>
+          <button
+            onClick={() => showBoard ? setShowBoard(false) : handleOpenBoard()}
+            style={{
+              ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px",
+              background: showBoard ? "rgba(196,154,60,0.1)" : "none",
+              borderColor: showBoard ? "rgba(196,154,60,0.3)" : "rgba(255,255,255,0.09)",
+              color: showBoard ? "#c49a3c" : "var(--text-dim)",
+            }}
+          >
+            🖊 Board
           </button>
           <button
             onClick={() => setShowInvite(true)}
@@ -1610,6 +1678,20 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           onInputChange={setChatInput}
           onSend={sendChatMessage}
           onClose={() => setShowChat(false)}
+        />
+      )}
+
+      {/* Whiteboard panel — session-only, clears when everyone leaves */}
+      {showBoard && (
+        <Whiteboard
+          strokes={strokes}
+          tool={wbTool}
+          color={wbColor}
+          onToolChange={setWbTool}
+          onColorChange={setWbColor}
+          onStrokeComplete={handleStrokeComplete}
+          onClear={handleClearBoard}
+          onClose={() => setShowBoard(false)}
         />
       )}
 
@@ -1802,8 +1884,8 @@ function SessionSummaryModal({ durationSecs, goal, onConfirm, onBack }) {
   // completed 15-min block. Display only — the server is authoritative.
   const tokensEarned = 2 + Math.floor(durationSecs / (15 * 60)) * 5;
   const S = styles;
-  return (
-    <div style={S.modalOverlay}>
+  return createPortal(
+    <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100vh", zIndex:9999, background:"rgba(8,8,10,0.75)", backdropFilter:"blur(14px)", display:"flex", alignItems:"center", justifyContent:"center", padding:"24px" }}>
       <div style={{ ...S.modalCard, maxWidth:"340px", textAlign:"center", position:"relative" }}>
         <button
           onClick={onBack}
@@ -1867,7 +1949,8 @@ function SessionSummaryModal({ durationSecs, goal, onConfirm, onBack }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2310,7 +2393,7 @@ const styles: Record<string, React.CSSProperties> = {
   ghostBtnLarge:  { flex:1, background:"transparent", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"10px", padding:"12px", color:"var(--text-dim)", fontSize:"14px", cursor:"pointer", fontFamily:"inherit" },
   primaryBtnLarge:{ flex:2, background:"var(--color-accent)", color:"#111", border:"none", borderRadius:"10px", padding:"12px", fontSize:"14px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit" },
   leaveBtn:       { background:"rgba(255,59,48,0.1)", border:"1px solid rgba(255,59,48,0.22)", borderRadius:"8px", padding:"9px 16px", color:"rgba(255,100,90,0.9)", fontSize:"13px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit", flexShrink:0 },
-  modalOverlay:   { position:"fixed", inset:0, zIndex:1000, background:"rgba(8,8,10,0.75)", backdropFilter:"blur(14px)", display:"flex", alignItems:"center", justifyContent:"center", padding:"24px" },
+  modalOverlay:   { position:"fixed", top:0, left:0, right:0, bottom:0, zIndex:1000, background:"rgba(8,8,10,0.75)", backdropFilter:"blur(14px)", display:"flex", alignItems:"center", justifyContent:"center", padding:"24px" },
   modalCard:      { width:"100%", maxWidth:"400px", background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"20px", padding:"28px 24px", boxShadow:"0 32px 80px rgba(0,0,0,0.5)" },
   fieldLabel:     { fontSize:"12px", color:"var(--text-secondary)", fontWeight:"500" },
 };
