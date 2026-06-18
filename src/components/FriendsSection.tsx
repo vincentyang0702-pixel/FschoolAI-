@@ -81,6 +81,12 @@ export default function FriendsSection({ userId }) {
   const [actionMsg,  setActionMsg]  = useState("");
   const [pendingIds, setPendingIds] = useState({});    // id → true (optimistic "request sent")
 
+  // false = the acting fschool_uid has no public.users row (a guest session — the app
+  // generates a client-side uid before signup). Any friend write would hit a foreign-key
+  // violation, so we disable "Add" and explain instead. Starts true to avoid a flash for
+  // real users while their row loads; flipped by the verify effect below.
+  const [accountReady, setAccountReady] = useState(true);
+
   // "warm" = loaded from cache, still fetching live; "live" = live fetch done; "error"
   const [loadState, setLoadState] = useState("warm");
   const inputRef = useRef(null);
@@ -127,6 +133,17 @@ export default function FriendsSection({ userId }) {
 
   useEffect(() => { load(); }, [load]);
 
+  // Confirm the acting user actually exists in public.users. A guest session has a
+  // client-generated uid with no row, so friend writes fail the FK constraint — gate
+  // the UI on this rather than surfacing a raw database error.
+  useEffect(() => {
+    let alive = true;
+    getUserProfiles([userId])
+      .then(profs => { if (alive) setAccountReady(Boolean(profs[userId])); })
+      .catch(() => { /* network issue — stay optimistic; handleSendRequest still catches FK */ });
+    return () => { alive = false; };
+  }, [userId]);
+
   // ── Search people by name or email ───────────────────────────────────────────
 
   async function handleSearch() {
@@ -162,7 +179,10 @@ export default function FriendsSection({ userId }) {
 
   // ── Add (send request) ────────────────────────────────────────────────────────
 
+  const NOT_SET_UP_MSG = "Your account isn't fully set up yet — log out and back in to add friends.";
+
   async function handleSendRequest(target) {
+    if (!accountReady) { setActionMsg(NOT_SET_UP_MSG); return; }
     setPendingIds(p => ({ ...p, [target.id]: true })); // optimistic
     setActionMsg("");
     try {
@@ -171,6 +191,12 @@ export default function FriendsSection({ userId }) {
       await load(); // refresh friends + requests from Supabase
     } catch (e) {
       setPendingIds(p => { const n = { ...p }; delete n[target.id]; return n; });
+      // FK violation (code 23503) = the acting uid has no public.users row → guest session.
+      if (e.code === "23503" || /foreign key|violates/i.test(e.message || "")) {
+        setAccountReady(false);
+        setActionMsg(NOT_SET_UP_MSG);
+        return;
+      }
       const msg = e.message?.includes("blocked")         ? "This user isn't accepting requests."
                 : e.message?.includes("already friends")  ? "You're already friends."
                 : e.message?.includes("yourself")         ? "That's you!"
@@ -275,6 +301,12 @@ export default function FriendsSection({ userId }) {
           </button>
         </div>
 
+        {!accountReady && (
+          <p style={{ fontSize: "11px", marginTop: "8px", color: "rgba(255,180,90,0.85)" }}>
+            Your account isn’t fully set up yet — log in to add friends.
+          </p>
+        )}
+
         {actionMsg && (
           <p style={{ fontSize: "12px", marginTop: "8px", color: "rgba(255,255,255,0.6)" }}>
             {actionMsg}
@@ -319,7 +351,9 @@ export default function FriendsSection({ userId }) {
                     {rel === "none" && (
                       <button
                         onClick={() => handleSendRequest(u)}
-                        style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", padding: "5px 12px", color: "var(--text-primary)", fontSize: "12px", fontWeight: 500, cursor: "pointer", fontFamily: "inherit" }}
+                        disabled={!accountReady}
+                        title={accountReady ? "" : "Log in to add friends"}
+                        style={{ background: "rgba(255,255,255,0.08)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: "8px", padding: "5px 12px", color: "var(--text-primary)", fontSize: "12px", fontWeight: 500, cursor: accountReady ? "pointer" : "not-allowed", fontFamily: "inherit", opacity: accountReady ? 1 : 0.5 }}
                       >
                         Add
                       </button>

@@ -4,6 +4,7 @@
 
 import { useMemo } from "react";
 import { useApp } from "../context/AppContext";
+import DocUpload from "../components/DocUpload";
 
 const card = {
   background: "var(--color-surface)",
@@ -112,6 +113,9 @@ export default function Files() {
       <p style={{ color: "var(--text-dim)", fontSize: "14px", marginBottom: "24px" }}>
         {files.length > 0 ? `${files.length} file${files.length !== 1 ? "s" : ""} synced from your portal` : "Sync your portal to see files"}
       </p>
+
+      {/* Upload / paste documents to index them for the AI tutor (RAG). */}
+      <DocUpload />
 
       {files.length === 0 ? (
         <div style={{ ...card, padding: "24px" }}>

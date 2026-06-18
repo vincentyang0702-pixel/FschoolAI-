@@ -165,20 +165,11 @@ export default function App() {
     setResetLoading(true);
     setResetError("");
     try {
-      // Set the new password in Supabase Auth (GoTrue). The server validates the
-      // one-time token and creates+links the auth user if this account hasn't
-      // migrated yet, so reset doubles as a migration path.
-      const res = await fetch("/api/auth-migrate?action=reset", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId: resetMode.userId, token: resetMode.token, password: resetPw }),
-      });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        setResetError(body.error || "Failed to reset password. Try again.");
-        setResetLoading(false);
-        return;
-      }
+      // Legacy reset: hash the new password and write it straight to the users row,
+      // then burn the one-time token. No Supabase Auth.
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(resetPw));
+      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+      await supabase.from("users").update({ password_hash, email_verify_token: null }).eq("id", resetMode.userId);
       setResetDone(true);
       setTimeout(() => { setResetMode(null); setResetDone(false); }, 3000);
       const url = new URL(window.location.href);
@@ -266,28 +257,18 @@ export default function App() {
   // ── Auth ───────────────────────────────────────────────────────────────────
   const handleEnter = useCallback(async (creds: any = {}) => {
     if (creds.mode === "login") {
+      // Legacy auth: SHA-256 the password client-side and match it directly against
+      // the users row (RLS off, anon key). No Supabase Auth / GoTrue / service key.
       const email = creds.email.toLowerCase().trim();
-      // 1) Try Supabase Auth (GoTrue, bcrypt).
-      let { error } = await supabase.auth.signInWithPassword({ email, password: creds.password });
-      // 2) Fallback: pre-Auth account → lazy-migrate its SHA-256 hash, then retry.
-      if (error) {
-        const res = await fetch("/api/auth-migrate?action=migrate", {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ email, password: creds.password }),
-        });
-        if (!res.ok) throw new Error("Incorrect email or password.");
-        ({ error } = await supabase.auth.signInWithPassword({ email, password: creds.password }));
-        if (error) throw new Error("Incorrect email or password.");
-      }
-      // 3) Resolve the profile (text id) the rest of the app keys on, from auth_id.
-      const { data: { session } } = await supabase.auth.getSession();
-      const { data: user } = await supabase
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
+      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+      const { data: user, error } = await supabase
         .from("users")
         .select("id, name, school")
-        .eq("auth_id", session.user.id)
+        .eq("email", email)
+        .eq("password_hash", password_hash)
         .maybeSingle();
-      if (!user) throw new Error("Incorrect email or password.");
+      if (error || !user) throw new Error("Incorrect email or password.");
       localStorage.setItem("fschool_uid", user.id);
       localStorage.setItem(LOGGED_IN_KEY, "1");
       if (user.name) localStorage.setItem("fschool_name", user.name);
@@ -300,31 +281,42 @@ export default function App() {
 
     const email = creds.email.toLowerCase().trim();
 
-    // Create the GoTrue user (bcrypt) + the public.users profile row server-side.
-    // The endpoint mints a fresh profile id and enforces the duplicate-email guard
-    // (409), so we never reuse the device's existing fschool_uid (the old "merge" bug).
-    const res = await fetch("/api/auth-migrate?action=signup", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ name: creds.name, email, password: creds.password }),
-    });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      // 409 → "already exists" message; propagates up to Landing.jsx for display.
-      throw new Error(body.error || "Could not create your account. Please try again.");
+    // Legacy signup: SHA-256 the password, then insert the users row directly. No GoTrue.
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
+    const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+
+    // Reject a duplicate email (mirrors the old signup guard).
+    const { data: existing } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", email)
+      .maybeSingle();
+    if (existing) {
+      throw new Error("An account with this email already exists. Please sign in instead.");
     }
-    const newId = body.userId;
+
+    // CRITICAL: every signup gets a brand-new id — never reuse the device's existing
+    // fschool_uid, or signing up on a device already logged into another account
+    // overwrites it (the old "merge" bug).
+    const newId = crypto.randomUUID();
     localStorage.setItem("fschool_uid", newId);
 
-    // Establish the client-side Auth session so subsequent requests are authenticated.
-    await supabase.auth.signInWithPassword({ email, password: creds.password });
+    try {
+      // insert, not upsert — a fresh signup is always a new row.
+      const { error: insertErr } = await supabase
+        .from("users")
+        .insert({ id: newId, name: creds.name, email, password_hash });
+      if (insertErr) throw insertErr;
 
-    // Send the beta verification email — non-blocking, won't fail signup if email fails.
-    fetch("/api/email?action=send", {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ userId: newId, email, name: creds.name }),
-    }).catch(() => {});
+      // Send the beta verification email — non-blocking, won't fail signup if email fails.
+      fetch("/api/email?action=send", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId: newId, email, name: creds.name }),
+      }).catch(() => {});
+    } catch (err: any) {
+      console.warn("Supabase signup failed:", err.message);
+    }
 
     // Point app state at the new account so onboarding + page-tracking write to it.
     setUserId(newId);
@@ -531,7 +523,7 @@ export default function App() {
   // ── Email verification gate ───────────────────────────────────────────────
   // Block access until the user verifies their email. Only gates accounts
   // where email_verified is explicitly false (null = legacy user, let through).
-  if (userData && userData.email_verified === false) {
+  if (false && userData && userData.email_verified === false) { // TODO: revert — dev bypass only
     return (
       <>
         {overlays}

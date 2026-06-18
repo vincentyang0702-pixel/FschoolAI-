@@ -21,6 +21,8 @@ const ACTIONS = {
   discord_connected:    { tokens: 5,  maxPerDay: null, lifetimeMax: 1 },
   streak_day:           { tokens: 3,  maxPerDay: 1    },
   streak_milestone:     { tokens: 25, maxPerDay: null  },  // deduped by meta.milestone
+  study_room_join:      { tokens: 2,  maxPerDay: 3    },  // deduped by meta.sessionId
+  study_session_15min:  { tokens: 5,  maxPerDay: null  },  // +5 per 15 min, computed server-side from room_sessions
 };
 
 const STREAK_MILESTONES = [7, 14, 30, 60, 100];
@@ -102,6 +104,59 @@ export default async function handler(req, res) {
 
     const dt = today();
 
+    // ── Study session: +5 per 15 min, validated SERVER-SIDE ──────────────────
+    // Duration is computed from room_sessions.joined_at (DB-stamped on the server
+    // at join) up to the earlier of (server now, recorded left_at) — the client's
+    // reported duration is never trusted. tokens_awarded on the row tracks what's
+    // already been paid, so re-calling (e.g. on leave) only awards NEW 15-min blocks.
+    if (awardAction === "study_session_15min") {
+      if (!meta.sessionId) return res.status(400).json({ error: "meta.sessionId required" });
+
+      const { data: sess } = await supabase
+        .from("room_sessions")
+        .select("id, user_id, joined_at, left_at, tokens_awarded")
+        .eq("id", meta.sessionId).maybeSingle();
+
+      if (!sess)                   return res.status(200).json({ awarded: false, reason: "no_session" });
+      if (sess.user_id !== userId) return res.status(200).json({ awarded: false, reason: "not_your_session" });
+
+      const MAX_SESSION_SECS = 12 * 3600; // cap runaway sessions (tab left open, etc.)
+      const startMs = Date.parse(sess.joined_at);
+      const leftMs  = sess.left_at ? Date.parse(sess.left_at) : Date.now();
+      const endMs   = Math.min(Date.now(), leftMs);     // never credit a future left_at
+      const durationSecs = Math.max(0, Math.min(Math.floor((endMs - startMs) / 1000), MAX_SESSION_SECS));
+
+      const blocks  = Math.floor(durationSecs / (15 * 60));
+      const earned  = blocks * cfg.tokens;              // total this session is worth
+      const already = sess.tokens_awarded ?? 0;
+      const delta   = earned - already;
+
+      if (delta <= 0) {
+        return res.status(200).json({ awarded: false, reason: "no_new_time", durationSecs });
+      }
+
+      await supabase.from("token_events").insert({
+        user_id:    userId,
+        action:     awardAction,
+        tokens:     delta,
+        meta:       { sessionId: sess.id, durationSecs, blocks },
+        awarded_on: dt,
+      });
+
+      const { data: userRow } = await supabase.from("users").select("points").eq("id", userId).maybeSingle();
+      const newPoints = (userRow?.points ?? 0) + delta;
+      await supabase.from("users").update({ points: newPoints }).eq("id", userId);
+      await supabase.from("room_sessions").update({ tokens_awarded: earned }).eq("id", sess.id);
+
+      const tier   = getTier(newPoints);
+      const tierUp = tier !== getTier(newPoints - delta);
+      supabase.from("leaderboard").upsert({
+        user_id: userId, points: newPoints, tier, updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id" }).then(() => {}, () => {});
+
+      return res.status(200).json({ awarded: true, tokens: delta, newTotal: newPoints, tier, tierUp, durationSecs });
+    }
+
     // ── Daily limit ──────────────────────────────────────────────────────────
     if (cfg.maxPerDay !== null) {
       const { count } = await supabase
@@ -139,6 +194,16 @@ export default async function handler(req, res) {
         .from("token_events").select("id", { count: "exact", head: true })
         .eq("user_id", userId).eq("action", "streak_milestone")
         .filter("meta->>'milestone'", "eq", String(meta.milestone));
+      if ((count ?? 0) > 0) return res.status(200).json({ awarded: false, reason: "already_awarded" });
+    }
+
+    // ── Anti-cheat: one join award per room session ──────────────────────────
+    if (awardAction === "study_room_join") {
+      if (!meta.sessionId) return res.status(400).json({ error: "meta.sessionId required" });
+      const { count } = await supabase
+        .from("token_events").select("id", { count: "exact", head: true })
+        .eq("user_id", userId).eq("action", "study_room_join")
+        .filter("meta->>'sessionId'", "eq", String(meta.sessionId));
       if ((count ?? 0) > 0) return res.status(200).json({ awarded: false, reason: "already_awarded" });
     }
 

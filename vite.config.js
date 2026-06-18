@@ -61,11 +61,16 @@ import extractHandler from "./api/extract.js";
 import fileUrlHandler from "./api/file-url.js";
 
 function loadEnvKey(key) {
-  try {
-    const raw = readFileSync(resolve(process.cwd(), ".env"), "utf8");
-    const match = raw.match(new RegExp(`^${key}=(.+)$`, "m"));
-    return match?.[1]?.trim() ?? process.env[key];
-  } catch { return process.env[key]; }
+  // Read .env.local first (Vite's convention, where users put local secrets), then
+  // fall back to .env, then the process env. Strips surrounding quotes if present.
+  for (const file of [".env.local", ".env"]) {
+    try {
+      const raw = readFileSync(resolve(process.cwd(), file), "utf8");
+      const match = raw.match(new RegExp(`^${key}=(.+)$`, "m"));
+      if (match?.[1]) return match[1].trim().replace(/^["']|["']$/g, "");
+    } catch { /* file missing — try the next one */ }
+  }
+  return process.env[key];
 }
 
 const groqProxyPlugin = {
@@ -373,7 +378,107 @@ const authMigrateProxyPlugin = {
   },
 };
 
+// RAG proxy — runs the real api/rag.ts handler under the dev server so document
+// ingest + retrieval work with `npm run dev`. Like auth-migrate, the handler builds
+// its Supabase client at MODULE LOAD, so we inject env first and DYNAMICALLY import
+// per request. Reads ?action=ingest|query.
+const ragProxyPlugin = {
+  name: "rag-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/rag", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+      process.env.SUPABASE_URL         = loadEnvKey("SUPABASE_URL");
+      process.env.SUPABASE_SERVICE_KEY = loadEnvKey("SUPABASE_SERVICE_KEY");
+      process.env.OPENAI_API_KEY       = loadEnvKey("OPENAI_API_KEY");
+      const url = new URL(req.url, "http://localhost");
+      req.query = Object.fromEntries(url.searchParams.entries());
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try {
+          const { default: handler } = await import("./api/rag.js");
+          await handler(req, res);
+        } catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
+// Token-engine proxy — runs the real api/token-engine.ts handler under the dev
+// server so Study Rooms token awards + the header points summary work with
+// `npm run dev`, not just on Vercel. Builds its Supabase client at MODULE LOAD
+// from process.env, so we inject env first and DYNAMICALLY import per-request
+// (a static import would evaluate before env is set and throw "supabaseUrl is
+// required"). Handles GET ?action=summary and POST ?action=award.
+const tokenEngineProxyPlugin = {
+  name: "token-engine-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/token-engine", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+      process.env.SUPABASE_URL         = loadEnvKey("SUPABASE_URL");
+      process.env.SUPABASE_SERVICE_KEY = loadEnvKey("SUPABASE_SERVICE_KEY");
+      const url = new URL(req.url, "http://localhost");
+      req.query = Object.fromEntries(url.searchParams.entries());
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try {
+          const { default: handler } = await import("./api/token-engine.js");
+          await handler(req, res);
+        } catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
+// Nudge proxy — runs the real api/nudge.ts handler under the dev server so the
+// rate-limited "come study" friend nudge (nudge-row insert + Resend email
+// fallback) works with `npm run dev`. Same module-load env caveat as above →
+// inject env first, dynamic import. RESEND_API_KEY is optional: without it the
+// in-app realtime ping still fires; only the offline email is skipped. POST only.
+const nudgeProxyPlugin = {
+  name: "nudge-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/nudge", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (req.method === "OPTIONS") { res.statusCode = 204; res.end(); return; }
+      process.env.SUPABASE_URL         = loadEnvKey("SUPABASE_URL");
+      process.env.SUPABASE_SERVICE_KEY = loadEnvKey("SUPABASE_SERVICE_KEY");
+      const resendKey = loadEnvKey("RESEND_API_KEY");
+      if (resendKey) process.env.RESEND_API_KEY = resendKey;
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try {
+          const { default: handler } = await import("./api/nudge.js");
+          await handler(req, res);
+        } catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
 export default defineConfig({
-  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin],
+  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin, ragProxyPlugin, tokenEngineProxyPlugin, nudgeProxyPlugin],
   server:  { port: 5173, host: "0.0.0.0", allowedHosts: true },
 });
