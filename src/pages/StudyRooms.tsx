@@ -15,9 +15,10 @@ import {
 import type { AccessFilters } from "../api/rooms";
 import { loadRecentMessages, postRoomMessage } from "../api/chat";
 import type { ChatMessage } from "../api/chat";
-import { loadStrokes, addStroke, clearBoard } from "../api/whiteboard";
-import type { Stroke, Point } from "../api/whiteboard";
-import Whiteboard, { PEN_COLORS } from "../components/Whiteboard";
+import { loadStrokes, loadBackground, addStroke, deleteStroke, setBackground, clearBoard } from "../api/whiteboard";
+import type { Stroke, Point, PenStyle } from "../api/whiteboard";
+import Whiteboard, { PEN_COLORS, PEN_WIDTHS, ERASER_SIZES, DEFAULT_BG } from "../components/Whiteboard";
+import type { Tool } from "../components/Whiteboard";
 import StudyOrb from "../components/StudyOrb";
 
 // ── Access filters ────────────────────────────────────────────────────────────
@@ -949,8 +950,12 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   // Phase 3 — Whiteboard
   const [showBoard,          setShowBoard]          = useState(false);
   const [strokes,            setStrokes]            = useState<Stroke[]>([]);
-  const [wbTool,             setWbTool]             = useState<"pen" | "erase">("pen");
-  const [wbColor,            setWbColor]            = useState(PEN_COLORS[0]);
+  const [wbTool,             setWbTool]             = useState<Tool>("pen");
+  const [wbStyle,            setWbStyle]            = useState<PenStyle>("normal");
+  const [wbColor,            setWbColor]            = useState(PEN_COLORS[2]);
+  const [wbPenWidth,         setWbPenWidth]         = useState(PEN_WIDTHS[1]);
+  const [wbEraserSize,       setWbEraserSize]       = useState(ERASER_SIZES[1]);
+  const [wbBg,               setWbBg]               = useState(DEFAULT_BG);
   const boardLoadedRef = useRef(false);
 
   const channelRef          = useRef(null);
@@ -1145,9 +1150,18 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         return [...prev, payload as Stroke];
       });
     })
+    // Whiteboard — a peer erased a single stroke (stroke eraser)
+    .on("broadcast", { event: "wb_delete" }, ({ payload }) => {
+      setStrokes(prev => prev.filter(s => s.id !== payload.id));
+    })
+    // Whiteboard — a peer changed the background
+    .on("broadcast", { event: "wb_bg" }, ({ payload }) => {
+      setWbBg(payload.bg || DEFAULT_BG);
+    })
     // Whiteboard — a peer cleared the board
     .on("broadcast", { event: "wb_clear" }, () => {
       setStrokes([]);
+      setWbBg(DEFAULT_BG);
     })
     .subscribe(async (status) => {
       if (status === "SUBSCRIBED") await ch.track(presencePayload());
@@ -1416,25 +1430,54 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     setShowBoard(true);
     if (!boardLoadedRef.current) {
       boardLoadedRef.current = true;
-      loadStrokes(userId, room.id).then(setStrokes).catch(err => {
-        console.error("[wb] load:", (err as any)?.message);
-        boardLoadedRef.current = false; // allow retry on next open if it failed
-      });
+      Promise.all([loadStrokes(userId, room.id), loadBackground(room.id)])
+        .then(([loaded, bg]) => { setStrokes(loaded); setWbBg(bg || DEFAULT_BG); })
+        .catch(err => {
+          console.error("[wb] load:", (err as any)?.message);
+          boardLoadedRef.current = false; // allow retry on next open if it failed
+        });
     }
   }
 
-  async function handleStrokeComplete(stroke: { mode: "pen" | "erase"; color: string; width: number; points: Point[] }) {
+  async function handleStrokeComplete(stroke: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) {
+    // Add optimistically with a temp ID so the stroke eraser can hit-test it
+    // immediately — before the DB round-trip completes.
+    const tempId = crypto.randomUUID();
+    const optimistic: Stroke = {
+      id: tempId, room_id: room.id, user_id: userId,
+      name: userData?.name ?? "Anonymous", created_at: new Date().toISOString(),
+      ...stroke,
+    };
+    setStrokes(prev => [...prev, optimistic]);
     try {
-      const saved = await addStroke(userId, room.id, stroke.mode, stroke.color, stroke.width, stroke.points);
-      setStrokes(prev => prev.some(s => s.id === saved.id) ? prev : [...prev, saved]);
+      const saved = await addStroke(userId, room.id, stroke.mode, stroke.style, stroke.color, stroke.width, stroke.points);
+      // Swap the temp ID for the real server ID.
+      setStrokes(prev => prev.map(s => s.id === tempId ? saved : s));
       channelRef.current?.send({ type: "broadcast", event: "wb_stroke", payload: saved }).catch(() => {});
     } catch (err) {
       console.error("[wb] stroke:", (err as any)?.message);
+      // Leave the optimistic stroke in local state so it stays visible on the canvas,
+      // but it won't sync to other users or survive a reload.
     }
+  }
+
+  async function handleEraseStroke(strokeId: string) {
+    setStrokes(prev => prev.filter(s => s.id !== strokeId)); // optimistic
+    channelRef.current?.send({ type: "broadcast", event: "wb_delete", payload: { id: strokeId } }).catch(() => {});
+    try { await deleteStroke(userId, room.id, strokeId); }
+    catch (err) { console.error("[wb] erase:", (err as any)?.message); }
+  }
+
+  async function handleBgChange(bg: string) {
+    setWbBg(bg);
+    channelRef.current?.send({ type: "broadcast", event: "wb_bg", payload: { bg } }).catch(() => {});
+    try { await setBackground(userId, room.id, bg); }
+    catch (err) { console.error("[wb] bg:", (err as any)?.message); }
   }
 
   async function handleClearBoard() {
     setStrokes([]);
+    setWbBg(DEFAULT_BG);
     channelRef.current?.send({ type: "broadcast", event: "wb_clear", payload: {} }).catch(() => {});
     try { await clearBoard(userId, room.id); }
     catch (err) { console.error("[wb] clear:", (err as any)?.message); }
@@ -1686,10 +1729,19 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         <Whiteboard
           strokes={strokes}
           tool={wbTool}
+          style={wbStyle}
           color={wbColor}
+          penWidth={wbPenWidth}
+          eraserSize={wbEraserSize}
+          bg={wbBg}
           onToolChange={setWbTool}
+          onStyleChange={setWbStyle}
           onColorChange={setWbColor}
+          onPenWidthChange={setWbPenWidth}
+          onEraserSizeChange={setWbEraserSize}
+          onBgChange={handleBgChange}
           onStrokeComplete={handleStrokeComplete}
+          onEraseStroke={handleEraseStroke}
           onClear={handleClearBoard}
           onClose={() => setShowBoard(false)}
         />
