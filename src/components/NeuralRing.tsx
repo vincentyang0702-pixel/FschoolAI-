@@ -999,11 +999,12 @@ export default function NeuralRing() {
     : [];
 
   // ── Tutor impressions + living mind — loaded once on mount ─────────────────
-  const [impressions,  setImpressions]  = useState([]);
-  const abortCtrlRef   = useRef(null);   // cancel in-flight fetch
-  const audioSourceRef = useRef(null);   // cancel in-flight audio
-  const [lastSession,  setLastSession]  = useState(null);
-  const [livingMind,   setLivingMind]   = useState(null);
+  const [impressions,      setImpressions]      = useState([]);
+  const abortCtrlRef       = useRef(null);   // cancel in-flight fetch
+  const audioSourceRef     = useRef(null);   // cancel in-flight audio
+  const [lastSession,      setLastSession]      = useState(null);
+  const [livingMind,       setLivingMind]       = useState(null);
+  const [preloadedContext, setPreloadedContext] = useState<string | null>(null);
 
 
   // ── Session tracking — for session-close payload + self-write trigger ───────
@@ -1212,6 +1213,31 @@ export default function NeuralRing() {
           .eq("user_id", userId)
           .maybeSingle();
         if (mindData?.mind_doc) setLivingMind(mindData.mind_doc);
+
+        // ── Preload academic context once on mount ──────────────────────────
+        // Use localStorage snapshot for instant load, then refresh in background.
+        const CACHE_KEY    = `fschool_ctx_${userId}`;
+        const CACHE_TS_KEY = `fschool_ctx_ts_${userId}`;
+        const cached   = localStorage.getItem(CACHE_KEY);
+        const cachedAt = Number(localStorage.getItem(CACHE_TS_KEY) ?? 0);
+        if (cached && Date.now() - cachedAt < 10 * 60 * 1000) {
+          setPreloadedContext(cached);
+        }
+        // Always refresh from server — updates snapshot if data changed
+        fetch("/api/tutor-context", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId, userMessage: "preload", brainPersonId: userData?.brain_person_id ?? null, courseIds: [] }),
+        })
+          .then(r => r.ok ? r.json() : null)
+          .then(d => {
+            if (d?.context) {
+              setPreloadedContext(d.context);
+              localStorage.setItem(CACHE_KEY, d.context);
+              localStorage.setItem(CACHE_TS_KEY, String(Date.now()));
+            }
+          })
+          .catch(() => {});
 
       } catch { /* non-fatal */ }
     }
@@ -2127,36 +2153,21 @@ export default function NeuralRing() {
       // ── Dynamic context fetch (chatbot agent upgrade) ─────────────────────
       // Fires in parallel — if it resolves before Claude, gets injected into prompt.
       // The merged /api/tutor-context now also classifies file_lookup and surfaces
-      // synced extension files, so the tutor can answer about them on this path.
-      let dynamicContext = null;
-      const contextFetch = fetch("/api/tutor-context", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId,
-          userMessage:   userMsg.content,
-          brainPersonId: userData?.brain_person_id ?? null,
-          courseIds:     courses.map(c => c.id).filter(Boolean),
-        }),
-      })
-        .then(r => r.ok ? r.json() : null)
-        .then(d => { dynamicContext = d?.context ?? null; })
-        .catch(() => {});
-
       console.log("[vdiag] system-prompt gate | voiceModeRef.current:", voiceModeRef.current, "→ using:", voiceModeRef.current ? "buildVoiceSystem" : "buildChatSystem");
       const system = voiceModeRef.current
         ? buildVoiceSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, availableVoices, leaderboardRank)
         : buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, messages.length === 0, availableVoices, courses);
 
-      // Wait for dynamic context before building final prompt
-      await contextFetch;
-
       abortCtrlRef.current = new AbortController();
-      const signal = abortCtrlRef.current.signal;
 
-      // Append dynamic context to system prompt if retrieved
-      const finalSystem = dynamicContext
-        ? `${system}\n\nLIVE DATA (just fetched for this query):\n${dynamicContext}`
+      // Use preloaded context (fetched on mount) with Anthropic prompt caching.
+      // Sending system as an array with cache_control tells Anthropic to cache
+      // the context block across messages — no per-message Supabase fetch needed.
+      const finalSystem = preloadedContext
+        ? [
+            { type: "text", text: system },
+            { type: "text", text: `LIVE CONTEXT (pre-loaded):\n${preloadedContext}`, cache_control: { type: "ephemeral" } },
+          ]
         : system;
 
       // Use Claude for tutor brain; fall back to Groq if key missing
@@ -2181,6 +2192,11 @@ export default function NeuralRing() {
         apiMessages.splice(-1, 0, { role: "assistant", content: interruptText.slice(0, 300) + "…" });
       }
       let raw;
+      // Groq only accepts a plain string for system — flatten if we built an array for Claude
+      const groqSystem = Array.isArray(finalSystem)
+        ? (finalSystem as { text: string }[]).map(b => b.text).join("\n\n")
+        : finalSystem;
+
       let voiceTTSDone = null; // resolves when all sentence-chunked TTS finishes
 
       console.log("[vdiag] TTS-path gate | voiceModeRef.current:", voiceModeRef.current, "| muted:", muted, "→", (voiceModeRef.current && !muted) ? "STREAMING VOICE" : "NON-VOICE fallback");
@@ -2270,7 +2286,7 @@ export default function NeuralRing() {
             console.log("[tutor] served by: claude-sonnet-4-6 (non-streaming fallback)");
           } catch (claudeErr) {
             console.warn("[tutor] Sonnet also failed, falling back to Groq:", claudeErr.message);
-            raw = await groq(apiMessages, finalSystem);
+            raw = await groq(apiMessages, groqSystem);
             console.log("[tutor] served by: groq/llama-3.1-8b-instant (double fallback)");
           }
         }
@@ -2281,7 +2297,7 @@ export default function NeuralRing() {
           console.log("[tutor] served by: claude-sonnet-4-6");
         } catch (claudeErr) {
           console.warn("[tutor] Sonnet failed, falling back to Groq:", claudeErr.message);
-          raw = await groq(apiMessages, finalSystem);
+          raw = await groq(apiMessages, groqSystem);
           console.log("[tutor] served by: groq/llama-3.1-8b-instant (fallback)");
         }
       }
