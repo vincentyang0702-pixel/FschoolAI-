@@ -177,6 +177,9 @@ async function lmsApiSync() {
         if (ps.PagingInfo && ps.PagingInfo.HasMoreItems) bookmark = ps.PagingInfo.Bookmark; else break;
       }
       const assignments = [];
+      // The student's own Dropbox submission files (gathered while scanning folders
+      // below) — merged into `files` before return so the tutor can refer to them.
+      const submissionFiles = [];
       await Promise.all(courses.map(async (c) => {
         // One assignment per title: grade items carry score+weight, folders add due dates.
         const norm = s => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -198,10 +201,41 @@ async function lmsApiSync() {
           byTitle.set(k, Object.assign(cur, patch));
         };
 
-        // Assignment folders (Dropbox) → due dates
+        // Assignment folders (Dropbox) → due dates + the STUDENT'S OWN submission status.
+        // Previously this only read the folder (due date), so submitted_at was always
+        // null and every past-due assignment showed as "overdue" even when handed in.
+        // Now we also read the folder's submissions (a student can only see their own):
+        // any submission sets submitted_at (clears the false "overdue"), and the
+        // submitted files are surfaced so the tutor can refer to the student's work.
         try {
-          for (const f of (await dget(`/d2l/api/le/${leV}/${c.id}/dropbox/folders/`) || []))
-            upsertAssign(f.Name || "Assignment", { due_at: f.DueDate || null });
+          for (const f of (await dget(`/d2l/api/le/${leV}/${c.id}/dropbox/folders/`) || [])) {
+            const title = f.Name || "Assignment";
+            const patch = { due_at: f.DueDate || null };
+            try {
+              const ents = (await dget(`/d2l/api/le/${leV}/${c.id}/dropbox/folders/${f.Id}/submissions/`)) || [];
+              for (const ent of ents) {
+                const entId = (ent.Entity && ent.Entity.EntityId) ?? "";
+                for (const s of (ent.Submissions || [])) {
+                  if (s.SubmissionDate && (!patch.submitted_at || new Date(s.SubmissionDate) > new Date(patch.submitted_at))) {
+                    patch.submitted_at = s.SubmissionDate;
+                    patch.missing = false;   // handed in → never "missing"/overdue
+                  }
+                  for (const file of (s.Files || [])) {
+                    submissionFiles.push({
+                      course_ref: c.id, assignment_ref: titleId(norm(title)),
+                      id: "d2l_sub_" + c.id + "_" + f.Id + "_" + (file.FileId ?? file.Id ?? ""),
+                      name: file.FileName || ("submission_" + (file.FileId ?? "")),
+                      file_type: fileType(file.FileName || "", null),
+                      size_bytes: file.Size ?? null,
+                      source_url: origin + `/d2l/api/le/${leV}/${c.id}/dropbox/folders/${f.Id}/submissions/${entId}/files/${file.FileId ?? file.Id ?? ""}`,
+                      folder: title, status: "submitted",
+                    });
+                  }
+                }
+              }
+            } catch (e) { D("dropbox submissions fail", c.id, f.Id, e && e.message); }
+            upsertAssign(title, patch);
+          }
         } catch (e) { D("dropbox fail", c.id, e && e.message); }
 
         // Quizzes → due dates
@@ -330,7 +364,11 @@ async function lmsApiSync() {
           for (const m of ((toc && toc.Modules) || [])) walk(m);
         } catch (e) { D("toc fail", c.id, e && e.message); }
       }));
-      D("D2L synced — versions", lpV, leV, "| courses", courses.length, "| assignments", assignments.length, "| files", files.length, "| graded courses", courses.filter(c => c.current_score != null).length);
+      // Merge the student's submitted Dropbox files in with course-material files.
+      if (submissionFiles.length) files.push(...submissionFiles);
+      D("D2L synced — versions", lpV, leV, "| courses", courses.length, "| assignments", assignments.length,
+        "| submitted", assignments.filter(a => a.submitted_at).length, "| files", files.length,
+        "| submission files", submissionFiles.length, "| graded courses", courses.filter(c => c.current_score != null).length);
       return { lms: "d2l", courses, assignments, files };
     }
   } catch (e) { D("adapter error:", e && e.message); }
