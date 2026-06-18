@@ -1,7 +1,8 @@
 // DocUpload.tsx — Upload a document (PDF / text) or paste text to index it for RAG.
-// PDFs/text are extracted server-side via /api/extract, then sent to
-// /api/rag?action=ingest, which sections + chunks + embeds them. Once indexed,
-// the tutor (NeuralRing) can answer grounded in the content with [n] citations.
+// PDFs/text are extracted server-side via /api/extract, then /api/rag?action=ingest
+// sections + chunks + stores them; embeddings are filled in via repeated
+// /api/rag?action=embed calls (bounded batches → large docs don't time out). Once
+// indexed, the tutor (NeuralRing) answers grounded in the content with [n] citations.
 
 import { useRef, useState, useEffect } from "react";
 import { useApp } from "../context/AppContext";
@@ -58,8 +59,9 @@ export default function DocUpload() {
     if (!userId) { setStatus("error"); setMessage("Not signed in."); return; }
     const hasContent = (pages && pages.some(p => p?.text?.trim())) || (text && text.trim());
     if (!hasContent) { setStatus("error"); setMessage("Nothing to index — no text found."); return; }
-    setStatus("indexing"); setMessage("Indexing…");
+    setStatus("indexing"); setMessage("Preparing…");
     try {
+      // 1. Parse + store chunks WITHOUT embeddings — fast, never times out.
       const res = await fetch("/api/rag?action=ingest", {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
@@ -67,9 +69,27 @@ export default function DocUpload() {
         body:    JSON.stringify({ userId, courseId: courseId || null, title, kind, pages, text }),
       });
       const data = await res.json().catch(() => ({}));
-      if (!res.ok || data.error) throw new Error(data.error || `ingest ${res.status}`);
+      if (!res.ok || data.error || !data.documentId) throw new Error(data.error || `ingest ${res.status}`);
+      const total = data.chunks ?? 0;
+
+      // 2. Embed in bounded batches so a large doc can't blow the serverless time
+      //    limit — loop until the server reports it's drained the queue.
+      let embedded = 0;
+      for (let guard = 0; guard < 100000; guard++) {
+        const er = await fetch("/api/rag?action=embed", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ userId, documentId: data.documentId }),
+        });
+        const ed = await er.json().catch(() => ({}));
+        if (!er.ok || ed.error) throw new Error(ed.error || `embed ${er.status}`);
+        embedded += ed.embedded ?? 0;
+        if (total) setMessage(`Indexing… ${Math.min(embedded, total)}/${total} chunks`);
+        if (ed.done) break;
+      }
+
       setStatus("done");
-      setMessage(`Indexed “${title}” — ${data.sections} section${data.sections !== 1 ? "s" : ""}, ${data.chunks} chunk${data.chunks !== 1 ? "s" : ""}. Ask the tutor about it.`);
+      setMessage(`Indexed “${title}” — ${data.sections} section${data.sections !== 1 ? "s" : ""}, ${total} chunk${total !== 1 ? "s" : ""}. Ask the tutor about it.`);
     } catch (err) {
       setStatus("error");
       setMessage(err?.message || "Indexing failed.");

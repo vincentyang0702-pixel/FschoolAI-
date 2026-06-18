@@ -469,12 +469,6 @@ export async function loadCanvasData(userId) {
   const blobMap = {};
   (blobResult.data || []).forEach(row => { blobMap[row.data_type] = row.payload; });
 
-  console.log("[loadCanvasData] userId:", userId,
-    "| blob types:", Object.keys(blobMap),
-    "| ext_courses:", blobMap['ext_courses']?.length ?? 0,
-    "| ext_assignments:", blobMap['ext_assignments']?.length ?? 0,
-    "| ext_grades:", blobMap['ext_grades']?.length ?? 0);
-
   const annResult  = { data: { payload: blobMap['announcements']    ?? [] } };
   const modResult  = { data: { payload: blobMap['modules']          ?? [] } };
   const agResult   = { data: { payload: blobMap['assignment_groups']?? [] } };

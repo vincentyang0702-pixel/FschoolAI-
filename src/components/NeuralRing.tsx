@@ -1142,7 +1142,6 @@ export default function NeuralRing() {
   useEffect(() => {
     // Secondary sync — fires after paint. Direct assignments below are the primary.
     if (voiceModeRef.current !== voiceMode) {
-      console.log("[voiceMode] useEffect sync:", voiceModeRef.current, "→", voiceMode, new Error("voiceMode useEffect").stack?.split("\n")[2]?.trim());
       voiceModeRef.current = voiceMode;
     }
   }, [voiceMode]);
@@ -1914,7 +1913,6 @@ export default function NeuralRing() {
   function exitVoiceMode() {
     // Set ref synchronously FIRST so any in-flight async code sees false immediately,
     // without waiting for the useEffect to run after paint.
-    console.log("[voiceMode] exitVoiceMode() called — setting ref false synchronously", new Error("exitVoiceMode").stack?.split("\n")[2]?.trim());
     voiceModeRef.current = false;
     if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
     micStreamRef.current?.getTracks().forEach(t => t.stop());
@@ -1993,7 +1991,6 @@ export default function NeuralRing() {
     // Guard: if voice mode was exited between recording start and onstop firing,
     // discard the audio — don't send a stale recording as a text-mode message.
     if (!voiceModeRef.current) {
-      console.log("[voiceMode] _transcribeAndSend: voiceModeRef.current is false — discarding stale recording");
       return;
     }
     sphereStateRef.current = "thinking";
@@ -2112,7 +2109,6 @@ export default function NeuralRing() {
     }
 
     // ── DIAGNOSTIC LOGS — remove after confirming voice gates ───────────────
-    console.log("[vdiag] sendMessage | voiceModeRef.current:", voiceModeRef.current, "| muted:", muted, "| text:", text.slice(0, 40));
 
     // ── Instant nav shortcut (pre-API) ────────────────────────────────────────
     const navMatch = NAV_INTENTS.find(n => n.re.test(text));
@@ -2172,7 +2168,6 @@ export default function NeuralRing() {
         .then(r => r.ok ? r.json() : null)
         .then(d => {
           const passages = d?.passages ?? [];
-          console.log("[rag] retrieved", passages.length, "passage(s) for grounding");
           if (passages.length) {
             ragContext = passages.map((p, i) =>
               `[${i + 1}] ${p.title}${p.heading ? " — " + p.heading : ""}${p.loc ? " (" + p.loc + ")" : ""}\n${p.text}`
@@ -2184,7 +2179,6 @@ export default function NeuralRing() {
       // Wait briefly so retrieval can ground the reply, but never block the chat for long.
       await Promise.race([ragFetch, new Promise(r => setTimeout(r, 3000))]);
 
-      console.log("[vdiag] system-prompt gate | voiceModeRef.current:", voiceModeRef.current, "→ using:", voiceModeRef.current ? "buildVoiceSystem" : "buildChatSystem");
       const system = voiceModeRef.current
         ? buildVoiceSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, availableVoices, leaderboardRank)
         : buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, messages.length === 0, availableVoices, courses);
@@ -2228,7 +2222,6 @@ export default function NeuralRing() {
 
       let voiceTTSDone = null; // resolves when all sentence-chunked TTS finishes
 
-      console.log("[vdiag] TTS-path gate | voiceModeRef.current:", voiceModeRef.current, "| muted:", muted, "→", (voiceModeRef.current && !muted) ? "STREAMING VOICE" : "NON-VOICE fallback");
       if (voiceModeRef.current && !muted) {
         // ── Streaming voice: sentence-chunked TTS pipeline ───────────────────
         // Each sentence is sent to TTS the moment Claude generates it,
@@ -2312,22 +2305,18 @@ export default function NeuralRing() {
           try {
             console.warn("[tutor] Sonnet stream failed, trying non-streaming:", err.message);
             raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
-            console.log("[tutor] served by: claude-sonnet-4-6 (non-streaming fallback)");
           } catch (claudeErr) {
             console.warn("[tutor] Sonnet also failed, falling back to Groq:", claudeErr.message);
             raw = await groq(apiMessages, groqSystem);
-            console.log("[tutor] served by: groq/llama-3.1-8b-instant (double fallback)");
           }
         }
       } else {
         // Text chat / muted voice — non-streaming Sonnet, Groq fallback
         try {
           raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
-          console.log("[tutor] served by: claude-sonnet-4-6");
         } catch (claudeErr) {
           console.warn("[tutor] Sonnet failed, falling back to Groq:", claudeErr.message);
           raw = await groq(apiMessages, groqSystem);
-          console.log("[tutor] served by: groq/llama-3.1-8b-instant (fallback)");
         }
       }
 
@@ -2336,7 +2325,6 @@ export default function NeuralRing() {
 
       // Apply VOICE tag — match by name, persist + apply immediately
       if (voiceTags.VOICE) {
-        console.log("[vdiag] VOICE tag:", voiceTags.VOICE, "| availableVoices.length:", availableVoices.length);
         const query  = voiceTags.VOICE.toLowerCase().trim();
         const words  = query.split(/\s+/).filter(w => w.length > 2);
         // Score each voice: exact name > partial name > label words coverage
@@ -2349,7 +2337,6 @@ export default function NeuralRing() {
           return { v, score: hits };
         }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
         const match = scored[0]?.v;
-        console.log("[vdiag] VOICE match:", match?.name ?? "NO MATCH", "| top-3:", scored.slice(0,3).map(x=>`${x.v.name}:${x.score}`).join(", "));
         if (match) {
           voiceIdRef.current = match.voice_id;         // sync — next TTS chunk uses this
           setActiveVoiceId(match.voice_id);             // instant chip highlight
@@ -2379,7 +2366,6 @@ export default function NeuralRing() {
       // ── Quiz detection (before parseNav so tags don't confuse nav parser) ───
       const quizCards = parseQuiz(rawClean);
       if (quizCards) {
-        console.log("[vdiag] quiz detected | voiceModeRef.current:", voiceModeRef.current, "→", voiceModeRef.current ? "VOICE one-at-a-time" : "TEXT card dump");
         if (voiceModeRef.current) {
           // ── Voice quiz: one question at a time, spoken ───────────────────
           voiceQuizRef.current = { questions: quizCards, idx: 0, score: 0 };
@@ -2920,7 +2906,7 @@ export default function NeuralRing() {
               <div style={{ display: "flex", gap: "10px", padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
                 {/* Subtle waveform glyph — enters voice mode */}
                 <button
-                  onClick={() => { getAudioContext(); voiceModeRef.current = true; console.log("[voiceMode] entered — ref set true synchronously"); setVoiceMode(true); startAutoListen(); }}
+                  onClick={() => { getAudioContext(); voiceModeRef.current = true; setVoiceMode(true); startAutoListen(); }}
                   title="Voice mode"
                   style={{
                     background: "none", border: "none", padding: "8px 6px",
