@@ -9,6 +9,7 @@ import { NAV, LABEL }       from "./navigation/navConfig";
 import { useSwipe }         from "./navigation/useSwipe";
 import PageDots             from "./components/PageDots";
 import NeuralRing           from "./components/NeuralRing";
+import BottomNav           from "./components/BottomNav";
 import Landing              from "./pages/Landing";
 import Onboarding           from "./pages/Onboarding";
 import { useApp }           from "./context/AppContext";
@@ -76,14 +77,24 @@ const SHELL_STYLES = `
   .app-main {
     padding: 20px 22px 100px;
   }
+  @media (min-width: 768px) {
+    .app-page-transition {
+      margin-left: 232px;
+      transition: margin-left 0.2s var(--ease-apple);
+    }
+    .nav-collapsed .app-page-transition {
+      margin-left: 64px;
+    }
+  }
 `;
 
-if (!document.getElementById("app-shell-styles")) {
-  const tag = document.createElement("style");
-  tag.id = "app-shell-styles";
-  tag.textContent = SHELL_STYLES;
-  document.head.appendChild(tag);
+let _shellStyleTag = document.getElementById("app-shell-styles") as HTMLStyleElement | null;
+if (!_shellStyleTag) {
+  _shellStyleTag = document.createElement("style");
+  _shellStyleTag.id = "app-shell-styles";
+  document.head.appendChild(_shellStyleTag);
 }
+_shellStyleTag.textContent = SHELL_STYLES;
 
 export default function App() {
   // ── /card route — standalone page, no auth required ─────────────────────
@@ -100,6 +111,7 @@ export default function App() {
   const [onboardingInitName,  setOnboardingInitName] = useState("");
   const [currentPage,         setCurrentPage]        = useState("work");
   const [visible,             setVisible]            = useState(true);
+  const [navCollapsed,        setNavCollapsed]        = useState(false);
 
   // ── Notification bell state ────────────────────────────────────────────────
   const [unreadCount,   setUnreadCount]   = useState(0);
@@ -571,7 +583,7 @@ export default function App() {
 
   return (
     <div
-      className="app-shell"
+      className={`app-shell${navCollapsed ? " nav-collapsed" : ""}`}
       onTouchStart={onTouchStart}
       onTouchEnd={onTouchEnd}
     >
@@ -701,6 +713,12 @@ export default function App() {
       </div>
 
       <NeuralRing />
+      <BottomNav
+        currentPage={currentPage}
+        onNavigate={navigate}
+        collapsed={navCollapsed}
+        onToggleCollapse={() => setNavCollapsed(v => !v)}
+      />
     </div>
   );
 }
