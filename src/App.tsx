@@ -36,10 +36,10 @@ const PAGES = {
   assignment:  Assignment,
   study:       Study,
   toolkit:     Toolkit,
+  rooms:       StudyRooms,
   identity:    Identity,
   leaderboard: Leaderboard,
   files:       Files,
-  rooms:       StudyRooms,
 };
 
 const LOGGED_IN_KEY = "fschool_logged_in";
