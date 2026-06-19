@@ -6,7 +6,8 @@ process.env.SUPABASE_URL = process.env.SUPABASE_URL || "http://localhost";
 process.env.SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "test-service-key";
 
 // jsdom doesn't implement matchMedia — components like BottomNav rely on it.
-if (!window.matchMedia) {
+// Guard `window` so this setup also runs under the node environment (live tests).
+if (typeof window !== "undefined" && !window.matchMedia) {
   // @ts-ignore — minimal mock (narrow viewport → mobile layout)
   window.matchMedia = (query: string) => ({
     matches: false,
