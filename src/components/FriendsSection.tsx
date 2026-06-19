@@ -22,6 +22,7 @@ import {
   findUserByEmail,
   searchUsersByName,
 } from "../api/friends";
+import { createNotification } from "../api/notifications";
 
 // ── Local cache helpers ───────────────────────────────────────────────────────
 // Keyed by userId so multiple accounts on the same device don't bleed into each other.
@@ -66,7 +67,7 @@ function Avatar({ name, size = 32 }) {
 
 // ── FriendsSection ────────────────────────────────────────────────────────────
 
-export default function FriendsSection({ userId }) {
+export default function FriendsSection({ userId, ownName }: { userId: string; ownName?: string }) {
   // friends: { id, name, email, friends_since }
   // requests: { friendship_id, other_user_id, direction, requested_at }
   // reqProfiles: { [other_user_id]: { name, email } }
@@ -188,6 +189,11 @@ export default function FriendsSection({ userId }) {
     try {
       await sendFriendRequest(userId, target.id);
       setActionMsg(`Request sent to ${target.name || target.email || "user"}.`);
+      // Notify the recipient — non-blocking, fire-and-forget
+      createNotification(target.id, "friend_request", {
+        title: `${ownName || "Someone"} sent you a friend request`,
+        data: { from_user_id: userId, from_name: ownName ?? null },
+      }).catch(() => {});
       await load(); // refresh friends + requests from Supabase
     } catch (e) {
       setPendingIds(p => { const n = { ...p }; delete n[target.id]; return n; });
@@ -210,6 +216,13 @@ export default function FriendsSection({ userId }) {
   async function handleRespond(otherId, accept) {
     try {
       await respondFriendRequest(userId, otherId, accept);
+      // Notify the original sender that their request was accepted
+      if (accept) {
+        createNotification(otherId, "request_accepted", {
+          title: `${ownName || "Someone"} accepted your friend request`,
+          data: { from_user_id: userId, from_name: ownName ?? null },
+        }).catch(() => {});
+      }
       await load();
     } catch (e) { console.warn("[FriendsSection] respond error:", e.message); }
   }

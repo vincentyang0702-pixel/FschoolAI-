@@ -1,5 +1,7 @@
 // src/api/notifications.ts — client-side notification helpers.
-// Read/mark-read only; inserts are done server-side via api/_notify.ts.
+// fetchNotifications / markRead use the anon key (RLS is DISABLED on the table).
+// createNotification() also uses the anon key — inserting works because RLS is off.
+// Heavy work (email fallback, guaranteed delivery) stays in api/_notify.ts.
 import { supabase } from "./supabase";
 
 export type NotifType =
@@ -8,7 +10,8 @@ export type NotifType =
   | "nudge"
   | "room_invite"
   | "assignment_due"
-  | "milestone";
+  | "milestone"
+  | "ranking";
 
 export interface AppNotification {
   id: string;
@@ -56,4 +59,19 @@ export async function markAllNotificationsRead(userId: string): Promise<void> {
     .update({ read: true })
     .eq("user_id", userId)
     .eq("read", false);
+}
+
+/** Client-side insert — works because notifications table has RLS disabled.
+ *  Use for events that originate in the browser (friend requests, accepts).
+ *  Events that originate server-side use api/_notify.ts instead. */
+export async function createNotification(
+  userId: string,
+  type: NotifType,
+  opts: { title?: string; body?: string; data?: Record<string, unknown> } = {}
+): Promise<void> {
+  const { title = null, body = null, data = null } = opts;
+  const { error } = await supabase
+    .from("notifications")
+    .insert({ user_id: userId, type, title, body, data });
+  if (error) console.error("[notifications] createNotification:", error.message);
 }

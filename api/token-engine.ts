@@ -4,6 +4,7 @@
 // GET  ?action=summary&userId=X
 
 import { createClient } from "@supabase/supabase-js";
+import { notify } from "./_notify";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -36,6 +37,42 @@ const TIERS = [
 
 function getTier(points) {
   return (TIERS.find(t => (points ?? 0) >= t.min) ?? TIERS[3]).name;
+}
+
+// ── Rank-change notification (Part C) ────────────────────────────────────────
+// Fires at most once per 3 hours, only when the user crosses a meaningful
+// milestone rank (top 10 / top 3 / #1). Throttled hard — rank churn is constant.
+const RANK_MILESTONES = [1, 3, 10];
+async function checkAndNotifyRank(userId: string, newPoints: number, oldPoints: number) {
+  try {
+    // Count users with strictly MORE points → gives 0-based rank offset
+    const [{ count: above }, { count: aboveOld }] = await Promise.all([
+      supabase.from("leaderboard").select("user_id", { count: "exact", head: true }).gt("points", newPoints),
+      supabase.from("leaderboard").select("user_id", { count: "exact", head: true }).gt("points", oldPoints),
+    ]);
+    const newRank = (above ?? 0) + 1;
+    const oldRank = (aboveOld ?? 0) + 1;
+
+    // Only notify when crossing INTO a milestone rank, not on every improvement
+    const crossed = RANK_MILESTONES.find(m => newRank <= m && oldRank > m);
+    if (!crossed) return;
+
+    // Throttle: skip if we already sent a ranking notif in the last 3 hours
+    const cutoff = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+    const { count: recent } = await supabase
+      .from("notifications").select("id", { count: "exact", head: true })
+      .eq("user_id", userId).eq("type", "ranking").gte("created_at", cutoff);
+    if ((recent ?? 0) > 0) return;
+
+    const title = newRank === 1
+      ? "You're #1 on the leaderboard! 🏆"
+      : `You moved into the top ${crossed}`;
+    await notify(userId, "ranking", {
+      title,
+      body: `${newPoints} points · Rank #${newRank}`,
+      data: { newRank, oldRank, points: newPoints },
+    });
+  } catch { /* non-blocking — never let rank notif break an award */ }
 }
 
 function today() {
@@ -153,6 +190,9 @@ export default async function handler(req, res) {
       supabase.from("leaderboard").upsert({
         user_id: userId, points: newPoints, tier, updated_at: new Date().toISOString(),
       }, { onConflict: "user_id" }).then(() => {}, () => {});
+
+      // Check for milestone rank crossing (non-blocking)
+      checkAndNotifyRank(userId, newPoints, newPoints - delta).catch(() => {});
 
       return res.status(200).json({ awarded: true, tokens: delta, newTotal: newPoints, tier, tierUp, durationSecs });
     }
@@ -286,6 +326,9 @@ export default async function handler(req, res) {
     };
     if (streakPatch?.streak != null) lbPayload.streak = streakPatch.streak;
     supabase.from("leaderboard").upsert(lbPayload, { onConflict: "user_id" }).then(() => {}, () => {});
+
+    // Check for milestone rank crossing (non-blocking — rank notif must never block awards)
+    checkAndNotifyRank(userId, newPoints, newPoints - tokens).catch(() => {});
 
     // Award milestone bonus if hit
     let milestoneResult = null;

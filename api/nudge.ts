@@ -9,6 +9,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
+import { notify } from "./_notify";
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -60,6 +61,18 @@ export default async function handler(req, res) {
     console.error("[nudge] insert failed:", insErr.message);
     return res.status(500).json({ error: "Failed to write nudge" });
   }
+
+  // ── 2b. Persist to notifications table so the bell picks it up ────────────
+  // room_invite when roomId is present; plain nudge otherwise.
+  const notifType = roomId ? "room_invite" : "nudge";
+  const notifTitle = roomId
+    ? `${fromName || "Someone"} invited you to a study room`
+    : `${fromName || "Someone"} wants you to study`;
+  notify(toUserId, notifType, {
+    title: notifTitle,
+    body: roomId && roomName ? `Join "${roomName}"` : undefined,
+    data: { from_user_id: fromUserId, from_name: fromName ?? null, room_id: roomId ?? null, room_name: roomName ?? null },
+  }).catch(() => {}); // non-blocking — nudge row is what matters for realtime
 
   // ── 3. Email fallback when the friend isn't currently online ───────────────
   let emailSent = false;

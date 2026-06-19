@@ -13,7 +13,8 @@ export type NotifType =
   | "nudge"
   | "room_invite"
   | "assignment_due"
-  | "milestone";
+  | "milestone"
+  | "ranking";
 
 export async function notify(
   userId: string,
