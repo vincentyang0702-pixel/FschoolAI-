@@ -15,9 +15,8 @@ import {
 import type { AccessFilters } from "../api/rooms";
 import { loadRecentMessages, postRoomMessage } from "../api/chat";
 import type { ChatMessage } from "../api/chat";
+import { loadStrokes, loadBackground, addStroke, deleteStroke, setBackground, clearBoard } from "../api/whiteboard";
 import type { Stroke, Point, PenStyle } from "../api/whiteboard";
-import * as Y from "yjs";
-import { SupabaseBroadcastProvider } from "../lib/yjsSupabaseProvider";
 import Whiteboard, { PEN_COLORS, PEN_WIDTHS, ERASER_SIZES, DEFAULT_BG } from "../components/Whiteboard";
 import type { Tool } from "../components/Whiteboard";
 import StudyOrb from "../components/StudyOrb";
@@ -958,11 +957,8 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [wbEraserSize,       setWbEraserSize]       = useState(ERASER_SIZES[1]);
   const [wbBg,               setWbBg]               = useState(DEFAULT_BG);
   const [liveStrokes,        setLiveStrokes]        = useState<Record<string, { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }>>({});
+  const boardLoadedRef = useRef(false);
   const lastLiveSentRef = useRef(0);
-  const yjsDocRef       = useRef<Y.Doc | null>(null);
-  const yjsProviderRef  = useRef<SupabaseBroadcastProvider | null>(null);
-  const yjsStrokesRef   = useRef<Y.Array<any> | null>(null);
-  const yjsMetaRef      = useRef<Y.Map<any> | null>(null);
 
   const channelRef          = useRef(null);
   const reqChRef            = useRef(null);
@@ -997,8 +993,6 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       window.removeEventListener("beforeunload", handleUnload);
       // Abort any in-flight buddy stream on unmount
       buddyAbortRef.current?.abort();
-      yjsProviderRef.current?.destroy();
-      yjsDocRef.current?.destroy();
       try { wbChRef.current?.unsubscribe(); } catch {}
       endSession();
     };
@@ -1162,6 +1156,16 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         return [...prev, payload as ChatMessage];
       });
     })
+    // Whiteboard — a peer changed the background
+    .on("broadcast", { event: "wb_bg" }, ({ payload }) => {
+      setWbBg(payload.bg || DEFAULT_BG);
+    })
+    // Whiteboard — a peer cleared the board
+    .on("broadcast", { event: "wb_clear" }, () => {
+      setStrokes([]);
+      setWbBg(DEFAULT_BG);
+      setLiveStrokes({});
+    })
     // Whiteboard — a peer is actively drawing (live preview)
     .on("broadcast", { event: "wb_live" }, ({ payload }) => {
       if (payload.userId === userId) return;
@@ -1194,49 +1198,24 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
 
   function subscribeWhiteboard() {
     const ch = supabase.channel("wb-" + room.id);
-
-    const doc = new Y.Doc();
-    const yStrokes = doc.getArray<any>("strokes");
-    const yMeta    = doc.getMap<any>("meta");
-
-    yjsDocRef.current      = doc;
-    yjsStrokesRef.current  = yStrokes;
-    yjsMetaRef.current     = yMeta;
-
-    // When the strokes array changes, update React state and clear the live
-    // preview for any peer whose stroke just committed.
-    let prevLength = 0;
-    yStrokes.observe(() => {
-      const arr = yStrokes.toArray() as Stroke[];
-      setStrokes(arr);
-      if (arr.length > prevLength) {
-        const added = arr.slice(prevLength);
-        setLiveStrokes(prev => {
-          const next = { ...prev };
-          added.forEach((s: any) => { if (s.user_id && s.user_id !== userId) delete next[s.user_id]; });
-          return next;
-        });
-      }
-      prevLength = arr.length;
-    });
-
-    // Background colour is stored in the Yjs meta map so it syncs like strokes.
-    yMeta.observe(() => {
-      const bg = yMeta.get("bg");
-      if (bg) setWbBg(bg as string);
-    });
-
-    const provider = new SupabaseBroadcastProvider(doc, ch, room.id);
-    yjsProviderRef.current = provider;
-
-    ch.subscribe(async (status) => {
-      if (status === "SUBSCRIBED") {
-        // Seed from persisted DB state, then ask live peers for any newer updates.
-        await provider.loadPersistedState();
-        provider.requestSync();
-      }
-    });
-
+    ch.on("postgres_changes", {
+      event: "INSERT",
+      schema: "public",
+      table: "whiteboard_strokes",
+      filter: `room_id=eq.${room.id}`,
+    }, ({ new: row }) => {
+      setStrokes(prev => prev.some(s => s.id === row.id) ? prev : [...prev, row as Stroke]);
+      setLiveStrokes(prev => { const n = { ...prev }; delete n[row.user_id]; return n; });
+    })
+    .on("postgres_changes", {
+      event: "DELETE",
+      schema: "public",
+      table: "whiteboard_strokes",
+      filter: `room_id=eq.${room.id}`,
+    }, ({ old: row }) => {
+      setStrokes(prev => prev.filter(s => s.id !== row.id));
+    })
+    .subscribe();
     return ch;
   }
 
@@ -1276,15 +1255,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       try {
         const present = Object.values(channelRef.current.presenceState()).flat() as any[];
         const othersOnline = new Set(present.map(p => p.userId).filter(id => id !== userId));
-        if (othersOnline.size === 0) {
-          // Last person leaving — wipe board so next session starts fresh.
-          const arr = yjsStrokesRef.current;
-          if (arr && arr.length > 0) arr.doc?.transact(() => { arr.delete(0, arr.length); });
-          yjsMetaRef.current?.set("bg", DEFAULT_BG);
-          await yjsProviderRef.current?.persistState().catch(() => {});
-        } else {
-          yjsProviderRef.current?.persistState().catch(() => {});
-        }
+        if (othersOnline.size === 0) await clearBoard(userId, room.id).catch(() => {});
       } catch {}
       try { await channelRef.current.untrack(); } catch {}
       supabase.removeChannel(channelRef.current);
@@ -1488,34 +1459,50 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
 
   function handleOpenBoard() {
     setShowBoard(true);
-    // Yjs state loads automatically via subscribeWhiteboard() on room join.
+    if (!boardLoadedRef.current) {
+      boardLoadedRef.current = true;
+      Promise.all([loadStrokes(userId, room.id), loadBackground(room.id)])
+        .then(([loaded, bg]) => { setStrokes(loaded); setWbBg(bg || DEFAULT_BG); })
+        .catch(err => {
+          console.error("[wb] load:", (err as any)?.message);
+          boardLoadedRef.current = false; // allow retry on next open if it failed
+        });
+    }
   }
 
-  function handleStrokeComplete(stroke: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) {
-    yjsStrokesRef.current?.push([{
-      id: crypto.randomUUID(),
-      room_id: room.id,
-      user_id: userId,
-      name: userData?.name ?? "Anonymous",
-      created_at: new Date().toISOString(),
+  async function handleStrokeComplete(stroke: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) {
+    // Add optimistically with a temp ID so the stroke eraser can hit-test it
+    // immediately — before the DB round-trip completes.
+    const tempId = crypto.randomUUID();
+    const optimistic: Stroke = {
+      id: tempId, room_id: room.id, user_id: userId,
+      name: userData?.name ?? "Anonymous", created_at: new Date().toISOString(),
       ...stroke,
-    }]);
-    // Yjs observer fires → setStrokes() → canvas re-renders.
-    // Provider broadcasts the binary delta to all peers automatically.
+    };
+    setStrokes(prev => [...prev, optimistic]);
+    try {
+      const saved = await addStroke(userId, room.id, stroke.mode, stroke.style, stroke.color, stroke.width, stroke.points);
+      // Swap the temp ID for the real server ID. Postgres CHANGES will fire and sync to peers.
+      setStrokes(prev => prev.map(s => s.id === tempId ? saved : s));
+    } catch (err) {
+      console.error("[wb] stroke:", (err as any)?.message);
+      // Leave the optimistic stroke in local state so it stays visible on the canvas,
+      // but it won't sync to other users or survive a reload.
+    }
   }
 
-  function handleEraseStroke(strokeId: string) {
-    const arr = yjsStrokesRef.current;
-    if (!arr) return;
-    const idx = (arr.toArray() as any[]).findIndex(s => s.id === strokeId);
-    if (idx !== -1) arr.delete(idx, 1);
-    // Yjs observer fires → setStrokes() → canvas re-renders and peers sync.
+  async function handleEraseStroke(strokeId: string) {
+    setStrokes(prev => prev.filter(s => s.id !== strokeId)); // optimistic
+    // Postgres CHANGES will fire and sync deletion to peers
+    try { await deleteStroke(userId, room.id, strokeId); }
+    catch (err) { console.error("[wb] erase:", (err as any)?.message); }
   }
 
-  function handleBgChange(bg: string) {
+  async function handleBgChange(bg: string) {
     setWbBg(bg);
-    yjsMetaRef.current?.set("bg", bg);
-    // Yjs meta observer on peers fires → setWbBg(). Provider broadcasts the delta.
+    channelRef.current?.send({ type: "broadcast", event: "wb_bg", payload: { bg } }).catch(() => {});
+    try { await setBackground(userId, room.id, bg); }
+    catch (err) { console.error("[wb] bg:", (err as any)?.message); }
   }
 
   function handleLiveStroke(draft: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] } | null) {
@@ -1526,12 +1513,12 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     channelRef.current?.send({ type: "broadcast", event: "wb_live", payload: { userId, ...draft } }).catch(() => {});
   }
 
-  function handleClearBoard() {
-    const arr = yjsStrokesRef.current;
-    if (arr && arr.length > 0) arr.doc?.transact(() => { arr.delete(0, arr.length); });
-    yjsMetaRef.current?.set("bg", DEFAULT_BG);
-    setLiveStrokes({});
-    // Yjs observers fire on all peers → canvas clears everywhere.
+  async function handleClearBoard() {
+    setStrokes([]);
+    setWbBg(DEFAULT_BG);
+    channelRef.current?.send({ type: "broadcast", event: "wb_clear", payload: {} }).catch(() => {});
+    try { await clearBoard(userId, room.id); }
+    catch (err) { console.error("[wb] clear:", (err as any)?.message); }
   }
 
   async function sendChatMessage() {
