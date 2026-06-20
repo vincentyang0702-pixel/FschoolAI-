@@ -113,6 +113,13 @@ async function pdfToPages(bytes: Uint8Array): Promise<{ pages: { page: number; t
     };
   }
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  // Point pdfjs to the worker file explicitly. Without this, pdfjs v5 tries to
+  // resolve it relative to the module and fails in Vercel's bundled environment.
+  // includeFiles in vercel.json ensures the file is present in the deployment.
+  if (!pdfjs.GlobalWorkerOptions.workerSrc) {
+    pdfjs.GlobalWorkerOptions.workerSrc =
+      new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url).href;
+  }
   const doc = await pdfjs.getDocument({ data: bytes, isEvalSupported: false, useSystemFonts: true } as any).promise;
   const pageCount = doc.numPages;
   const limit = Math.min(pageCount, MAX_PAGES);
