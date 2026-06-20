@@ -1,34 +1,68 @@
-// auth.ts — legacy SHA-256 signin / signup against the public.users table.
-// Identity = the users row's text `id`, which callers store in localStorage as
-// fschool_uid. Mirrors the inline flow in App.tsx. No Supabase Auth / GoTrue.
+// auth.ts — sign-in / sign-up via Supabase Auth (GoTrue), with lazy migration of legacy
+// SHA-256 accounts. Establishes a real session (so `auth.uid()` is available for RLS) and
+// returns the public.users profile. App identity stays the profile's text `id` (fschool_uid).
+//
+// • New signup  → POST /api/auth-migrate?action=signup  (creates GoTrue user + profile),
+//                  then signInWithPassword to start the session.
+// • Login       → signInWithPassword. If it fails, the account may be a pre-Auth legacy row
+//                  (password_hash, no auth_id): POST /api/auth-migrate?action=migrate verifies
+//                  the old hash + creates the GoTrue user, then we retry. A genuinely wrong
+//                  password makes migrate fail too → same "incorrect" error (no user enumeration).
 
 import { supabase } from './supabase';
 
-async function sha256Hex(str: string) {
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
-}
+export type Profile = { id: string; name?: string; school?: string };
 
-/** Verify credentials against the legacy password_hash and return the profile row. */
-export async function signIn(email, password) {
-  const e = email.toLowerCase().trim();
-  const password_hash = await sha256Hex(password);
-  const { data: user } = await supabase
+/** The public.users profile for the current GoTrue session (mapped via auth_id). */
+export async function currentProfile(): Promise<Profile | null> {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session?.user) return null;
+  const { data } = await supabase
     .from('users').select('id, name, school')
-    .eq('email', e).eq('password_hash', password_hash).maybeSingle();
-  if (!user) throw new Error('Incorrect email or password.');
-  return user;
+    .eq('auth_id', session.user.id).maybeSingle();
+  return (data as Profile) ?? null;
 }
 
-/** Create a public.users row with the legacy SHA-256 hash. Returns the new profile id. */
-export async function signUp({ name, email, password }) {
-  const e = email.toLowerCase().trim();
-  const password_hash = await sha256Hex(password);
-  const { data: existing } = await supabase
-    .from('users').select('id').eq('email', e).maybeSingle();
-  if (existing) throw new Error('An account with this email already exists. Please sign in instead.');
-  const id = crypto.randomUUID();
-  const { error } = await supabase.from('users').insert({ id, name, email: e, password_hash });
-  if (error) throw new Error('Could not create your account.');
-  return id;
+/** Sign in via Supabase Auth, lazily migrating a pre-Auth account if needed. */
+export async function signIn(email: string, password: string): Promise<Profile> {
+  const e = (email || '').toLowerCase().trim();
+
+  let { error } = await supabase.auth.signInWithPassword({ email: e, password });
+
+  if (error) {
+    // Legacy account not yet in GoTrue → migrate (verifies the old SHA-256 hash
+    // server-side), then retry. Wrong password makes migrate fail too → same error.
+    const mig = await fetch('/api/auth-migrate?action=migrate', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: e, password }),
+    });
+    if (!mig.ok) throw new Error('Incorrect email or password.');
+    ({ error } = await supabase.auth.signInWithPassword({ email: e, password }));
+    if (error) throw new Error('Incorrect email or password.');
+  }
+
+  const profile = await currentProfile();
+  if (!profile) throw new Error('Signed in, but no profile was found for this account.');
+  return profile;
+}
+
+/** Create a Supabase Auth account + profile (server-side), then establish the session. */
+export async function signUp({ name, email, password }: { name: string; email: string; password: string }): Promise<Profile> {
+  const e = (email || '').toLowerCase().trim();
+
+  const res = await fetch('/api/auth-migrate?action=signup', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, email: e, password }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || 'Could not create your account.');
+
+  const { error } = await supabase.auth.signInWithPassword({ email: e, password });
+  if (error) throw new Error('Account created — please sign in.');
+
+  return { id: data.userId, name };
+}
+
+export async function signOut(): Promise<void> {
+  try { await supabase.auth.signOut(); } catch { /* clear local state regardless */ }
 }

@@ -13,6 +13,7 @@ import BottomNav            from "./components/BottomNav";
 import Landing              from "./pages/Landing"; // eager — logged-out entry, shown on first paint
 import { useApp }           from "./context/AppContext";
 import { supabase }         from "./api/supabase";
+import { signIn, signUp }   from "./api/auth";
 import { usePageTracking }  from "./hooks/usePageTracking";
 import { awardTokens }      from "./api/tokens";
 import TokenToast           from "./components/TokenToast";
@@ -217,9 +218,15 @@ export default function App() {
     setResetLoading(true);
     setResetError("");
     try {
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(resetPw));
-      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-      await supabase.from("users").update({ password_hash, email_verify_token: null }).eq("id", resetMode.userId);
+      // Reset via Supabase Auth (GoTrue), not the legacy password_hash. The endpoint
+      // validates the one-time token, sets the GoTrue password (creating + linking the
+      // auth user if this account never migrated), and burns the token server-side.
+      const res = await fetch("/api/auth-migrate?action=reset", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: resetMode.userId, token: resetMode.token, password: resetPw }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to reset password. Try again.");
       setResetDone(true);
       setTimeout(() => { setResetMode(null); setResetDone(false); }, 3000);
       const url = new URL(window.location.href);
@@ -228,7 +235,7 @@ export default function App() {
       url.searchParams.delete("userId");
       window.history.replaceState({}, "", url.toString());
     } catch (err) {
-      setResetError("Failed to reset password. Try again.");
+      setResetError(err?.message || "Failed to reset password. Try again.");
     }
     setResetLoading(false);
   }
@@ -308,71 +315,34 @@ export default function App() {
   const handleEnter = useCallback(async (creds: {
     mode?: string; email?: string; password?: string; name?: string;
   } = {}) => {
+    const email = (creds.email || "").toLowerCase().trim();
+
+    // ── Login — Supabase Auth (lazily migrates legacy SHA-256 accounts) ──────────
     if (creds.mode === "login") {
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
-      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-      const { data: user, error } = await supabase
-        .from("users")
-        .select("id, name, school")
-        .eq("email", creds.email.toLowerCase().trim())
-        .eq("password_hash", password_hash)
-        .maybeSingle();
-      if (error || !user) throw new Error("Incorrect email or password.");
-      localStorage.setItem("fschool_uid", user.id);
+      const profile = await signIn(email, creds.password); // establishes a GoTrue session
+      localStorage.setItem("fschool_uid", profile.id);
       localStorage.setItem(LOGGED_IN_KEY, "1");
-      if (user.name) localStorage.setItem("fschool_name", user.name);
+      if (profile.name) localStorage.setItem("fschool_name", profile.name);
       window.location.reload();
       return;
     }
 
-    // ── Signup ────────────────────────────────────────────────────────────────
+    // ── Signup — creates the GoTrue user + a fresh profile, then signs in ─────────
+    // (The server mints a brand-new profile id, so signing up on a device already
+    // logged into another account can't clobber it — the old "merge" bug.)
     localStorage.setItem("fschool_name", creds.name);
+    const profile = await signUp({ name: creds.name, email, password: creds.password });
+    localStorage.setItem("fschool_uid", profile.id);
 
-    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
-    const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    // Verification email — non-blocking, won't fail signup if email fails.
+    fetch("/api/email?action=send", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ userId: profile.id, email, name: creds.name }),
+    }).catch(() => {});
 
-    const email = creds.email.toLowerCase().trim();
-
-    // Check for existing account — prevents duplicate signups
-    const { data: existing } = await supabase
-      .from("users")
-      .select("id")
-      .eq("email", email)
-      .maybeSingle();
-
-    if (existing) {
-      // Throw here — propagates up to Landing.jsx to show the error to the user
-      throw new Error("An account with this email already exists. Please sign in instead.");
-    }
-
-    // CRITICAL: every signup gets a brand-new id. Never reuse the device's
-    // existing fschool_uid — otherwise signing up on a device that is already
-    // logged into another account overwrites that account (the "merge" bug).
-    const newId = crypto.randomUUID();
-    localStorage.setItem("fschool_uid", newId);
-
-    try {
-      // insert, not upsert — a fresh signup is always a new row. If the id
-      // somehow collided it should throw loudly, never silently clobber a row.
-      const { error: insertErr } = await supabase
-        .from("users")
-        .insert({ id: newId, name: creds.name, email, password_hash });
-      if (insertErr) throw insertErr;
-
-      // Send verification email — non-blocking, won't fail signup if email fails
-      fetch("/api/email?action=send", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId: newId, email, name: creds.name }),
-      }).catch(() => {});
-    } catch (err) {
-      console.warn("Supabase signup failed:", err.message);
-    }
-
-    // Point app state at the new account AFTER the row exists, so onboarding
-    // and page-tracking write to the correct user.
-    setUserId(newId);
-
+    // Point app state at the new account so onboarding + page-tracking write to it.
+    setUserId(profile.id);
     setOnboardingEmail(creds.email);
     setOnboardingInitName(creds.name);
     setShowOnboarding(true);
