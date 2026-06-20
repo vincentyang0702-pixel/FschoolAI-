@@ -2,7 +2,7 @@
 // Upload a PDF → store to course-files bucket → extract text → AI summary/highlights
 // → clean reader view. LMS-synced files still work as before.
 
-import { useMemo, useState, useRef } from "react";
+import { useMemo, useState, useRef, useEffect } from "react";
 import { useApp } from "../context/AppContext";
 import { supabase } from "../api/supabase";
 import DocUpload from "../components/DocUpload";
@@ -273,21 +273,63 @@ function UploadCard({ onFileProcessed }: { onFileProcessed: (file: any) => void 
   );
 }
 
+// Map a raw Supabase files row to the shape the UI expects
+function mapFileRow(f: any) {
+  return {
+    ...f,
+    courseDbId:  f.course_id   ?? null,
+    sizeBytes:   f.size_bytes  ?? null,
+    fileType:    f.file_type   ?? null,
+    sourceUrl:   f.source_url  ?? null,
+    storagePath: f.storage_path ?? null,
+    summary:     f.summary     ?? null,
+    highlights:  f.highlights  ?? null,
+    processedAt: f.processed_at ?? null,
+  };
+}
+
 // ── Files page ────────────────────────────────────────────────────────────────
 export default function Files() {
-  const { files, courses } = useApp();
+  const { files, courses, userId } = useApp();
 
   // Reader view state — null = file list, object = reading a doc
   const [viewingFile, setViewingFile] = useState<any>(null);
 
-  // After a fresh upload, add the new file to the top of the list temporarily
-  // (AppContext will pick it up on the next load)
-  const [freshFiles, setFreshFiles] = useState<any[]>([]);
+  // Saved YouLearn docs fetched directly from Supabase on mount.
+  // This is the persistence fix: freshFiles dies on unmount; AppContext doesn't
+  // re-fetch after an insert. A direct query here always reflects the real DB state.
+  const [savedDocs, setSavedDocs] = useState<any[]>([]);
+
+  useEffect(() => {
+    if (!userId) return;
+    supabase
+      .from("files")
+      .select("id, course_id, lms_file_id, name, file_type, size_bytes, source_url, folder, status, storage_path, summary, highlights, processed_at")
+      .eq("user_id", userId)
+      .not("processed_at", "is", null)        // only YouLearn-processed files
+      .order("processed_at", { ascending: false })
+      .limit(100)
+      .then(({ data }) => {
+        if (data?.length) setSavedDocs(data.map(mapFileRow));
+      });
+  }, [userId]);
+
+  function refreshSavedDocs() {
+    if (!userId) return;
+    supabase
+      .from("files")
+      .select("id, course_id, lms_file_id, name, file_type, size_bytes, source_url, folder, status, storage_path, summary, highlights, processed_at")
+      .eq("user_id", userId)
+      .not("processed_at", "is", null)
+      .order("processed_at", { ascending: false })
+      .limit(100)
+      .then(({ data }) => {
+        if (data?.length) setSavedDocs(data.map(mapFileRow));
+      });
+  }
 
   function handleProcessed(processed: any) {
-    // Map to the same shape AppContext uses
     const newFile = {
-      ...processed,
       id:          processed.id,
       name:        processed.name,
       fileType:    processed.fileType,
@@ -300,16 +342,22 @@ export default function Files() {
       courseDbId:  null,
       status:      "course_material",
     };
-    setFreshFiles(prev => [newFile, ...prev]);
+    // Add to savedDocs immediately (optimistic) + refresh from DB
+    setSavedDocs(prev => {
+      if (prev.some(d => d.id === newFile.id)) return prev;
+      return [newFile, ...prev];
+    });
     setViewingFile(newFile);
+    // Refresh in background to pick up the canonical DB row
+    setTimeout(refreshSavedDocs, 1500);
   }
 
-  // Merge fresh (locally added) + context files, de-duped by id
+  // Merge savedDocs + AppContext files (LMS-synced), de-duped by id
   const allFiles = useMemo(() => {
-    const seen = new Set(files.map(f => f.id));
-    const extras = freshFiles.filter(f => !seen.has(f.id));
-    return [...extras, ...files];
-  }, [files, freshFiles]);
+    const seen = new Set(savedDocs.map(f => f.id));
+    const lmsOnly = files.filter(f => !seen.has(f.id));
+    return [...savedDocs, ...lmsOnly];
+  }, [files, savedDocs]);
 
   // Group by course
   const groups = useMemo(() => {
