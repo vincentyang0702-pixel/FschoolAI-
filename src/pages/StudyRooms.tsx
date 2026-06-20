@@ -318,9 +318,13 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
 
   async function nudgeFriend(friend) {
     setNudged(n => ({ ...n, [friend.id]: "sending" }));
+    // A friend is "online" if they have an active presence entry in the global-studying
+    // channel — regardless of whether they're in a room or just in the lobby.
+    // This prevents sending an email when the friend is right there in the app.
+    const recipientOnline = Object.prototype.hasOwnProperty.call(globalState, friend.id);
     const result = await sendNudge({
       fromUserId: userId, toUserId: friend.id, roomId: null,
-      fromName: userData?.name ?? "Someone", roomName: null, recipientOnline: false,
+      fromName: userData?.name ?? "Someone", roomName: null, recipientOnline,
     });
     setNudged(n => ({ ...n, [friend.id]: result?.sent === false && result.reason === "rate_limited" ? "limited" : "sent" }));
   }

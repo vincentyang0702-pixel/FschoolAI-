@@ -74,6 +74,19 @@ function loadEnvKey(key) {
   return process.env[key];
 }
 
+// Pre-wire server-side env aliases from VITE_ vars when the bare versions are absent.
+// All API proxies call loadEnvKey("SUPABASE_URL") etc. — these must resolve locally.
+// In production (Vercel) the real service key is set; locally we fall back to the
+// anon key (works because RLS is disabled on all app tables).
+;(() => {
+  if (!loadEnvKey("SUPABASE_URL"))
+    process.env.SUPABASE_URL = loadEnvKey("VITE_SUPABASE_URL") ?? "";
+  if (!loadEnvKey("SUPABASE_ANON_KEY"))
+    process.env.SUPABASE_ANON_KEY = loadEnvKey("VITE_SUPABASE_ANON_KEY") ?? "";
+  if (!loadEnvKey("SUPABASE_SERVICE_KEY"))
+    process.env.SUPABASE_SERVICE_KEY = loadEnvKey("VITE_SUPABASE_ANON_KEY") ?? "";
+})();
+
 const groqProxyPlugin = {
   name: "groq-proxy",
   configureServer(server) {

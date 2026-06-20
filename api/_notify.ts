@@ -3,8 +3,8 @@
 // Live delivery is handled client-side via postgres_changes on the notifications table.
 import { createClient } from "@supabase/supabase-js";
 
-const supaUrl = process.env.SUPABASE_URL ?? "";
-const supaKey = process.env.SUPABASE_SERVICE_KEY ?? process.env.SUPABASE_ANON_KEY ?? "";
+const supaUrl = process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "";
+const supaKey = process.env.SUPABASE_SERVICE_KEY ?? process.env.SUPABASE_ANON_KEY ?? process.env.VITE_SUPABASE_ANON_KEY ?? "";
 const db = createClient(supaUrl, supaKey, { db: { schema: "public" } });
 
 export type NotifType =

@@ -7,8 +7,8 @@ import { createClient } from "@supabase/supabase-js";
 import { notify } from "./_notify";
 
 const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
+  process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "",
+  process.env.SUPABASE_SERVICE_KEY ?? process.env.SUPABASE_ANON_KEY ?? process.env.VITE_SUPABASE_ANON_KEY ?? ""
 );
 
 // ── Token config — source of truth for all award amounts ─────────────────────
