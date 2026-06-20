@@ -1,11 +1,12 @@
 // Study.jsx — Course picker, Flashcards / Study Guide modes.
 // Flashcard study session: fullscreen, one card at a time, 3D flip, swipe-to-judge.
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { groq }         from "../api/groq";
 import { useApp }        from "../context/AppContext";
 import { supabase }      from "../api/supabase";
 import { awardTokens }   from "../api/tokens";
+import { cardKey, sm2, isDue, GRADE } from "../lib/srs";
 
 
 const SYSTEM =
@@ -43,7 +44,7 @@ function parseFlashcards(text) {
 }
 
 // ── Fullscreen study session ──────────────────────────────────────────────────
-function StudySession({ cards, onExit, updateUserField, userData }) {
+function StudySession({ cards, onExit, updateUserField, userData, onJudge = null }) {
   const [idx, setIdx]         = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [results, setResults] = useState([]);
@@ -95,6 +96,7 @@ function StudySession({ cards, onExit, updateUserField, userData }) {
   const judge = useCallback((correct) => {
     if (judgeLock.current || isDone) return;
     resetIdle(); // reset idle on every judge action
+    onJudge?.(cards[idx], correct); // record spaced-repetition result (review mode)
     judgeLock.current = true;
     setExitDir(correct ? "right" : "left");
     setTimeout(() => {
@@ -105,7 +107,7 @@ function StudySession({ cards, onExit, updateUserField, userData }) {
       setExitDir(null);
       judgeLock.current = false;
     }, 280);
-  }, [isDone, resetIdle]);
+  }, [isDone, resetIdle, onJudge, cards, idx]);
 
   // Keyboard controls: Space = flip, ArrowRight = got it, ArrowLeft = missed
   useEffect(() => {
@@ -547,6 +549,55 @@ export default function Study() {
   const [inSession,  setInSession]  = useState(false);
   const [toast,      setToast]      = useState("");
 
+  // ── Spaced repetition ───────────────────────────────────────────────────────
+  const [srsStates,   setSrsStates]   = useState({}); // card_key → { dueAt, ease, ... }
+  const [reviewCards, setReviewCards] = useState(null); // non-null = in a review session
+
+  const loadSrs = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const { data } = await supabase
+        .from("srs_reviews")
+        .select("card_key, due_at, ease, interval_days, reps, lapses")
+        .eq("user_id", userId);
+      const map = {};
+      (data || []).forEach(r => {
+        map[r.card_key] = { dueAt: r.due_at, ease: r.ease, interval: r.interval_days, reps: r.reps, lapses: r.lapses };
+      });
+      setSrsStates(map);
+    } catch { /* table may not exist yet */ }
+  }, [userId]);
+  useEffect(() => { loadSrs(); }, [loadSrs]);
+
+  // Every flashcard (across all courses) that's new or whose review is due.
+  const dueCards = useMemo(() => {
+    const out = [];
+    const now = Date.now();
+    for (const [dbId, entry] of Object.entries(flashcardMap || {})) {
+      for (const c of ((entry as any)?.cards || [])) {
+        const key = cardKey(dbId, c.question);
+        if (isDue(srsStates[key], now)) out.push({ ...c, courseId: dbId, key });
+      }
+    }
+    return out;
+  }, [flashcardMap, srsStates]);
+
+  // Record one review result (got-it → good, missed → again) and reschedule the card.
+  const recordReview = useCallback(async (card, correct) => {
+    const courseId = card?.courseId ?? null;
+    const key = card?.key ?? cardKey(courseId, card?.question);
+    const next = sm2(srsStates[key], correct ? GRADE.good : GRADE.again);
+    setSrsStates(s => ({ ...s, [key]: next }));
+    try {
+      await supabase.from("srs_reviews").upsert({
+        user_id: userId, card_key: key, course_id: courseId,
+        question: card?.question, answer: card?.answer,
+        ease: next.ease, interval_days: next.interval, reps: next.reps, lapses: next.lapses,
+        due_at: next.dueAt, last_reviewed_at: new Date().toISOString(),
+      }, { onConflict: "user_id,card_key" });
+    } catch { /* non-fatal */ }
+  }, [srsStates, userId]);
+
   // Sync selected course when live courses load in
   useEffect(() => {
     if (COURSES.length > 0 && !course) setCourse(COURSES[0]);
@@ -832,6 +883,10 @@ export default function Study() {
     }
   };
 
+  if (reviewCards && reviewCards.length > 0) {
+    return <StudySession cards={reviewCards} onExit={() => { setReviewCards(null); loadSrs(); }} onJudge={recordReview} updateUserField={updateUserField} userData={userData} />;
+  }
+
   if (inSession && flashcards.length > 0) {
     return <StudySession cards={flashcards} onExit={() => setInSession(false)} updateUserField={updateUserField} userData={userData} />;
   }
@@ -858,6 +913,24 @@ export default function Study() {
       <h1 style={{ fontSize: "26px", fontWeight: "600", color: "var(--text-primary)", marginBottom: "24px", letterSpacing: "-0.3px" }}>
         Study
       </h1>
+
+      {/* Spaced-repetition review — cards new or due today, across all courses */}
+      {dueCards.length > 0 && (
+        <button
+          onClick={() => setReviewCards(dueCards)}
+          style={{
+            width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+            background: "rgba(0,210,190,0.08)", border: "1px solid rgba(0,210,190,0.28)",
+            borderRadius: "var(--radius-btn)", padding: "14px 16px", marginBottom: "14px",
+            cursor: "pointer", fontFamily: "inherit",
+          }}
+        >
+          <span style={{ color: "rgba(0,210,190,0.95)", fontSize: "14px", fontWeight: 600 }}>
+            🔁 Review {dueCards.length} card{dueCards.length !== 1 ? "s" : ""} due
+          </span>
+          <span style={{ color: "rgba(0,210,190,0.7)", fontSize: "13px" }}>Start →</span>
+        </button>
+      )}
 
       <select
         value={course}

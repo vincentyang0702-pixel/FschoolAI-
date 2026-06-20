@@ -307,23 +307,28 @@ export function AppProvider({ children }) {
    *  Returns the new DB course id so callers can link follow-up data (e.g. past-course fetches). */
   const addManualCourse = useCallback(async (course, newAssignments) => {
     try {
-      // Insert course first — let Supabase generate a real UUID as the PK
-      // Upsert so re-adding the same Canvas course updates instead of 409ing
-      // (nulls never conflict, so purely-manual courses still insert freely)
-      const { data: insertedCourse, error: courseErr } = await supabase
-        .from("courses")
-        .upsert({
-          user_id:           userId,
-          name:              course.name,
-          course_code:       course.courseCode ?? course.course_code ?? null,
-          canvas_course_id:  course.canvasCourseId ?? course.canvas_course_id ?? null,
-          current_score:     null,
-          final_score:       null,
-          source:            course.source ?? "manual",
-          is_manual:         course.source === "past_canvas" ? false : true,
-        }, { onConflict: "user_id,canvas_course_id" })
-        .select("id")
-        .single();
+      const canvasCourseId = course.canvasCourseId ?? course.canvas_course_id ?? null;
+      // NOTE: we intentionally do NOT write `is_manual` — some DBs drifted from the
+      // schema and lack that column (PGRST204). `source` is the manual marker the
+      // load path keys off (`source === 'manual'`), so it's sufficient on its own.
+      const courseRow = {
+        user_id:           userId,
+        name:              course.name,
+        course_code:       course.courseCode ?? course.course_code ?? null,
+        canvas_course_id:  canvasCourseId,
+        current_score:     null,
+        final_score:       null,
+        source:            course.source ?? "manual",
+      };
+
+      // Manual courses are brand-new rows (canvas_course_id is null), so use a plain
+      // INSERT — that doesn't depend on a (user_id, canvas_course_id) unique index
+      // existing in the DB. ON CONFLICT is only valid (and only needed) when we have a
+      // real Canvas id to dedupe a re-imported course against.
+      const builder = supabase.from("courses");
+      const { data: insertedCourse, error: courseErr } = canvasCourseId
+        ? await builder.upsert(courseRow, { onConflict: "user_id,canvas_course_id" }).select("id").single()
+        : await builder.insert(courseRow).select("id").single();
 
       if (courseErr) throw courseErr;
 
@@ -347,8 +352,7 @@ export function AppProvider({ children }) {
           title:           a.name,
           due_at:          a.dueAt ?? a.due_at ?? null,
           points_possible: a.pointsPossible ?? a.points_possible ?? null,
-          source:          "manual",
-          is_manual:       true,
+          source:          "manual", // manual marker (no is_manual — see courseRow note)
         }));
 
         const { data: insertedAssignments, error: assignErr } = await supabase
@@ -376,7 +380,9 @@ export function AppProvider({ children }) {
       return dbCourseId;  // caller can use this to link follow-up fetches
 
     } catch (err) {
-      console.warn("Failed to persist manual course to Supabase:", err.message);
+      // Surfaced (not swallowed) so a real DB issue — RLS, a missing column, etc. —
+      // is visible instead of silently degrading to local-only state lost on refresh.
+      console.error("[addManualCourse] Supabase write failed:", err?.code, err?.message, err?.details);
       // Fallback: still show in UI even if DB write failed
       setCourses(prev => [...prev, course]);
       setAssignments(prev => [...prev, ...newAssignments]);

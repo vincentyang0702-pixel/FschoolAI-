@@ -439,7 +439,7 @@ export default function Landing({ onEnter }) {
   // Target: July 14, 2026 — official launch date
   const LAUNCH_DATE = new Date("2026-07-14T00:00:00Z");
   function getTimeLeft() {
-    const diff = Math.max(0, LAUNCH_DATE - Date.now());
+    const diff = Math.max(0, LAUNCH_DATE.getTime() - Date.now());
     return {
       days:    Math.floor(diff / 86400000),
       hours:   Math.floor((diff % 86400000) / 3600000),

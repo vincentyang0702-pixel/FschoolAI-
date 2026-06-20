@@ -3,32 +3,37 @@
 // Adding a page: create pages/NewPage.jsx, import it here, add to PAGES.
 // PLACE IN: /src/App.jsx (replaces existing file)
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { NAV, LABEL }       from "./navigation/navConfig";
 import { useSwipe }         from "./navigation/useSwipe";
 import PageDots             from "./components/PageDots";
 import NeuralRing           from "./components/NeuralRing";
-import Landing              from "./pages/Landing";
-import Onboarding           from "./pages/Onboarding";
+import BottomNav            from "./components/BottomNav";
+import Landing              from "./pages/Landing"; // eager — logged-out entry, shown on first paint
 import { useApp }           from "./context/AppContext";
 import { supabase }         from "./api/supabase";
+import { signIn, signUp }   from "./api/auth";
 import { usePageTracking }  from "./hooks/usePageTracking";
 import { awardTokens }      from "./api/tokens";
 import TokenToast           from "./components/TokenToast";
 import NotificationPanel    from "./components/NotificationPanel";
 import { fetchUnreadCount, AppNotification } from "./api/notifications";
 
-import Card        from "./pages/Card";
-import Work        from "./pages/Work";
-import Canvas      from "./pages/Canvas";
-import Assignment  from "./pages/Assignment";
-import Study       from "./pages/Study";
-import Toolkit     from "./pages/Toolkit";
-import Identity    from "./pages/Identity";
-import Leaderboard from "./pages/Leaderboard";
-import Files       from "./pages/Files";
-import StudyRooms  from "./pages/StudyRooms";
+// Pages are code-split: each loads as its own chunk only when first navigated to, so
+// the initial bundle stays small and a page's JS isn't downloaded until it's used.
+// (Only one page is mounted at a time — PAGES[currentPage] — so nothing offscreen renders.)
+const Card        = lazy(() => import("./pages/Card"));
+const Work        = lazy(() => import("./pages/Work"));
+const Canvas      = lazy(() => import("./pages/Canvas"));
+const Assignment  = lazy(() => import("./pages/Assignment"));
+const Study       = lazy(() => import("./pages/Study"));
+const Toolkit     = lazy(() => import("./pages/Toolkit"));
+const Identity    = lazy(() => import("./pages/Identity"));
+const Leaderboard = lazy(() => import("./pages/Leaderboard"));
+const Files       = lazy(() => import("./pages/Files"));
+const StudyRooms  = lazy(() => import("./pages/StudyRooms"));
+const Onboarding  = lazy(() => import("./pages/Onboarding"));
 
 const PAGES = {
   work:        Work,
@@ -76,6 +81,18 @@ const SHELL_STYLES = `
   .app-main {
     padding: 20px 22px 100px;
   }
+  /* Tabs mode on web (≥768px): BottomNav becomes a fixed left sidebar, so push
+     the page content over to make room (232px rail / 64px collapsed — must match
+     RAIL_W in BottomNav.tsx). Only applies in tabs mode (.nav-tabs). */
+  @media (min-width: 768px) {
+    .nav-tabs .app-page-transition {
+      margin-left: 232px;
+      transition: margin-left 0.2s var(--ease-apple);
+    }
+    .nav-tabs.nav-collapsed .app-page-transition {
+      margin-left: 64px;
+    }
+  }
 `;
 
 if (!document.getElementById("app-shell-styles")) {
@@ -85,12 +102,26 @@ if (!document.getElementById("app-shell-styles")) {
   document.head.appendChild(tag);
 }
 
+// Shown briefly while a lazily-loaded page chunk downloads.
+function PageLoader() {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "72px 0" }}>
+      <style>{`@keyframes appSpin{to{transform:rotate(360deg)}}`}</style>
+      <span style={{
+        width: 20, height: 20, borderRadius: "50%", display: "inline-block",
+        border: "2px solid rgba(255,255,255,0.14)", borderTopColor: "rgba(255,255,255,0.55)",
+        animation: "appSpin 0.7s linear infinite",
+      }} />
+    </div>
+  );
+}
+
 export default function App() {
   // ── /card route — standalone page, no auth required ─────────────────────
   if (window.location.pathname === "/card") {
-    return <Card />;
+    return <Suspense fallback={<PageLoader />}><Card /></Suspense>;
   }
-  const { userId, setUserId, refreshUser, userData, saveCanvasCredentials, updateUserField, pendingNav, setPendingNav, tokenSummary } = useApp();
+  const { userId, setUserId, refreshUser, userData, saveCanvasCredentials, updateUserField, pendingNav, setPendingNav, tokenSummary, navMode } = useApp();
 
   const [isLoggedIn, setIsLoggedIn] = useState(
     () => Boolean(localStorage.getItem(LOGGED_IN_KEY))
@@ -100,6 +131,7 @@ export default function App() {
   const [onboardingInitName,  setOnboardingInitName] = useState("");
   const [currentPage,         setCurrentPage]        = useState("work");
   const [visible,             setVisible]            = useState(true);
+  const [navCollapsed,        setNavCollapsed]       = useState(false);
 
   // ── Notification bell state ────────────────────────────────────────────────
   const [unreadCount,   setUnreadCount]   = useState(0);
@@ -186,9 +218,15 @@ export default function App() {
     setResetLoading(true);
     setResetError("");
     try {
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(resetPw));
-      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-      await supabase.from("users").update({ password_hash, email_verify_token: null }).eq("id", resetMode.userId);
+      // Reset via Supabase Auth (GoTrue), not the legacy password_hash. The endpoint
+      // validates the one-time token, sets the GoTrue password (creating + linking the
+      // auth user if this account never migrated), and burns the token server-side.
+      const res = await fetch("/api/auth-migrate?action=reset", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: resetMode.userId, token: resetMode.token, password: resetPw }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to reset password. Try again.");
       setResetDone(true);
       setTimeout(() => { setResetMode(null); setResetDone(false); }, 3000);
       const url = new URL(window.location.href);
@@ -197,7 +235,7 @@ export default function App() {
       url.searchParams.delete("userId");
       window.history.replaceState({}, "", url.toString());
     } catch (err) {
-      setResetError("Failed to reset password. Try again.");
+      setResetError(err?.message || "Failed to reset password. Try again.");
     }
     setResetLoading(false);
   }
@@ -274,72 +312,37 @@ export default function App() {
   const { onTouchStart, onTouchEnd } = useSwipe(swipeNavigate);
 
   // ── Auth ───────────────────────────────────────────────────────────────────
-  const handleEnter = useCallback(async (creds = {}) => {
+  const handleEnter = useCallback(async (creds: {
+    mode?: string; email?: string; password?: string; name?: string;
+  } = {}) => {
+    const email = (creds.email || "").toLowerCase().trim();
+
+    // ── Login — Supabase Auth (lazily migrates legacy SHA-256 accounts) ──────────
     if (creds.mode === "login") {
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
-      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-      const { data: user, error } = await supabase
-        .from("users")
-        .select("id, name, school")
-        .eq("email", creds.email.toLowerCase().trim())
-        .eq("password_hash", password_hash)
-        .maybeSingle();
-      if (error || !user) throw new Error("Incorrect email or password.");
-      localStorage.setItem("fschool_uid", user.id);
+      const profile = await signIn(email, creds.password); // establishes a GoTrue session
+      localStorage.setItem("fschool_uid", profile.id);
       localStorage.setItem(LOGGED_IN_KEY, "1");
-      if (user.name) localStorage.setItem("fschool_name", user.name);
+      if (profile.name) localStorage.setItem("fschool_name", profile.name);
       window.location.reload();
       return;
     }
 
-    // ── Signup ────────────────────────────────────────────────────────────────
+    // ── Signup — creates the GoTrue user + a fresh profile, then signs in ─────────
+    // (The server mints a brand-new profile id, so signing up on a device already
+    // logged into another account can't clobber it — the old "merge" bug.)
     localStorage.setItem("fschool_name", creds.name);
+    const profile = await signUp({ name: creds.name, email, password: creds.password });
+    localStorage.setItem("fschool_uid", profile.id);
 
-    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
-    const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
+    // Verification email — non-blocking, won't fail signup if email fails.
+    fetch("/api/email?action=send", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ userId: profile.id, email, name: creds.name }),
+    }).catch(() => {});
 
-    const email = creds.email.toLowerCase().trim();
-
-    // Check for existing account — prevents duplicate signups
-    const { data: existing } = await supabase
-      .from("users")
-      .select("id")
-      .eq("email", email)
-      .maybeSingle();
-
-    if (existing) {
-      // Throw here — propagates up to Landing.jsx to show the error to the user
-      throw new Error("An account with this email already exists. Please sign in instead.");
-    }
-
-    // CRITICAL: every signup gets a brand-new id. Never reuse the device's
-    // existing fschool_uid — otherwise signing up on a device that is already
-    // logged into another account overwrites that account (the "merge" bug).
-    const newId = crypto.randomUUID();
-    localStorage.setItem("fschool_uid", newId);
-
-    try {
-      // insert, not upsert — a fresh signup is always a new row. If the id
-      // somehow collided it should throw loudly, never silently clobber a row.
-      const { error: insertErr } = await supabase
-        .from("users")
-        .insert({ id: newId, name: creds.name, email, password_hash });
-      if (insertErr) throw insertErr;
-
-      // Send verification email — non-blocking, won't fail signup if email fails
-      fetch("/api/email?action=send", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId: newId, email, name: creds.name }),
-      }).catch(() => {});
-    } catch (err) {
-      console.warn("Supabase signup failed:", err.message);
-    }
-
-    // Point app state at the new account AFTER the row exists, so onboarding
-    // and page-tracking write to the correct user.
-    setUserId(newId);
-
+    // Point app state at the new account so onboarding + page-tracking write to it.
+    setUserId(profile.id);
     setOnboardingEmail(creds.email);
     setOnboardingInitName(creds.name);
     setShowOnboarding(true);
@@ -351,7 +354,10 @@ export default function App() {
   }) => {
     if (preferredName) localStorage.setItem("fschool_name", preferredName);
     try {
-      const patch = { id: userId };
+      const patch: {
+        id: string; name?: string; school?: string;
+        school_city?: string; school_country?: string; school_continent?: string;
+      } = { id: userId };
       if (preferredName)   patch.name            = preferredName;
       if (schoolName)      patch.school          = schoolName;
       if (schoolCity)      patch.school_city     = schoolCity;
@@ -512,11 +518,13 @@ export default function App() {
   // ── Render ─────────────────────────────────────────────────────────────────
   if (showOnboarding) {
     return (
-      <Onboarding
-        email={onboardingEmail}
-        preferredName={onboardingInitName}
-        onComplete={handleOnboardingComplete}
-      />
+      <Suspense fallback={<PageLoader />}>
+        <Onboarding
+          email={onboardingEmail}
+          preferredName={onboardingInitName}
+          onComplete={handleOnboardingComplete}
+        />
+      </Suspense>
     );
   }
 
@@ -571,9 +579,9 @@ export default function App() {
 
   return (
     <div
-      className="app-shell"
-      onTouchStart={onTouchStart}
-      onTouchEnd={onTouchEnd}
+      className={`app-shell${navMode === "tabs" ? " nav-tabs" : ""}${navCollapsed ? " nav-collapsed" : ""}`}
+      onTouchStart={navMode === "tabs" ? undefined : onTouchStart}
+      onTouchEnd={navMode === "tabs" ? undefined : onTouchEnd}
     >
       {overlays}
       <TokenToast />
@@ -692,15 +700,25 @@ export default function App() {
               )}
             </AnimatePresence>
           </div>
-          <PageDots currentPage={currentPage} />
+          {navMode !== "tabs" && <PageDots currentPage={currentPage} />}
         </header>
 
         <main className="app-main">
-          {PageComponent && <PageComponent />}
+          <Suspense fallback={<PageLoader />}>
+            {PageComponent && <PageComponent />}
+          </Suspense>
         </main>
       </div>
 
       <NeuralRing />
+      {navMode === "tabs" && (
+        <BottomNav
+          currentPage={currentPage}
+          onNavigate={navigate}
+          collapsed={navCollapsed}
+          onToggleCollapse={() => setNavCollapsed(v => !v)}
+        />
+      )}
     </div>
   );
 }
