@@ -21,6 +21,7 @@ import { SupabaseBroadcastProvider } from "../lib/yjsSupabaseProvider";
 import Whiteboard, { PEN_COLORS, PEN_WIDTHS, ERASER_SIZES, DEFAULT_BG } from "../components/Whiteboard";
 import type { Tool } from "../components/Whiteboard";
 import StudyOrb from "../components/StudyOrb";
+import VoiceRoom from "../components/VoiceRoom";
 
 // ── Access filters ────────────────────────────────────────────────────────────
 // Which eligibility rules an owner can put on a room. Server enforces these via
@@ -942,6 +943,8 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [buddyQAs,           setBuddyQAs]           = useState([]);
   const [buddyStreaming,     setBuddyStreaming]     = useState(false);
   const [courseName,         setCourseName]         = useState("");
+  // Voice chat (Daily.co placeholder)
+  const [showVoice,          setShowVoice]          = useState(false);
   // Phase 2 — Chat
   const [showChat,           setShowChat]           = useState(false);
   const [chatMessages,       setChatMessages]       = useState<ChatMessage[]>([]);
@@ -1616,6 +1619,17 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
             🖊 Board
           </button>
           <button
+            onClick={() => setShowVoice(v => !v)}
+            style={{
+              ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px",
+              background: showVoice ? "rgba(96,165,250,0.1)" : "none",
+              borderColor: showVoice ? "rgba(96,165,250,0.3)" : "rgba(255,255,255,0.09)",
+              color: showVoice ? "#60a5fa" : "var(--text-dim)",
+            }}
+          >
+            🎙 Voice
+          </button>
+          <button
             onClick={() => setShowInvite(true)}
             style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px" }}
           >
@@ -1760,6 +1774,11 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           onAsk={handleBuddyAsk}
           onClose={() => setShowBuddy(false)}
         />
+      )}
+
+      {/* Voice chat panel — Daily.co placeholder, audio-first */}
+      {showVoice && (
+        <VoiceRoom roomId={room.id} userName={userData?.name ?? ""} onClose={() => setShowVoice(false)} />
       )}
 
       {/* Chat panel — persisted, WhatsApp-style */}
@@ -1939,7 +1958,9 @@ function PomodoroPanel({ pomo, remaining, isHost, onStart, onPause, onResume, on
 function GoalPromptModal({ onSet, onSkip }) {
   const [goal, setGoal] = useState("");
   const S = styles;
-  return (
+  // Render into document.body so position:fixed centers against the true
+  // viewport — not the transformed app-page-transition ancestor.
+  return createPortal(
     <div style={S.modalOverlay}>
       <div style={{ ...S.modalCard, maxWidth:"360px" }}>
         <div style={{ textAlign:"center", marginBottom:"20px" }}>
@@ -1973,7 +1994,8 @@ function GoalPromptModal({ onSet, onSkip }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

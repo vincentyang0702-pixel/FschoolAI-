@@ -508,6 +508,36 @@ const flashcardsProxyPlugin = {
   },
 };
 
+// Daily-room proxy — runs the real api/daily-room.ts handler under the dev server
+// so the Voice button works with `npm run dev`. Injects DAILY_API_KEY from
+// .env.local; returns 503 if missing (matches prod behaviour).
+const dailyRoomProxyPlugin = {
+  name: "daily-room-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/daily-room", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+      if (req.method === "OPTIONS") { res.statusCode = 204; res.end(); return; }
+      process.env.DAILY_API_KEY = loadEnvKey("DAILY_API_KEY");
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try {
+          const { default: handler } = await import("./api/daily-room.js");
+          await handler(req, res);
+        } catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
 // Nudge proxy — runs the real api/nudge.ts handler under the dev server so the
 // rate-limited "come study" friend nudge (nudge-row insert + Resend email
 // fallback) works with `npm run dev`. Same module-load env caveat as above →
@@ -542,6 +572,6 @@ const nudgeProxyPlugin = {
 };
 
 export default defineConfig({
-  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin, ragProxyPlugin, tokenEngineProxyPlugin, nudgeProxyPlugin, flashcardsProxyPlugin, transcribeProxyPlugin],
+  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin, ragProxyPlugin, tokenEngineProxyPlugin, nudgeProxyPlugin, flashcardsProxyPlugin, transcribeProxyPlugin, dailyRoomProxyPlugin],
   server:  { port: 5173, host: "0.0.0.0", allowedHosts: true },
 });
