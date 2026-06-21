@@ -132,12 +132,13 @@ interface DocFile {
 interface Props {
   file: DocFile;
   onBack: () => void;
+  onNavigate?: (page: string) => void;
 }
 
 // ── Context window for chat (first 6 000 chars — enough without full chunking) ─
 const DOC_CTX_CHARS = 6000;
 
-export default function DocReader({ file, onBack }: Props) {
+export default function DocReader({ file, onBack, onNavigate }: Props) {
   const [contentText, setContentText] = useState<string | null>(null);
   const [loading,     setLoading]     = useState(true);
   const [error,       setError]       = useState<string | null>(null);
@@ -155,17 +156,14 @@ export default function DocReader({ file, onBack }: Props) {
 
   // ── Document-level mouseup/touchend — catches drags that end outside container
   useEffect(() => {
-    function pickRect(range: Range): DOMRect | null {
-      // getClientRects() is the reliable path for pre-wrap + inline mark selections.
-      // getBoundingClientRect() often returns zeros for these in Chromium.
-      // Take the LAST per-line rect — that's where the user's cursor ended up,
-      // which is the most natural anchor for the toolbar.
-      const rects = Array.from(range.getClientRects());
+    // Cast to `any` to avoid Framer Motion's `Range` type shadowing the DOM `Range` type.
+    // The DOM Range has getClientRects/getBoundingClientRect; FM's Range has start/end.
+    function pickRect(range: any): DOMRect | null {
+      const rects: DOMRect[] = Array.from(range.getClientRects() as DOMRectList);
       for (let i = rects.length - 1; i >= 0; i--) {
         if (rects[i].height > 0) return rects[i];
       }
-      // Last resort fallback
-      const r = range.getBoundingClientRect();
+      const r: DOMRect = range.getBoundingClientRect();
       return r.height > 0 ? r : null;
     }
 
@@ -177,9 +175,9 @@ export default function DocReader({ file, onBack }: Props) {
         const sel = window.getSelection();
         if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
         if (!sel.rangeCount) return;
-        const range = sel.getRangeAt(0);
+        const range = sel.getRangeAt(0) as any;
         // Only show toolbar when the selection is inside our doc text container
-        if (!containerRef.current.contains(range.commonAncestorContainer)) return;
+        if (!containerRef.current.contains(range.commonAncestorContainer as Node)) return;
 
         const rect = pickRect(range);
         if (!rect) return;
@@ -444,6 +442,7 @@ export default function DocReader({ file, onBack }: Props) {
             initialSelection={chatSelection}
             initialAction={chatAction}
             onClose={() => setChatOpen(false)}
+            onNavigate={onNavigate ?? (() => {})}
           />
         )}
       </AnimatePresence>
