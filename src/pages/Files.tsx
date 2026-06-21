@@ -290,7 +290,7 @@ function mapFileRow(f: any) {
 
 // ── Files page ────────────────────────────────────────────────────────────────
 export default function Files() {
-  const { files, courses, userId } = useApp();
+  const { files, courses, userId, setPendingNav } = useApp();
 
   // Reader view state — null = file list, object = reading a doc
   const [viewingFile, setViewingFile] = useState<any>(null);
@@ -382,6 +382,7 @@ export default function Files() {
       <DocReader
         file={viewingFile}
         onBack={() => setViewingFile(null)}
+        onNavigate={(page) => { setViewingFile(null); setPendingNav(page); }}
       />
     );
   }
