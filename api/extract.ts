@@ -375,7 +375,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { base64, storagePath, bucket = "media-uploads", keepFile = false, file_type, name, youtubeUrl } = req.body ?? {};
+  const { base64, storagePath, bucket = "media-uploads", keepFile = false, file_type, name, youtubeUrl, userId, courseId } = req.body ?? {};
 
   // YouTube — URL-based, no file bytes.
   if (youtubeUrl) {
@@ -443,6 +443,25 @@ export default async function handler(req, res) {
     }
 
     const combined = pages.map(p => p.text).join("\n\n");
+
+    // Auto-ingest into RAG tables if userId provided — enables hybrid search for flashcards.
+    // Fire-and-forget: never blocks the response or fails the extraction.
+    if (userId && combined.trim()) {
+      (async () => {
+        try {
+          const { ingest, embedBatch } = await import("./rag");
+          const result = await ingest({ userId, courseId: courseId ?? null, title: name ?? "Document", kind: "document", pages });
+          if (result.status === 200 && result.json?.documentId) {
+            // Embed up to 3 batches inline (covers most PDFs); larger docs embed lazily on next query
+            for (let i = 0; i < 3; i++) {
+              const eb = await embedBatch({ userId, documentId: result.json.documentId });
+              if (eb.json?.done) break;
+            }
+          }
+        } catch { /* never break extraction */ }
+      })();
+    }
+
     return res.status(200).json({ text: combined, pages, chars: combined.length, pageCount: pages.length, truncated });
   } catch (err) {
     console.error("[extract] failed:", err.message);

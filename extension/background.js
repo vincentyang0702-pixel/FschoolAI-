@@ -424,11 +424,11 @@ async function extractFileContents(userId, files) {
         if (up.ok) storagePath = path;
       } catch { /* storage upload failed — keep going, still extract text */ }
 
-      // 2. Extract readable text for the tutor.
+      // 2. Extract readable text for the tutor + ingest into RAG.
       const ex = await fetch(EXTRACT_URL, {
         method:  "POST",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ base64: abToBase64(buf), file_type: f.file_type, name: f.name }),
+        body:    JSON.stringify({ base64: abToBase64(buf), file_type: f.file_type, name: f.name, userId }),
       }).then(r => (r.ok ? r.json() : null)).catch(() => null);
 
       const patch = {};

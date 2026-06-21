@@ -831,10 +831,34 @@ export default function Study() {
         }
       }
 
-      const courseContext = await buildCourseContext(dbId);
-      const contextBlock = courseContext
-        ? `\n\nHere is real content from the student's course:\n${courseContext}`
-        : "";
+      // Try RAG query first — returns best-matched full sections from ingested PDFs/slides.
+      // Falls back to direct DB queries if RAG has no content yet for this course.
+      let contextBlock = "";
+      try {
+        const ragRes = await fetch("/api/rag?action=query", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            userId,
+            courseId: dbId,
+            query: `key concepts, definitions, and important topics for ${course}`,
+            maxSections: 5,
+          }),
+        }).then(r => r.json()).catch(() => ({ passages: [] }));
+
+        if (ragRes.passages?.length > 0) {
+          const ragContext = ragRes.passages.map((p: { title: string; heading?: string; text: string }) => {
+            const label = p.heading ? `[${p.title} — ${p.heading}]` : `[${p.title}]`;
+            return `${label}:\n${p.text}`;
+          }).join("\n\n");
+          contextBlock = `\n\nHere is relevant content retrieved from the student's course materials:\n${ragContext}`;
+        }
+      } catch { /* RAG query failed — fall through to buildCourseContext */ }
+
+      if (!contextBlock) {
+        const courseContext = await buildCourseContext(dbId);
+        if (courseContext) contextBlock = `\n\nHere is real content from the student's course:\n${courseContext}`;
+      }
 
       const cardCount = 8;
 
