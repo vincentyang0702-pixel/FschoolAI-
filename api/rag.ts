@@ -248,9 +248,50 @@ export async function embedBatch(body) {
   return { status: 200, json: { embedded: pending.length, done: pending.length < limit } };
 }
 
+// ── Reranking ─────────────────────────────────────────────────────────────────
+// Hybrid search (RRF) is recall-oriented; a cross-encoder-style rerank by actual
+// query↔passage relevance lifts precision so the tutor grounds on the BEST chunks. We use
+// a fast LLM (gpt-4o-mini, listwise) and fall back to the RRF order on any failure, so
+// reranking can never break retrieval.
+
+/** Reorder `hits` by the reranker's index order: dedups, drops invalid, appends any omitted. Pure. */
+export function applyRerankOrder(hits, order) {
+  const seen = new Set();
+  const out = [];
+  for (const i of Array.isArray(order) ? order : []) {
+    if (Number.isInteger(i) && i >= 0 && i < hits.length && !seen.has(i)) { seen.add(i); out.push(hits[i]); }
+  }
+  hits.forEach((h, i) => { if (!seen.has(i)) out.push(h); }); // keep anything the reranker omitted
+  return out;
+}
+
+async function rerankHits(q, hits) {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key || hits.length <= 1) return hits;
+  try {
+    const list = hits.map((h, i) => `[${i}] ${String(h.content || "").replace(/\s+/g, " ").slice(0, 600)}`).join("\n\n");
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "gpt-4o-mini", temperature: 0, max_tokens: 200,
+        response_format: { type: "json_object" },
+        messages: [{ role: "user", content:
+          `Rank these passages by how well each helps answer the question.\n` +
+          `Question: "${String(q)}"\n\nPassages:\n${list}\n\n` +
+          `Respond ONLY as JSON: {"order": [passage indices, most relevant first; omit clearly irrelevant ones]}.` }],
+      }),
+    });
+    if (!res.ok) return hits;
+    const json = await res.json();
+    const order = JSON.parse(json.choices?.[0]?.message?.content || "{}").order;
+    return applyRerankOrder(hits, order);
+  } catch { return hits; } // never break retrieval
+}
+
 // ── Query ───────────────────────────────────────────────────────────────────
 async function query(body) {
-  const { userId, courseId = null, query: q, maxSections = 4 } = body ?? {};
+  const { userId, courseId = null, query: q, maxSections = 4, rerank = true } = body ?? {};
   if (!userId) return { status: 400, json: { error: "userId required" } };
   if (!q || !String(q).trim()) return { status: 400, json: { error: "query required" } };
 
@@ -266,10 +307,14 @@ async function query(body) {
   if (error) return { status: 500, json: { error: `search: ${error.message}` } };
   if (!hits?.length) return { status: 200, json: { passages: [], used: 0 } };
 
+  // Rerank candidate chunks by query relevance (precision boost over RRF) before choosing
+  // which parent sections to inject. Falls back to the RRF order on any failure.
+  const ranked = rerank ? await rerankHits(q, hits) : hits;
+
   // Map winning chunks to their parent sections, best section first, deduped.
   const sectionOrder = [];
   const seen = new Set();
-  for (const h of hits) {
+  for (const h of ranked) {
     if (h.section_id && !seen.has(h.section_id)) { seen.add(h.section_id); sectionOrder.push(h.section_id); }
     if (sectionOrder.length >= maxSections) break;
   }
