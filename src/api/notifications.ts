@@ -61,6 +61,21 @@ export async function markAllNotificationsRead(userId: string): Promise<void> {
     .eq("read", false);
 }
 
+/** Record the outcome of an actionable notification (accept/decline friend request, etc.)
+ *  Merges actioned into the existing data JSONB and marks the row read.
+ *  The actioned field prevents the action buttons from re-appearing on reopen. */
+export async function updateNotificationAction(
+  id: string,
+  currentData: Record<string, unknown> | null,
+  actioned: "accepted" | "declined"
+): Promise<void> {
+  const { error } = await supabase
+    .from("notifications")
+    .update({ read: true, data: { ...(currentData ?? {}), actioned } })
+    .eq("id", id);
+  if (error) console.error("[notifications] updateNotificationAction:", error.message);
+}
+
 /** Client-side insert — works because notifications table has RLS disabled.
  *  Use for events that originate in the browser (friend requests, accepts).
  *  Events that originate server-side use api/_notify.ts instead. */

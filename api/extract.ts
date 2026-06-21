@@ -96,7 +96,30 @@ function finishLine(group: { y: number; size: number; items: any[] }, medianH: n
 }
 
 async function pdfToPages(bytes: Uint8Array): Promise<{ pages: { page: number; text: string }[]; pageCount: number; truncated: boolean }> {
+  // pdfjs-dist uses DOMMatrix for transform operations. It's a browser-only API;
+  // Vercel's Node.js runtime doesn't have it. Polyfill the minimum pdfjs needs
+  // for text extraction (identity matrix + 6-element array constructor).
+  if (typeof (globalThis as any).DOMMatrix === "undefined") {
+    (globalThis as any).DOMMatrix = class DOMMatrix {
+      a = 1; b = 0; c = 0; d = 1; e = 0; f = 0;
+      constructor(init?: number[] | string) {
+        if (Array.isArray(init) && init.length >= 6) {
+          [this.a, this.b, this.c, this.d, this.e, this.f] = init as number[];
+        }
+      }
+      multiply(_m: any) { return new (globalThis as any).DOMMatrix(); }
+      inverse()         { return new (globalThis as any).DOMMatrix(); }
+      transformPoint(p: any) { return { x: p?.x ?? 0, y: p?.y ?? 0 }; }
+    };
+  }
   const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  // Point pdfjs to the worker file explicitly. Without this, pdfjs v5 tries to
+  // resolve it relative to the module and fails in Vercel's bundled environment.
+  // includeFiles in vercel.json ensures the file is present in the deployment.
+  if (!pdfjs.GlobalWorkerOptions.workerSrc) {
+    pdfjs.GlobalWorkerOptions.workerSrc =
+      new URL("pdfjs-dist/legacy/build/pdf.worker.mjs", import.meta.url).href;
+  }
   const doc = await pdfjs.getDocument({ data: bytes, isEvalSupported: false, useSystemFonts: true } as any).promise;
   const pageCount = doc.numPages;
   const limit = Math.min(pageCount, MAX_PAGES);
@@ -352,7 +375,7 @@ export default async function handler(req, res) {
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { base64, storagePath, bucket = "media-uploads", file_type, name, youtubeUrl } = req.body ?? {};
+  const { base64, storagePath, bucket = "media-uploads", keepFile = false, file_type, name, youtubeUrl } = req.body ?? {};
 
   // YouTube — URL-based, no file bytes.
   if (youtubeUrl) {
@@ -380,7 +403,7 @@ export default async function handler(req, res) {
     } catch (e: any) {
       return res.status(400).json({ error: `storage download: ${e.message}` });
     }
-    supabase.storage.from(bucket).remove([storagePath]).catch(() => {}); // best-effort temp cleanup
+    if (!keepFile) supabase.storage.from(bucket).remove([storagePath]).catch(() => {}); // best-effort temp cleanup for media-uploads
   } else {
     if (!base64) return res.status(400).json({ error: "base64, storagePath, or youtubeUrl required" });
     try { bytes = new Uint8Array(Buffer.from(base64, "base64")); }

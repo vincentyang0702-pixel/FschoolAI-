@@ -194,7 +194,7 @@ export function AppProvider({ children }) {
       try {
         const { data: filesData } = await supabase
           .from("files")
-          .select("id, course_id, lms_file_id, name, file_type, size_bytes, source_url, folder, status, storage_path")
+          .select("id, course_id, lms_file_id, name, file_type, size_bytes, source_url, folder, status, storage_path, summary, highlights, processed_at")
           .eq("user_id", userId)
           .order("updated_at", { ascending: false })
           .limit(500);
@@ -206,6 +206,10 @@ export function AppProvider({ children }) {
             fileType:    f.file_type,
             sourceUrl:   f.source_url,
             storagePath: f.storage_path,
+            // YouLearn fields (null until a file is processed)
+            summary:     f.summary     ?? null,
+            highlights:  f.highlights  ?? null,
+            processedAt: f.processed_at ?? null,
           })));
         }
       } catch { /* files table may not exist yet — page shows empty state */ }

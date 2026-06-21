@@ -1,13 +1,14 @@
 // NotificationPanel.tsx — iOS-quality notification dropdown.
 // Framer Motion spring enter/exit, staggered items, solid ink surface.
-// Logic (fetch, mark-read, live delivery, actions) preserved exactly.
+// BUG FIX: accept/decline persists via data.actioned field in DB (survives reopen).
 import { useState, useEffect, useRef } from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
 import {
   AppNotification,
   fetchNotifications,
   markNotificationsRead,
   markAllNotificationsRead,
+  updateNotificationAction,
 } from "../api/notifications";
 
 // ── Relative time (concise, iOS-style) ───────────────────────────────────────
@@ -19,7 +20,7 @@ function relativeTime(iso: string): string {
   return `${Math.floor(sec / 86400)}d`;
 }
 
-// ── Avatar color palette (hash by name/id for consistent assignment) ──────────
+// ── Avatar color palette ──────────────────────────────────────────────────────
 const AVATAR_PALETTE = [
   { bg: "rgba(196,154,60,0.18)",  fg: "#C49A3C" },
   { bg: "rgba(111,179,196,0.18)", fg: "#6fb3c4" },
@@ -41,6 +42,7 @@ const TYPE_CFG: Record<string, { icon: string; defaultTitle: string; useAvatar: 
   room_invite:      { icon: "🚪", defaultTitle: "Room invite",         useAvatar: false },
   assignment_due:   { icon: "📋", defaultTitle: "Assignment due soon", useAvatar: false },
   milestone:        { icon: "🏆", defaultTitle: "Milestone reached",   useAvatar: false },
+  ranking:          { icon: "📈", defaultTitle: "Leaderboard update",  useAvatar: false },
 };
 
 // ── Friends API adapter ───────────────────────────────────────────────────────
@@ -53,14 +55,33 @@ async function respondFriendRequest(userId: string, fromUserId: string, accept: 
   }
 }
 
+// ── Section header ────────────────────────────────────────────────────────────
+function SectionLabel({ label }: { label: string }) {
+  return (
+    <div style={{
+      padding: "10px 16px 5px",
+      fontSize: "10px",
+      fontWeight: "700",
+      letterSpacing: "0.7px",
+      textTransform: "uppercase",
+      color: "rgba(255,255,255,0.22)",
+      userSelect: "none",
+    }}>
+      {label}
+    </div>
+  );
+}
+
 // ── NotificationItem ──────────────────────────────────────────────────────────
 function NotificationItem({
   n,
   index,
+  isLast,
   onAction,
 }: {
   n: AppNotification;
   index: number;
+  isLast: boolean;
   onAction: (action: string, n: AppNotification) => void;
 }) {
   const reduced = useReducedMotion();
@@ -68,32 +89,40 @@ function NotificationItem({
   const title = n.title ?? cfg.defaultTitle;
   const isUnread = !n.read;
   const fromName = n.data?.from_name as string | undefined;
+  const actioned = n.data?.actioned as string | undefined;
   const col = avatarColor(fromName ?? n.data?.from_user_id as string ?? n.id);
   const initial = (fromName?.[0] ?? "?").toUpperCase();
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: reduced ? 0 : 5 }}
+      initial={{ opacity: 0, y: reduced ? 0 : 4 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={reduced ? { duration: 0.01 } : { delay: index * 0.028, duration: 0.2, ease: [0, 0, 0.2, 1] }}
+      transition={reduced ? { duration: 0.01 } : { delay: index * 0.025, duration: 0.18, ease: [0, 0, 0.2, 1] }}
       style={{
         display: "flex",
-        gap: "12px",
-        padding: "12px 16px",
-        background: isUnread ? "rgba(196,154,60,0.05)" : "transparent",
-        borderBottom: "1px solid rgba(255,255,255,0.04)",
         alignItems: "flex-start",
+        gap: "10px",
+        padding: "11px 16px 11px 14px",
+        borderBottom: isLast ? "none" : "1px solid rgba(255,255,255,0.04)",
       }}
     >
-      {/* Avatar — gold ring when unread */}
+      {/* Leading unread dot — 6px, gold when unread, invisible when read */}
+      <div style={{
+        width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
+        marginTop: 15,            // visually centers with 36px avatar
+        background: isUnread ? "#C49A3C" : "transparent",
+        transition: "background 0.2s",
+      }} />
+
+      {/* Avatar — ring reinforces unread status */}
       <div style={{
         width: 36, height: 36, borderRadius: "50%", flexShrink: 0,
         background: cfg.useAvatar ? col.bg : "rgba(255,255,255,0.07)",
         display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: cfg.useAvatar ? "13px" : "16px",
+        fontSize: cfg.useAvatar ? "14px" : "16px",
         fontWeight: cfg.useAvatar ? "700" : "normal",
-        color: cfg.useAvatar ? col.fg : "inherit",
-        boxShadow: isUnread ? "0 0 0 1.5px rgba(196,154,60,0.5)" : "none",
+        color: cfg.useAvatar ? col.fg : "rgba(255,255,255,0.55)",
+        boxShadow: isUnread ? `0 0 0 1.5px rgba(196,154,60,0.45)` : "none",
         transition: "box-shadow 0.2s",
       }}>
         {cfg.useAvatar && fromName ? initial : cfg.icon}
@@ -101,21 +130,27 @@ function NotificationItem({
 
       {/* Content */}
       <div style={{ flex: 1, minWidth: 0 }}>
-        {/* Title + time */}
-        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "8px", marginBottom: "2px" }}>
+        {/* Title + time row */}
+        <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: "8px" }}>
           <p style={{
             fontSize: "13px",
             fontWeight: isUnread ? "600" : "500",
-            color: "var(--text-primary)",
+            color: isUnread ? "#F5F5F5" : "rgba(255,255,255,0.65)",
             lineHeight: "1.35",
             flex: 1,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
+            margin: 0,
           }}>
             {title}
           </p>
-          <span style={{ fontSize: "11px", color: "var(--text-dim)", flexShrink: 0 }}>
+          <span style={{
+            fontSize: "11px",
+            color: "rgba(255,255,255,0.25)",
+            flexShrink: 0,
+            letterSpacing: "0.1px",
+          }}>
             {relativeTime(n.created_at)}
           </span>
         </div>
@@ -124,25 +159,29 @@ function NotificationItem({
         {n.body && (
           <p style={{
             fontSize: "12px",
-            color: "var(--text-secondary)",
+            color: "rgba(255,255,255,0.38)",
             lineHeight: "1.5",
-            marginBottom: "8px",
+            marginTop: "2px",
+            marginBottom: 0,
           }}>
             {n.body}
           </p>
         )}
 
-        {/* Inline actions */}
-        {n.type === "friend_request" && n.data?.from_user_id && (
-          <div style={{ display: "flex", gap: "6px", marginTop: n.body ? 0 : "8px" }}>
+        {/* Action buttons — only when friend_request and not yet actioned */}
+        {n.type === "friend_request" && n.data?.from_user_id && !actioned && (
+          <div style={{ display: "flex", gap: "6px", marginTop: "8px" }}>
             <button
               onClick={() => onAction("accept_friend", n)}
               style={{
                 fontSize: "11px", padding: "4px 12px", borderRadius: "6px",
                 cursor: "pointer", fontFamily: "inherit", fontWeight: "600",
-                background: "rgba(196,154,60,0.12)", color: "#C49A3C",
-                border: "1px solid rgba(196,154,60,0.25)",
+                background: "rgba(196,154,60,0.14)", color: "#C49A3C",
+                border: "1px solid rgba(196,154,60,0.28)",
+                transition: "background 0.12s",
               }}
+              onMouseEnter={e => (e.currentTarget.style.background = "rgba(196,154,60,0.22)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "rgba(196,154,60,0.14)")}
             >
               Accept
             </button>
@@ -151,38 +190,63 @@ function NotificationItem({
               style={{
                 fontSize: "11px", padding: "4px 10px", borderRadius: "6px",
                 cursor: "pointer", fontFamily: "inherit",
-                background: "none", color: "var(--text-dim)",
-                border: "1px solid rgba(255,255,255,0.08)",
+                background: "none", color: "rgba(255,255,255,0.35)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                transition: "background 0.12s",
               }}
+              onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.06)")}
+              onMouseLeave={e => (e.currentTarget.style.background = "none")}
             >
               Decline
             </button>
           </div>
         )}
+
+        {/* Resolved states — shown after accept/decline, survive reopen via DB */}
+        {n.type === "friend_request" && actioned === "accepted" && (
+          <p style={{ marginTop: "6px", fontSize: "11px", color: "rgba(127,174,110,0.75)", fontWeight: "500", letterSpacing: "0.1px" }}>
+            ✓ Accepted
+          </p>
+        )}
+        {n.type === "friend_request" && actioned === "declined" && (
+          <p style={{ marginTop: "6px", fontSize: "11px", color: "rgba(255,255,255,0.22)" }}>
+            Declined
+          </p>
+        )}
+
+        {/* Join room — nudge / room invite */}
         {(n.type === "nudge" || n.type === "room_invite") && n.data?.room_id && (
           <button
             onClick={() => onAction("open_room", n)}
             style={{
-              marginTop: n.body ? 0 : "8px",
+              marginTop: "8px",
               fontSize: "11px", padding: "4px 10px", borderRadius: "6px",
               cursor: "pointer", fontFamily: "inherit",
               background: "rgba(196,154,60,0.08)", color: "#C49A3C",
               border: "1px solid rgba(196,154,60,0.18)",
+              transition: "background 0.12s",
             }}
+            onMouseEnter={e => (e.currentTarget.style.background = "rgba(196,154,60,0.15)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "rgba(196,154,60,0.08)")}
           >
             Join room →
           </button>
         )}
+
+        {/* View assignment */}
         {n.type === "assignment_due" && (
           <button
             onClick={() => onAction("open_assignment", n)}
             style={{
-              marginTop: n.body ? 0 : "8px",
+              marginTop: "8px",
               fontSize: "11px", padding: "4px 10px", borderRadius: "6px",
               cursor: "pointer", fontFamily: "inherit",
-              background: "none", color: "var(--text-dim)",
-              border: "1px solid rgba(255,255,255,0.08)",
+              background: "none", color: "rgba(255,255,255,0.35)",
+              border: "1px solid rgba(255,255,255,0.1)",
+              transition: "background 0.12s",
             }}
+            onMouseEnter={e => (e.currentTarget.style.background = "rgba(255,255,255,0.06)")}
+            onMouseLeave={e => (e.currentTarget.style.background = "none")}
           >
             View →
           </button>
@@ -259,13 +323,29 @@ export default function NotificationPanel({
 
   async function handleAction(action: string, n: AppNotification) {
     if (action === "accept_friend" && n.data?.from_user_id) {
-      await respondFriendRequest(userId, n.data.from_user_id as string, true);
+      // 1. Optimistic update — hides buttons immediately, prevents double-tap
       setItems(prev => prev.map(item =>
-        item.id === n.id ? { ...item, title: "Now friends ✓" } : item
+        item.id === n.id
+          ? { ...item, read: true, data: { ...(item.data ?? {}), actioned: "accepted" } }
+          : item
       ));
+      // 2. Persist actioned state to DB (survives close+reopen)
+      await updateNotificationAction(n.id, n.data, "accepted");
+      // 3. Accept via friends API
+      await respondFriendRequest(userId, n.data.from_user_id as string, true);
+
     } else if (action === "decline_friend" && n.data?.from_user_id) {
+      // 1. Optimistic update
+      setItems(prev => prev.map(item =>
+        item.id === n.id
+          ? { ...item, read: true, data: { ...(item.data ?? {}), actioned: "declined" } }
+          : item
+      ));
+      // 2. Persist
+      await updateNotificationAction(n.id, n.data, "declined");
+      // 3. Decline via friends API
       await respondFriendRequest(userId, n.data.from_user_id as string, false);
-      setItems(prev => prev.filter(item => item.id !== n.id));
+
     } else if (action === "open_room") {
       onNavigate("rooms");
       onClose();
@@ -277,32 +357,32 @@ export default function NotificationPanel({
 
   const hasUnread = items.some(n => !n.read);
 
+  // Grouping: separate unread ("New") from read ("Earlier")
+  const unread = items.filter(n => !n.read);
+  const read   = items.filter(n => n.read);
+  const showSections = unread.length > 0 && read.length > 0;
+
   return (
     <motion.div
       ref={panelRef as React.Ref<HTMLDivElement>}
       initial={{ opacity: 0, scale: reduced ? 1 : 0.96, y: reduced ? 0 : -8 }}
       animate={{ opacity: 1, scale: 1, y: 0 }}
       exit={{ opacity: 0, scale: reduced ? 1 : 0.97, y: reduced ? 0 : -5 }}
-      transition={
-        reduced
-          ? { duration: 0.01 }
-          : { type: "spring", stiffness: 420, damping: 30, mass: 0.8 }
-      }
+      transition={reduced ? { duration: 0.01 } : { type: "spring", stiffness: 420, damping: 30, mass: 0.8 }}
       style={{
-        transformOrigin: "top right",  // grows from the bell corner
+        transformOrigin: "top right",
         position: "fixed",
-        top: "82px",          // header padding-top(52) + content(~22) + gap(8)
+        top: "82px",
         right: "16px",
         width: "min(calc(100vw - 32px), 380px)",
         maxHeight: "min(520px, calc(100dvh - 100px))",
-        // Solid ink-charcoal surface (#1a1a1d ≈ iOS dark secondary background)
         background: "#1a1a1d",
         border: "1px solid rgba(255,255,255,0.09)",
         borderRadius: "18px",
         boxShadow: [
-          "inset 0 1px 0 rgba(255,255,255,0.06)",  // top-edge highlight for elevation
-          "0 4px 24px rgba(0,0,0,0.45)",            // ambient
-          "0 20px 60px rgba(0,0,0,0.38)",           // depth
+          "inset 0 1px 0 rgba(255,255,255,0.06)",
+          "0 4px 24px rgba(0,0,0,0.45)",
+          "0 20px 60px rgba(0,0,0,0.38)",
         ].join(", "),
         zIndex: 9999,
         display: "flex",
@@ -319,7 +399,7 @@ export default function NotificationPanel({
       }}>
         <span style={{
           fontSize: "16px", fontWeight: "600",
-          color: "var(--text-primary)",
+          color: "#F5F5F5",
           fontFamily: "var(--font-sans)",
           letterSpacing: "-0.1px",
         }}>
@@ -333,7 +413,10 @@ export default function NotificationPanel({
               background: "none", border: "none",
               cursor: "pointer", fontFamily: "inherit",
               padding: "2px 4px", opacity: 0.85,
+              transition: "opacity 0.12s",
             }}
+            onMouseEnter={e => (e.currentTarget.style.opacity = "1")}
+            onMouseLeave={e => (e.currentTarget.style.opacity = "0.85")}
           >
             Mark all read
           </button>
@@ -343,45 +426,72 @@ export default function NotificationPanel({
       {/* Scrollable list */}
       <div style={{ overflowY: "auto", flex: 1 }}>
         {loading ? (
-          // Skeleton rows — better than a spinner
-          <div style={{ padding: "8px 0" }}>
-            {[0.75, 0.55, 0.65].map((w, i) => (
-              <div key={i} style={{ display: "flex", gap: "12px", padding: "12px 16px", alignItems: "center" }}>
+          // Skeleton — three rows at varying widths
+          <div style={{ padding: "6px 0" }}>
+            {[0.72, 0.55, 0.64].map((w, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: "10px", padding: "11px 16px 11px 14px" }}>
+                <div style={{ width: 6, height: 6, borderRadius: "50%", background: "rgba(255,255,255,0.04)", flexShrink: 0 }} />
                 <div style={{ width: 36, height: 36, borderRadius: "50%", background: "rgba(255,255,255,0.06)", flexShrink: 0 }} />
                 <div style={{ flex: 1 }}>
-                  <div style={{ height: 11, borderRadius: 6, background: "rgba(255,255,255,0.07)", marginBottom: 7, width: `${w * 100}%` }} />
-                  <div style={{ height: 9, borderRadius: 5, background: "rgba(255,255,255,0.04)", width: "45%" }} />
+                  <div style={{ height: 11, borderRadius: 6, background: "rgba(255,255,255,0.07)", marginBottom: 6, width: `${w * 100}%` }} />
+                  <div style={{ height: 9, borderRadius: 5, background: "rgba(255,255,255,0.04)", width: "48%" }} />
                 </div>
               </div>
             ))}
           </div>
         ) : items.length === 0 ? (
-          // Empty state — calm and centered
-          <div style={{ padding: "48px 24px 44px", textAlign: "center" }}>
+          // Empty state
+          <div style={{ padding: "52px 24px 44px", textAlign: "center" }}>
             <div style={{
-              width: 48, height: 48, borderRadius: "50%",
+              width: 44, height: 44, borderRadius: "50%",
               background: "rgba(255,255,255,0.05)",
               display: "flex", alignItems: "center", justifyContent: "center",
-              margin: "0 auto 16px",
+              margin: "0 auto 14px",
             }}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none"
-                stroke="rgba(255,255,255,0.22)" strokeWidth="1.5"
+              <svg width="19" height="19" viewBox="0 0 24 24" fill="none"
+                stroke="rgba(255,255,255,0.2)" strokeWidth="1.5"
                 strokeLinecap="round" strokeLinejoin="round">
                 <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
                 <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
               </svg>
             </div>
-            <p style={{ fontSize: "14px", fontWeight: "500", color: "var(--text-secondary)", marginBottom: "5px" }}>
+            <p style={{ fontSize: "14px", fontWeight: "500", color: "rgba(255,255,255,0.5)", marginBottom: "4px" }}>
               You're all caught up
             </p>
-            <p style={{ fontSize: "12px", color: "var(--text-dim)", lineHeight: "1.55" }}>
+            <p style={{ fontSize: "12px", color: "rgba(255,255,255,0.22)", lineHeight: "1.55" }}>
               Notifications appear here when<br/>something needs your attention.
             </p>
           </div>
         ) : (
-          items.map((n, i) => (
-            <NotificationItem key={n.id} n={n} index={i} onAction={handleAction} />
-          ))
+          <>
+            {/* Unread group */}
+            {showSections && unread.length > 0 && <SectionLabel label="New" />}
+            {unread.map((n, i) => (
+              <NotificationItem
+                key={n.id}
+                n={n}
+                index={i}
+                isLast={i === unread.length - 1 && !showSections}
+                onAction={handleAction}
+              />
+            ))}
+
+            {/* Read group */}
+            {showSections && read.length > 0 && (
+              <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)", marginTop: "2px" }}>
+                <SectionLabel label="Earlier" />
+              </div>
+            )}
+            {read.map((n, i) => (
+              <NotificationItem
+                key={n.id}
+                n={n}
+                index={unread.length + i}
+                isLast={i === read.length - 1}
+                onAction={handleAction}
+              />
+            ))}
+          </>
         )}
       </div>
     </motion.div>
