@@ -1,7 +1,11 @@
-// DocReader.tsx — YouLearn Phase 1: document reader with AI summary + gold highlights.
-// Polish pass: robust highlight matching (normalized indexOf, not regex) + iOS-quality UI.
-import { useState, useEffect, useCallback, useMemo } from "react";
+// DocReader.tsx — YouLearn Phase 2: document reader + select-text toolbar + chat panel.
+// Phase 1: persisted reader with summary + gold highlights.
+// Phase 2: text selection → floating toolbar → streaming chat panel.
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
+import {} from "framer-motion"; // framer-motion used in child components
 import { supabase } from "../api/supabase";
+import SelectionToolbar, { type DocAction } from "./SelectionToolbar";
+import DocChat from "./DocChat";
 
 // ── Normalize text for matching (keep paragraph breaks, collapse inline spaces) ─
 function normalizeForMatch(s: string): string {
@@ -123,17 +127,114 @@ interface DocFile {
   summary?: string | null;
   highlights?: string[] | null;
   processedAt?: string | null;
+  /** courseDbId — threaded to DocChat so flashcards save to the right course */
+  courseDbId?: number | null;
 }
 
 interface Props {
   file: DocFile;
   onBack: () => void;
+  onNavigate?: (page: string) => void;
 }
 
-export default function DocReader({ file, onBack }: Props) {
+// ── Context window for chat (first 6 000 chars — enough without full chunking) ─
+const DOC_CTX_CHARS = 6000;
+
+export default function DocReader({ file, onBack, onNavigate }: Props) {
   const [contentText, setContentText] = useState<string | null>(null);
   const [loading,     setLoading]     = useState(true);
   const [error,       setError]       = useState<string | null>(null);
+
+  // ── Phase 2: selection + chat state ─────────────────────────────────────────
+  const [selectionText,  setSelectionText]  = useState("");
+  const [selectionRect,  setSelectionRect]  = useState<DOMRect | null>(null);
+  const [selectionTouch, setSelectionTouch] = useState(false);
+  const [chatOpen,       setChatOpen]       = useState(false);
+  const [chatAction,     setChatAction]     = useState<DocAction | null>(null);
+  const [chatSelection,  setChatSelection]  = useState<string | null>(null);
+  const [chatKey,        setChatKey]        = useState(0);
+
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // ── Document-level mouseup/touchend — catches drags that end outside container
+  useEffect(() => {
+    // Cast to `any` to avoid Framer Motion's `Range` type shadowing the DOM `Range` type.
+    // The DOM Range has getClientRects/getBoundingClientRect; FM's Range has start/end.
+    function pickRect(range: any): DOMRect | null {
+      const rects: DOMRect[] = Array.from(range.getClientRects() as DOMRectList);
+      for (let i = rects.length - 1; i >= 0; i--) {
+        if (rects[i].height > 0) return rects[i];
+      }
+      const r: DOMRect = range.getBoundingClientRect();
+      return r.height > 0 ? r : null;
+    }
+
+    function handleUp(isTouch: boolean) {
+      // Zero-ms for desktop, 400ms for touch so iOS native menu appears first
+      const delay = isTouch ? 400 : 0;
+      setTimeout(() => {
+        if (!containerRef.current) return;
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
+        if (!sel.rangeCount) return;
+        const range = sel.getRangeAt(0) as any;
+        // Only show toolbar when the selection is inside our doc text container
+        if (!containerRef.current.contains(range.commonAncestorContainer as Node)) return;
+
+        const rect = pickRect(range);
+        if (!rect) return;
+
+        setSelectionText(sel.toString().trim());
+        setSelectionRect(rect);
+        setSelectionTouch(isTouch);
+      }, delay);
+    }
+
+    const onMouseUp  = () => handleUp(false);
+    const onTouchEnd = () => handleUp(true);
+
+    document.addEventListener("mouseup",   onMouseUp);
+    document.addEventListener("touchend",  onTouchEnd);
+    return () => {
+      document.removeEventListener("mouseup",  onMouseUp);
+      document.removeEventListener("touchend", onTouchEnd);
+    };
+  }, []);
+
+  // Recompute on scroll/resize so the toolbar follows the text if user scrolls
+  useEffect(() => {
+    if (!selectionText) return;
+    function update() {
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed || !sel.rangeCount) { setSelectionRect(null); return; }
+      const range = sel.getRangeAt(0);
+      const rects = Array.from(range.getClientRects());
+      for (let i = rects.length - 1; i >= 0; i--) {
+        if (rects[i].height > 0) { setSelectionRect(rects[i]); return; }
+      }
+    }
+    window.addEventListener("scroll", update, { passive: true, capture: true });
+    window.addEventListener("resize", update, { passive: true });
+    return () => {
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [selectionText]);
+
+  function openChat(action: DocAction) {
+    setChatAction(action);
+    setChatSelection(selectionText || null);
+    setChatKey(k => k + 1);
+    setChatOpen(true);
+    // Clear the selection after opening so toolbar hides
+    window.getSelection()?.removeAllRanges();
+    setSelectionText("");
+    setSelectionRect(null);
+  }
+
+  const docContext = contentText
+    ? contentText.slice(0, DOC_CTX_CHARS)
+    : (file as any).summary ?? "";
 
   const fetchContent = useCallback(async () => {
     setLoading(true);
@@ -318,11 +419,35 @@ export default function DocReader({ file, onBack }: Props) {
           </p>
 
         ) : (
-          <div style={{ maxWidth: "68ch" }}>
+          <div ref={containerRef} style={{ maxWidth: "68ch" }}>
             <HighlightedText text={contentText} highlights={highlights} />
           </div>
         )}
       </section>
+
+      {/* ── Phase 2: floating toolbar + chat panel ──────────────────────────── */}
+      <SelectionToolbar
+        rect={selectionRect}
+        selectedText={selectionText}
+        preferBelow={selectionTouch}
+        onAction={openChat}
+        onDismiss={() => { setSelectionText(""); setSelectionRect(null); }}
+      />
+
+      {/* DocChat renders via createPortal at document.body — viewport-fixed, no AnimatePresence needed here */}
+      {chatOpen && (
+        <DocChat
+          key={chatKey}
+          docId={file.id}
+          docTitle={file.name}
+          docContext={docContext}
+          courseId={(file as any).courseDbId ?? null}
+          initialSelection={chatSelection}
+          initialAction={chatAction}
+          onClose={() => setChatOpen(false)}
+          onNavigate={onNavigate ?? (() => {})}
+        />
+      )}
     </div>
   );
 }

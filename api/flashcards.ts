@@ -25,23 +25,31 @@ export default async function handler(req, res) {
 
   // ── Save ──────────────────────────────────────────────────────────────────
   if (action === "save") {
-    if (!courseId || !cards) {
-      return res.status(400).json({ error: "courseId and cards are required for save" });
+    if (!cards) {
+      return res.status(400).json({ error: "cards are required for save" });
     }
 
-    const r = await fetch(
-      `${supabaseUrl}/rest/v1/flashcards?on_conflict=user_id,course_id`,
-      {
-        method:  "POST",
-        headers: { ...sbHeaders, "Prefer": "resolution=merge-duplicates,return=minimal" },
-        body:    JSON.stringify({
-          user_id:      userId,
-          course_id:    courseId,
-          cards,
-          generated_at: new Date().toISOString(),
-        }),
-      }
-    );
+    // When courseId is provided: upsert (merge with existing deck for that course).
+    // When courseId is null/missing (YouLearn docs without a linked course): plain INSERT
+    // so each session's cards survive independently.
+    const hasCourse = !!courseId;
+    const url = hasCourse
+      ? `${supabaseUrl}/rest/v1/flashcards?on_conflict=user_id,course_id`
+      : `${supabaseUrl}/rest/v1/flashcards`;
+
+    const r = await fetch(url, {
+      method:  "POST",
+      headers: {
+        ...sbHeaders,
+        "Prefer": hasCourse ? "resolution=merge-duplicates,return=minimal" : "return=minimal",
+      },
+      body: JSON.stringify({
+        user_id:      userId,
+        course_id:    courseId ?? null,
+        cards,
+        generated_at: new Date().toISOString(),
+      }),
+    });
 
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));

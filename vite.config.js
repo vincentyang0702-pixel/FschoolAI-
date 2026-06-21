@@ -610,40 +610,7 @@ const summarizeProxyPlugin = {
   },
 };
 
-// Room-tutor proxy — runs the real api/room-tutor.ts handler under the dev
-// server so the shared AI tutor (Claude Haiku → posts into room chat via service
-// key) works with `npm run dev`. Same module-load env caveat → inject env first,
-// then dynamic import. POST only.
-const roomTutorProxyPlugin = {
-  name: "room-tutor-proxy",
-  configureServer(server) {
-    server.middlewares.use("/api/room-tutor", async (req, res) => {
-      res.setHeader("Access-Control-Allow-Origin", "*");
-      if (req.method === "OPTIONS") { res.statusCode = 204; res.end(); return; }
-      process.env.ANTHROPIC_API_KEY    = loadEnvKey("ANTHROPIC_API_KEY");
-      process.env.SUPABASE_URL         = loadEnvKey("SUPABASE_URL");
-      process.env.SUPABASE_SERVICE_KEY = loadEnvKey("SUPABASE_SERVICE_KEY");
-      const tutorModel = loadEnvKey("ANTHROPIC_TUTOR_MODEL");
-      if (tutorModel) process.env.ANTHROPIC_TUTOR_MODEL = tutorModel;
-      let body = "";
-      req.on("data", c => { body += c; });
-      req.on("end", async () => {
-        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
-        res.status = (code) => { res.statusCode = code; return res; };
-        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
-        try {
-          const { default: handler } = await import("./api/room-tutor.js");
-          await handler(req, res);
-        } catch (err) {
-          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ error: err.message }));
-        }
-      });
-    });
-  },
-};
-
 export default defineConfig({
-  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin, ragProxyPlugin, tokenEngineProxyPlugin, nudgeProxyPlugin, flashcardsProxyPlugin, transcribeProxyPlugin, dailyRoomProxyPlugin, summarizeProxyPlugin, roomTutorProxyPlugin],
+  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin, ragProxyPlugin, tokenEngineProxyPlugin, nudgeProxyPlugin, flashcardsProxyPlugin, transcribeProxyPlugin, dailyRoomProxyPlugin, summarizeProxyPlugin],
   server:  { port: 5173, host: "0.0.0.0", allowedHosts: true },
 });
