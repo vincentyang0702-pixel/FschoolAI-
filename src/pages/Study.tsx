@@ -754,7 +754,6 @@ export default function Study() {
             .eq("user_id", userId)
             .eq("course_id", dbId)
             .not("content_text", "is", null)
-            .order("created_at", { ascending: false })
             .limit(20);
 
           if (fileRows?.length) {
@@ -890,7 +889,7 @@ export default function Study() {
 
       const prompt =
         mode === "flashcards"
-          ? `Create exactly ${cardCount} study flashcards for ${course}.${contextBlock}${existingQuestionsBlock}\n\nBase every flashcard strictly on the course content provided above. Questions must be about specific concepts, definitions, and ideas from that content. Answers must be accurate and complete — never say "not provided", "not stated", or "not mentioned in the content". If you know the answer from the subject matter, state it clearly. Do NOT ask about course logistics. No numbering, no extra text.\n\nFormat: Q: [question] | A: [answer] — one per line.`
+          ? `Create exactly ${cardCount} study flashcards for ${course}.${contextBlock}${existingQuestionsBlock}\n\nUse the course content above to identify the key topics and concepts for this course. Then write flashcards where every answer is a complete, factual explanation — written from your knowledge of the subject, not copied from the text above. You MUST provide a real answer for every card. It is FORBIDDEN to say anything like "not covered", "not available", "no specific answer", "not mentioned", or reference the source material in any answer. Every answer must explain the concept clearly as if teaching it. No numbering, no extra text.\n\nFormat: Q: [question] | A: [answer] — one per line.`
           : `You are a finals detective. Your job is to figure out exactly what will be on the final exam for ${course} and build a targeted study plan.${contextBlock}\n\nStep 1 — REVERSE ENGINEER THE FINAL: Based on the syllabus, recent modules (especially the last ones), professor announcements, and any file/page titles, identify the 5-7 most likely exam topics. Think like a professor: what did they spend the most time on? What did they announce recently?\n\nStep 2 — BUILD THE STUDY PLAN: For each likely exam topic, write: the concept, why it matters, and 2-3 things to know cold.\n\nStep 3 — PRIORITY ORDER: rank topics by how likely they are to appear.\n\nBe specific to this course's actual content. Do not give generic study advice.`;
 
       let result = await groq(
