@@ -70,10 +70,18 @@ function writeSnapshot(uid, snap) {
   try { localStorage.setItem(SNAPSHOT_KEY(uid), JSON.stringify(snap)); } catch { /* quota */ }
 }
 
+function generateUUID() {
+  if (typeof crypto !== "undefined" && crypto.randomUUID) return crypto.randomUUID();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === "x" ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+}
+
 function getOrCreateUserId() {
   let uid = localStorage.getItem("fschool_uid");
   if (!uid) {
-    uid = crypto.randomUUID();
+    uid = generateUUID();
     localStorage.setItem("fschool_uid", uid);
   }
   return uid;

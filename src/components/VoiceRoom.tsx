@@ -35,6 +35,7 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
   const [pos, setPos]             = useState(() =>
     defaultPos(window.innerWidth, window.innerHeight)
   );
+  const isMobile = window.innerWidth < 600;
 
   const dragging   = useRef(false);
   const dragOffset = useRef({ x: 0, y: 0 });
@@ -112,7 +113,24 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
   const popup = (
     <div
       ref={popupRef}
-      style={{
+      style={isMobile ? {
+        position:             "fixed",
+        bottom:               0,
+        left:                 0,
+        right:                0,
+        width:                "100%",
+        zIndex:               1200,
+        borderRadius:         minimized ? "16px 16px 0 0" : "20px 20px 0 0",
+        border:               "1px solid rgba(96,165,250,0.25)",
+        borderBottom:         "none",
+        background:           "rgba(10,10,14,0.97)",
+        backdropFilter:       "blur(20px)",
+        WebkitBackdropFilter: "blur(20px)",
+        boxShadow:            "0 -4px 40px rgba(0,0,0,0.6)",
+        overflow:             "hidden",
+        transition:           "border-radius 0.2s ease",
+        userSelect:           "none",
+      } : {
         position:             "fixed",
         top:                  pos.top,
         left:                 pos.left,
@@ -196,8 +214,8 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
           <iframe
             title="Voice chat"
             src={url}
-            allow="microphone; autoplay; camera; speaker"
-            style={{ width: "100%", height: "460px", border: "none", display: "block" }}
+            allow="microphone *; camera *; autoplay *; display-capture *; speaker *; fullscreen *"
+            style={{ width: "100%", height: isMobile ? "50vh" : "460px", border: "none", display: "block" }}
           />
         )}
 

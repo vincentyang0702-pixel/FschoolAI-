@@ -194,6 +194,10 @@ export default function Whiteboard({
   const drawingRef = useRef(false);
   const currentRef = useRef<Point[]>([]);
   const erasedThisDragRef = useRef<Set<string>>(new Set());
+  // Snapshot of the canvas at the start of each stroke. Restored on every
+  // pointermove before drawing the in-progress stroke so committed strokes
+  // are preserved regardless of React render timing.
+  const snapshotRef = useRef<ImageData | null>(null);
 
   // Live values for pointer handlers (avoid stale closures / re-binding).
   const toolRef   = useRef(tool);       toolRef.current = tool;
@@ -215,7 +219,7 @@ export default function Whiteboard({
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, BOARD_W, BOARD_H);
 
-    for (const s of strokes) drawStroke(ctx, s, bg);
+    for (const s of strokesRef.current) drawStroke(ctx, s, bg);
 
     // Remote peers' in-progress strokes.
     for (const draft of Object.values(liveStrokesRef.current)) {
@@ -237,6 +241,21 @@ export default function Whiteboard({
   useEffect(() => { render(); }, [strokes]);      // eslint-disable-line
   useEffect(() => { render(); }, [bg]);           // eslint-disable-line
   useEffect(() => { render(); }, [liveStrokes]);  // eslint-disable-line
+
+  // Keep a ref to finishStroke so the global listener always calls the latest version.
+  const finishStrokeRef = useRef<() => void>(() => {});
+
+  // Global pointerup/pointercancel — fires even when the finger is lifted outside
+  // the canvas or when iOS Safari drops pointer capture mid-stroke.
+  useEffect(() => {
+    function globalUp() { if (drawingRef.current) finishStrokeRef.current(); }
+    window.addEventListener("pointerup",     globalUp);
+    window.addEventListener("pointercancel", globalUp);
+    return () => {
+      window.removeEventListener("pointerup",     globalUp);
+      window.removeEventListener("pointercancel", globalUp);
+    };
+  }, []);
 
   function toBoard(e: React.PointerEvent): Point {
     const r = canvasRef.current!.getBoundingClientRect();
@@ -271,7 +290,13 @@ export default function Whiteboard({
       return;
     }
     currentRef.current = [pt];
-    render();
+    // Snapshot the canvas now so onPointerMove can restore it before drawing
+    // the in-progress stroke — preserves committed strokes with no React dependency.
+    const canvas = canvasRef.current;
+    if (canvas) {
+      const ctx = canvas.getContext("2d")!;
+      snapshotRef.current = ctx.getImageData(0, 0, BOARD_W, BOARD_H);
+    }
   }
 
   function onPointerMove(e: React.PointerEvent) {
@@ -279,7 +304,22 @@ export default function Whiteboard({
     const pt = toBoard(e);
     if (toolRef.current === "stroke-erase") { eraseAt(pt); return; }
     currentRef.current.push(pt);
-    render();
+    // Restore snapshot (committed strokes) then draw in-progress stroke on top.
+    // This never touches the strokes React prop so stale closures can't wipe work.
+    const canvas = canvasRef.current;
+    if (canvas && snapshotRef.current) {
+      const ctx = canvas.getContext("2d")!;
+      ctx.putImageData(snapshotRef.current, 0, 0);
+      if (currentRef.current.length && toolRef.current !== "area-erase") {
+        drawStroke(ctx, {
+          mode: "pen",
+          style: styleRef.current,
+          color: colorRef.current,
+          width: penWRef.current,
+          points: currentRef.current,
+        }, bg);
+      }
+    }
     onLiveStroke?.({
       mode: toolRef.current === "area-erase" ? "erase" : "pen",
       style: styleRef.current,
@@ -292,6 +332,7 @@ export default function Whiteboard({
   function finishStroke() {
     if (!drawingRef.current) return;
     drawingRef.current = false;
+    snapshotRef.current = null;
     if (toolRef.current === "stroke-erase") { erasedThisDragRef.current = new Set(); return; }
     const points = currentRef.current;
     currentRef.current = [];
@@ -305,11 +346,10 @@ export default function Whiteboard({
       width: isErase ? eraserRef.current : penWRef.current,
       points,
     };
-    // No render() here: the previous pointer-move frame already shows this stroke,
-    // and the parent's optimistic setStrokes triggers a render that draws it as a
-    // committed stroke — so it stays on screen with no flash.
     onStrokeComplete(finished);
   }
+
+  finishStrokeRef.current = finishStroke;
 
   // ── Small UI helpers ────────────────────────────────────────────────────────
   const chip = (active: boolean, accent = "#c49a3c"): React.CSSProperties => ({
@@ -327,7 +367,8 @@ export default function Whiteboard({
     <div style={{
       border: "1px solid rgba(196,154,60,0.2)", borderRadius: "14px",
       background: "rgba(196,154,60,0.03)", marginBottom: "20px", overflow: "hidden",
-    }}>
+      touchAction: "none", overscrollBehavior: "none",
+    }} data-no-swipe="true">
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid rgba(196,154,60,0.12)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
