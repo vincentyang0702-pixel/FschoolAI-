@@ -555,7 +555,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
             placeholder="A3B2C1"
             maxLength={6}
             style={{
-              flex:1, background:"transparent", border:"none",
+              flex:1, minWidth:0, background:"transparent", border:"none",
               color:"var(--text-primary)", fontSize:"18px",
               outline:"none", fontFamily:"monospace", letterSpacing:"6px", fontWeight:"700",
             }}
@@ -563,7 +563,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
           <button
             onClick={handleJoinByCode}
             disabled={codeInput.length < 6 || codeLookingUp}
-            style={{ ...S.primaryBtn, padding:"9px 20px", fontSize:"13px", opacity: codeInput.length < 6 ? 0.4 : 1, flexShrink:0 }}
+            style={{ ...S.primaryBtn, padding:"9px 14px", fontSize:"13px", opacity: codeInput.length < 6 ? 0.4 : 1, flexShrink:0 }}
           >
             {codeLookingUp ? "…" : "Join Room"}
           </button>
@@ -1521,20 +1521,30 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
 
   function handleOpenBoard() {
     setShowBoard(true);
-    // Yjs state loads automatically via subscribeWhiteboard() on room join.
+    // Push a fake history entry so Android swipe-back closes the board
+    // instead of navigating away from the room.
+    history.pushState({ boardGuard: true }, '');
   }
 
+  useEffect(() => {
+    if (!showBoard) return;
+    function onPop() { setShowBoard(false); }
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [showBoard]);
+
   function handleStrokeComplete(stroke: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) {
-    yjsStrokesRef.current?.push([{
-      id: crypto.randomUUID(),
+    const newStroke = {
+      id: (crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)),
       room_id: room.id,
       user_id: userId,
       name: userData?.name ?? "Anonymous",
       created_at: new Date().toISOString(),
       ...stroke,
-    }]);
-    // Yjs observer fires → setStrokes() → canvas re-renders.
-    // Provider broadcasts the binary delta to all peers automatically.
+    };
+    setStrokes(prev => [...prev, newStroke]);
+    yjsStrokesRef.current?.push([newStroke]);
+    // Yjs observer also fires setStrokes (idempotent). Provider broadcasts delta to peers.
   }
 
   function handleEraseStroke(strokeId: string) {
@@ -1596,7 +1606,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   return (
     <div>
       {/* Header */}
-      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:"20px" }}>
+      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", flexWrap:"wrap", gap:"10px", marginBottom:"20px" }}>
         <div>
           <p style={S.sectionLabel}>Study Room</p>
           <h1 style={{ ...S.pageTitle, fontSize:"22px" }}>{room.name}</h1>
@@ -1614,13 +1624,13 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
             </div>
           )}
         </div>
-        <div style={{ display:"flex", gap:"8px", flexShrink:0, alignItems:"center", flexWrap:"wrap" }}>
+        <div style={{ display:"flex", gap:"6px", alignItems:"center", flexWrap:"wrap" }}>
           {/* Panel toggles */}
-          <button onClick={() => setShowBuddy(b => !b)} style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px", background: showBuddy ? "rgba(111,179,196,0.1)" : "none", borderColor: showBuddy ? "rgba(111,179,196,0.3)" : "rgba(255,255,255,0.09)", color: showBuddy ? "#6fb3c4" : "var(--text-dim)" }}>🤖 AI</button>
-          <button onClick={() => showChat ? setShowChat(false) : handleOpenChat()} style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px", background: showChat ? "rgba(127,174,110,0.1)" : "none", borderColor: showChat ? "rgba(127,174,110,0.3)" : "rgba(255,255,255,0.09)", color: showChat ? "#7fae6e" : "var(--text-dim)" }}>💬 Chat</button>
-          <button onClick={() => showBoard ? setShowBoard(false) : handleOpenBoard()} style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px", background: showBoard ? "rgba(196,154,60,0.1)" : "none", borderColor: showBoard ? "rgba(196,154,60,0.3)" : "rgba(255,255,255,0.09)", color: showBoard ? "#c49a3c" : "var(--text-dim)" }}>🖊 Board</button>
-          <button onClick={() => setShowVoice(v => !v)} style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px", background: showVoice ? "rgba(96,165,250,0.1)" : "none", borderColor: showVoice ? "rgba(96,165,250,0.3)" : "rgba(255,255,255,0.09)", color: showVoice ? "#60a5fa" : "var(--text-dim)" }}>🎙 Voice</button>
-          <button onClick={() => setShowInvite(true)} style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px" }}>+ Invite</button>
+          <button onClick={() => setShowBuddy(b => !b)} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showBuddy ? "rgba(111,179,196,0.1)" : "none", borderColor: showBuddy ? "rgba(111,179,196,0.3)" : "rgba(255,255,255,0.09)", color: showBuddy ? "#6fb3c4" : "var(--text-dim)" }}>🤖 AI</button>
+          <button onClick={() => showChat ? setShowChat(false) : handleOpenChat()} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showChat ? "rgba(127,174,110,0.1)" : "none", borderColor: showChat ? "rgba(127,174,110,0.3)" : "rgba(255,255,255,0.09)", color: showChat ? "#7fae6e" : "var(--text-dim)" }}>💬 Chat</button>
+          <button onClick={() => showBoard ? setShowBoard(false) : handleOpenBoard()} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showBoard ? "rgba(196,154,60,0.1)" : "none", borderColor: showBoard ? "rgba(196,154,60,0.3)" : "rgba(255,255,255,0.09)", color: showBoard ? "#c49a3c" : "var(--text-dim)" }}>🖊 Board</button>
+          <button onClick={() => setShowVoice(v => !v)} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showVoice ? "rgba(96,165,250,0.1)" : "none", borderColor: showVoice ? "rgba(96,165,250,0.3)" : "rgba(255,255,255,0.09)", color: showVoice ? "#60a5fa" : "var(--text-dim)" }}>🎙 Voice</button>
+          <button onClick={() => setShowInvite(true)} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px" }}>+ Invite</button>
 
           {/* ⋯ overflow — admin actions + leave */}
           <div ref={roomMenuRef} style={{ position:"relative" }}>
@@ -1633,7 +1643,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
             </button>
             {showRoomMenu && (
               <div style={{
-                position:"absolute", top:"calc(100% + 6px)", right:0, zIndex:200,
+                position:"absolute", top:0, left:"calc(100% + 6px)", zIndex:200,
                 background:"var(--color-surface)", border:"1px solid var(--color-border)",
                 borderRadius:"12px", padding:"6px", minWidth:"160px",
                 boxShadow:"0 8px 32px rgba(0,0,0,0.45)",

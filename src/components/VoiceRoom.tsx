@@ -4,13 +4,11 @@ import { createPortal } from "react-dom";
 type Status = "loading" | "ready" | "unavailable" | "error";
 
 const POPUP_W    = 440;
-const POPUP_H    = 540; // approximate full height
-const POPUP_W_SM = 220; // minimized width
-const POPUP_H_SM = 44;  // minimized height
+const POPUP_H    = 540;
+const POPUP_W_SM = 220;
+const POPUP_H_SM = 44;
 
 function defaultPos(w: number, h: number) {
-  // Bottom-right, but shifted left/up to clear the NeuralRing widget (68px,
-  // right: 22px) and give breathing room.
   return {
     left: Math.max(0, w - POPUP_W - 100),
     top:  Math.max(0, h - POPUP_H - 120),
@@ -32,15 +30,18 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
   const [status, setStatus]       = useState<Status>("loading");
   const [url, setUrl]             = useState<string | null>(null);
   const [minimized, setMinimized] = useState(false);
+
   const [pos, setPos]             = useState(() =>
     defaultPos(window.innerWidth, window.innerHeight)
   );
+  const isMobile = window.innerWidth < 600;
 
   const dragging   = useRef(false);
   const dragOffset = useRef({ x: 0, y: 0 });
   const popupRef   = useRef<HTMLDivElement>(null);
+  const iframeRef  = useRef<HTMLIFrameElement>(null);
 
-  // Fetch Daily room URL + meeting token
+
   useEffect(() => {
     const ctrl = new AbortController();
     let alive = true;
@@ -67,7 +68,6 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
     return () => { alive = false; ctrl.abort(); };
   }, [roomId]);
 
-  // Re-clamp whenever the window resizes
   useEffect(() => {
     function onResize() {
       setPos(p => {
@@ -80,7 +80,6 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
     return () => window.removeEventListener("resize", onResize);
   }, [minimized]);
 
-  // Global mouse tracking for drag
   useEffect(() => {
     function onMove(e: MouseEvent) {
       if (!dragging.current) return;
@@ -109,10 +108,29 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
 
   const ACCENT = "#60a5fa";
 
+  const mobileCollapsed = isMobile && minimized;
+
+  // ── Full popup (desktop) or expanded bottom sheet (mobile) ───────────────
   const popup = (
     <div
       ref={popupRef}
-      style={{
+      style={isMobile ? {
+        position:             "fixed",
+        bottom:               0,
+        left:                 0,
+        right:                0,
+        width:                "100%",
+        zIndex:               1200,
+        borderRadius:         "20px 20px 0 0",
+        border:               "1px solid rgba(96,165,250,0.25)",
+        borderBottom:         "none",
+        background:           "rgba(10,10,14,0.97)",
+        backdropFilter:       "blur(20px)",
+        WebkitBackdropFilter: "blur(20px)",
+        boxShadow:            "0 -4px 40px rgba(0,0,0,0.6)",
+        overflow:             "hidden",
+        userSelect:           "none",
+      } : {
         position:             "fixed",
         top:                  pos.top,
         left:                 pos.left,
@@ -129,47 +147,54 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
         userSelect:           "none",
       }}
     >
-      {/* Drag handle / header */}
+      {/* Header */}
       <div
-        onMouseDown={startDrag}
+        onMouseDown={!isMobile ? startDrag : undefined}
         style={{
           display:        "flex",
           alignItems:     "center",
           justifyContent: "space-between",
-          padding:        minimized ? "10px 14px" : "12px 16px",
-          borderBottom:   minimized ? "none" : "1px solid rgba(96,165,250,0.12)",
-          cursor:         dragging.current ? "grabbing" : "grab",
+          padding:        "12px 16px",
+          borderBottom:   "1px solid rgba(96,165,250,0.12)",
+          cursor:         isMobile ? "default" : (dragging.current ? "grabbing" : "grab"),
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: "8px", pointerEvents: "none" }}>
-          {minimized && status === "ready" && (
-            <span style={{
-              display: "inline-block", width: "7px", height: "7px",
-              borderRadius: "50%", background: "#4ade80",
-              boxShadow: "0 0 6px #4ade80",
-              animation: "vcPulse 1.8s ease-in-out infinite",
-            }} />
-          )}
           <span style={{ fontSize: "14px" }}>🎙</span>
-          <span style={{ fontSize: "13px", fontWeight: 600, color: ACCENT }}>
-            {minimized ? "Voice (live)" : "Voice Chat"}
-          </span>
+          <span style={{ fontSize: "13px", fontWeight: 600, color: ACCENT }}>Voice Chat</span>
         </div>
         <div
           style={{ display: "flex", alignItems: "center", gap: "4px" }}
-          onMouseDown={e => e.stopPropagation()} // buttons don't trigger drag
+          onMouseDown={e => e.stopPropagation()}
         >
-          <button
-            onClick={() => setMinimized(m => !m)}
-            title={minimized ? "Expand" : "Minimize"}
-            style={{
-              background: "none", border: "none", cursor: "pointer",
-              color: "var(--text-dim)", fontSize: "15px", lineHeight: 1,
-              padding: "2px 5px", borderRadius: "5px",
-            }}
-          >
-            {minimized ? "□" : "─"}
-          </button>
+          {/* Collapse button — mobile only */}
+          {isMobile && (
+            <button
+              onClick={() => setMinimized(true)}
+              title="Collapse"
+              style={{
+                background: "none", border: "none", cursor: "pointer",
+                color: "var(--text-dim)", fontSize: "15px", lineHeight: 1,
+                padding: "2px 5px", borderRadius: "5px",
+              }}
+            >
+              ─
+            </button>
+          )}
+          {/* Desktop minimize */}
+          {!isMobile && (
+            <button
+              onClick={() => setMinimized(m => !m)}
+              title={minimized ? "Expand" : "Minimize"}
+              style={{
+                background: "none", border: "none", cursor: "pointer",
+                color: "var(--text-dim)", fontSize: "15px", lineHeight: 1,
+                padding: "2px 5px", borderRadius: "5px",
+              }}
+            >
+              {minimized ? "□" : "─"}
+            </button>
+          )}
           <button
             onClick={onClose}
             title="Leave voice"
@@ -184,8 +209,8 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
         </div>
       </div>
 
-      {/* Body — kept in DOM when minimized so the call stays alive */}
-      <div style={{ height: minimized ? 0 : "auto", overflow: "hidden" }}>
+      {/* Body */}
+      <div style={{ height: (!isMobile && minimized) ? 0 : "auto", overflow: "hidden" }}>
         {status === "loading" && (
           <div style={{ padding: "36px 16px", textAlign: "center" }}>
             <p style={{ fontSize: "13px", color: "var(--text-dim)" }}>Connecting to voice…</p>
@@ -194,10 +219,11 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
 
         {status === "ready" && url && (
           <iframe
+            ref={iframeRef}
             title="Voice chat"
             src={url}
-            allow="microphone; autoplay; camera; speaker"
-            style={{ width: "100%", height: "460px", border: "none", display: "block" }}
+            allow="microphone *; camera *; autoplay *; display-capture *; speaker *; fullscreen *"
+            style={{ width: "100%", height: isMobile ? "50vh" : "460px", border: "none", display: "block" }}
           />
         )}
 
@@ -232,5 +258,73 @@ export default function VoiceRoom({ roomId, userName, onClose }: {
     </div>
   );
 
-  return createPortal(popup, document.body);
+  return createPortal(
+    <>
+      {/* Collapsed bar — shown instead of sheet on mobile when minimized.
+          The sheet (with iframe) stays in the DOM so the call doesn't drop. */}
+      {mobileCollapsed && (
+        <div
+          onClick={() => setMinimized(false)}
+          style={{
+            position:             "fixed",
+            bottom:               0,
+            left:                 0,
+            right:                0,
+            height:               "56px",
+            zIndex:               1201,
+            display:              "flex",
+            alignItems:           "center",
+            justifyContent:       "space-between",
+            padding:              "0 20px",
+            background:           "rgba(10,10,14,0.97)",
+            backdropFilter:       "blur(20px)",
+            WebkitBackdropFilter: "blur(20px)",
+            borderTop:            "1px solid rgba(96,165,250,0.2)",
+            boxShadow:            "0 -4px 20px rgba(0,0,0,0.5)",
+            cursor:               "pointer",
+            userSelect:           "none",
+          }}
+        >
+          {/* Left: live dot + label */}
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <span style={{
+              display:      "inline-block",
+              width:        "8px",
+              height:       "8px",
+              borderRadius: "50%",
+              background:   status === "ready" ? "#4ade80" : "#facc15",
+              boxShadow:    status === "ready" ? "0 0 8px #4ade80" : "0 0 8px #facc15",
+              animation:    "vcPulse 1.8s ease-in-out infinite",
+            }} />
+            <span style={{ fontSize: "13px", fontWeight: 600, color: ACCENT }}>Voice</span>
+          </div>
+
+          {/* Right: leave */}
+          <button
+            onClick={e => { e.stopPropagation(); onClose(); }}
+            style={{
+              background:   "rgba(239,68,68,0.15)",
+              border:       "1px solid rgba(239,68,68,0.3)",
+              borderRadius: "8px",
+              color:        "#f87171",
+              fontSize:     "13px",
+              fontWeight:   600,
+              padding:      "0 14px",
+              height:       "36px",
+              cursor:       "pointer",
+            }}
+          >
+            Leave
+          </button>
+        </div>
+      )}
+
+      {/* Main sheet — visually hidden when collapsed but kept in DOM so the
+          Daily.co iframe (and the active call) is never unmounted. */}
+      <div style={{ display: mobileCollapsed ? "none" : undefined }}>
+        {popup}
+      </div>
+    </>,
+    document.body,
+  );
 }

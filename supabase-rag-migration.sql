@@ -9,7 +9,7 @@ create extension if not exists vector;
 -- ── documents ────────────────────────────────────────────────
 create table if not exists public.rag_documents (
   id         uuid primary key default gen_random_uuid(),
-  user_id    text references public.users(id) on delete cascade,
+  user_id    text,
   course_id  uuid,                       -- optional; no FK (courses churn on re-sync)
   title      text,
   kind       text,                       -- pdf | docx | text | audio | video | youtube
