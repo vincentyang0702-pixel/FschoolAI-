@@ -177,6 +177,7 @@ async function lmsApiSync() {
         if (ps.PagingInfo && ps.PagingInfo.HasMoreItems) bookmark = ps.PagingInfo.Bookmark; else break;
       }
       const assignments = [];
+      const files = [];
       await Promise.all(courses.map(async (c) => {
         // One assignment per title: grade items carry score+weight, folders add due dates.
         const norm = s => (s || "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -198,10 +199,37 @@ async function lmsApiSync() {
           byTitle.set(k, Object.assign(cur, patch));
         };
 
-        // Assignment folders (Dropbox) → due dates
+        // Assignment folders (Dropbox) → due dates + the student's own submissions.
+        // The folder gives the due date; the submissions endpoint tells us whether
+        // the student already submitted (→ submitted_at) and what files they handed
+        // in (→ files tagged status:"submitted", matching the Canvas adapter).
+        // Submission visibility for the student role is tenant-configurable, so the
+        // per-folder fetch is best-effort and wrapped — a 403 just skips it.
         try {
-          for (const f of (await dget(`/d2l/api/le/${leV}/${c.id}/dropbox/folders/`) || []))
-            upsertAssign(f.Name || "Assignment", { due_at: f.DueDate || null });
+          for (const f of (await dget(`/d2l/api/le/${leV}/${c.id}/dropbox/folders/`) || [])) {
+            const title = f.Name || "Assignment";
+            upsertAssign(title, { due_at: f.DueDate || null });
+            try {
+              const groups = (await dget(`/d2l/api/le/${leV}/${c.id}/dropbox/folders/${f.Id}/submissions/`)) || [];
+              let latest = null;
+              for (const g of groups) {
+                for (const sub of (g.Submissions || [])) {
+                  if (sub.SubmissionDate && (!latest || sub.SubmissionDate > latest)) latest = sub.SubmissionDate;
+                  for (const file of (sub.Files || [])) {
+                    const fid = file.FileId ?? file.Id;
+                    files.push({ course_ref: c.id, assignment_ref: titleId(norm(title)),
+                      id: "d2l_subfile_" + c.id + "_" + f.Id + "_" + fid,
+                      name: file.FileName || file.Name || ("file_" + fid),
+                      file_type: fileType(file.FileName || file.Name, null),
+                      size_bytes: file.Size ?? null,
+                      source_url: origin + `/d2l/api/le/${leV}/${c.id}/dropbox/folders/${f.Id}/submissions/${sub.Id}/files/${fid}`,
+                      folder: title, status: "submitted" });
+                  }
+                }
+              }
+              if (latest) upsertAssign(title, { submitted_at: latest });
+            } catch (e) { D("dropbox submissions fail", c.id, f.Id, e && e.message); }
+          }
         } catch (e) { D("dropbox fail", c.id, e && e.message); }
 
         // Quizzes → due dates
@@ -309,7 +337,6 @@ async function lmsApiSync() {
         assignments.push(...byTitle.values());
       }));
       // Content TOC → file topics (course materials). Modules nest, so walk them.
-      const files = [];
       await Promise.all(courses.map(async (c) => {
         try {
           const toc = await dget(`/d2l/api/le/${leV}/${c.id}/content/toc`);

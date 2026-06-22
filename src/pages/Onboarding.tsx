@@ -7,14 +7,29 @@ async function searchSchools(query) {
   const trimmed = query.trim();
   if (!trimmed || trimmed.length < 2) return [];
 
-  const COLS = "name, city, country, continent, status, login_url, token_flow, domain";
+  // Full column set. If the live `schools` table is missing a newer column,
+  // PostgREST 400s the ENTIRE query — which silently empties the dropdown. So
+  // fall back to the columns that have always existed (mirrors loadCanvasData's
+  // loadFiles fallback). Errors are logged, not swallowed, so an RLS lockout on
+  // `schools` (anon role) surfaces as "permission denied" in the console instead
+  // of a mystery empty dropdown.
+  const FULL_COLS = "name, city, country, continent, status, login_url, token_flow, domain";
+  const BASE_COLS = "name, city, country, status, login_url, token_flow";
 
-  // Run three queries in parallel: match on name, city, or country
-  const [byName, byCity, byCountry] = await Promise.all([
-    supabase.from("schools").select(COLS).ilike("name",    `%${trimmed}%`).limit(8),
-    supabase.from("schools").select(COLS).ilike("city",    `%${trimmed}%`).limit(6),
-    supabase.from("schools").select(COLS).ilike("country", `%${trimmed}%`).limit(6),
+  const runSet = (cols) => Promise.all([
+    supabase.from("schools").select(cols).ilike("name",    `%${trimmed}%`).limit(8),
+    supabase.from("schools").select(cols).ilike("city",    `%${trimmed}%`).limit(6),
+    supabase.from("schools").select(cols).ilike("country", `%${trimmed}%`).limit(6),
   ]);
+
+  let [byName, byCity, byCountry] = await runSet(FULL_COLS);
+  const firstErr = byName.error || byCity.error || byCountry.error;
+  if (firstErr) {
+    console.warn("[onboarding] school search failed:", firstErr.message || firstErr);
+    if (/column|does not exist|schema cache|PGRST/i.test(firstErr.message || "")) {
+      [byName, byCity, byCountry] = await runSet(BASE_COLS);
+    }
+  }
 
   // Merge and deduplicate by name — name-matches appear first
   const seen = new Set();
@@ -23,7 +38,7 @@ async function searchSchools(query) {
     ...(byName.data    || []),
     ...(byCity.data    || []),
     ...(byCountry.data || []),
-  ]) {
+  ] as any[]) {
     const key = row.name?.toLowerCase();
     if (key && !seen.has(key)) {
       seen.add(key);

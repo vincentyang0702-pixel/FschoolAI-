@@ -45,6 +45,9 @@ Return ONLY valid JSON with this exact shape — no explanation, no markdown:
   ],
   "grades": [
     { "course": "string", "grade": "string", "score": "string or null", "percentage": "string or null" }
+  ],
+  "files": [
+    { "name": "string", "course": "string or null", "assignment": "string or null", "url": "string", "kind": "submitted | material" }
   ]
 }
 
@@ -52,7 +55,14 @@ Rules:
 - Include ONLY fields you actually found on the page — leave arrays empty if no data
 - dueDate: use the format you see on the page, or null
 - grade: letter grade (A, B+, etc.) or percentage — whatever is shown
-- If the page is a login page or has no academic data, return { "pageType": "other", "courses": [], "assignments": [], "grades": [] }`;
+- files: from the "Links on this page" list ONLY, pick links that download a document
+  (a URL ending in or clearly leading to pdf/doc/docx/ppt/pptx/xls/xlsx/txt/csv/zip, or a
+  link the page labels as an attachment / uploaded / submitted file). NEVER invent a URL —
+  copy it verbatim from the list. Skip navigation, login, and ordinary HTML page links.
+- files[].kind: "submitted" if it is the student's own submitted/uploaded file or a
+  submission attachment; otherwise "material" (lecture slides, readings, handouts).
+- files[].assignment: the assignment name the file belongs to, if the page makes it clear.
+- If the page is a login page or has no academic data, return { "pageType": "other", "courses": [], "assignments": [], "grades": [], "files": [] }`;
 
 // ── Supabase write ────────────────────────────────────────────────────────────
 // onConflict (e.g. "user_id,data_type") is required so PostgREST UPDATES the
@@ -118,6 +128,19 @@ function deriveCode(s) {
   const str = String(s || "").trim().toLowerCase();
   const m = str.match(/^[a-z]{2,}\s*\d+/);
   return m ? m[0].replace(/\s+/g, "") : str.slice(0, 24);
+}
+
+// Stable, collision-resistant id from a string (e.g. a file URL).
+function hashId(prefix, k) {
+  let h = 0; const s = String(k);
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  return prefix + (h >>> 0).toString(36);
+}
+
+// Best-effort file extension from a name or URL → bare ext ("pdf"), else "file".
+function extFromName(s) {
+  const m = String(s || "").toLowerCase().match(/\.([a-z0-9]{1,5})(?:[?#]|$)/);
+  return m && m[1] ? m[1] : "file";
 }
 
 // Parse "85%", "85 / 100", "85" → number (0-100). Letter grades → null.
@@ -202,7 +225,50 @@ async function ingestStructured(userId, parsed) {
     }], "user_id,canvas_assignment_id");
   }
 
-  return { courses: courses.length, assignments: assignments.length, grades: grades.length };
+  // 5. Files — document links Claude pulled off the page (submissions + materials).
+  //    Generic across portals: the URL is fetched later through the student's
+  //    session by extractFileContents(). Returned as fileRows so the caller can
+  //    trigger that download pass.
+  const files = parsed.files ?? [];
+  const fileRows = [];
+  if (files.length) {
+    // Map the assignment composite key → UUID so submitted files attach to their
+    // assignment (same key shape used when upserting assignments above).
+    const assignKeyToId = {};
+    try {
+      const res = await fetch(
+        `${SUPABASE_URL}/rest/v1/assignments?user_id=eq.${userId}&select=id,canvas_assignment_id`,
+        { headers: { "apikey": SUPABASE_ANON, "Authorization": `Bearer ${SUPABASE_ANON}`, ...SB_PROFILE } }
+      );
+      (await res.json()).forEach(r => { assignKeyToId[String(r.canvas_assignment_id)] = r.id; });
+    } catch { /* leave empty — files still save, just unlinked */ }
+
+    const seen = new Set();
+    for (const f of files) {
+      const fileUrl = String(f.url || "").trim();
+      if (!fileUrl || !/^https?:/i.test(fileUrl) || seen.has(fileUrl)) continue;
+      seen.add(fileUrl);
+      const code      = f.course ? deriveCode(f.course) : null;
+      const assignKey = f.assignment ? `${code ?? deriveCode(f.assignment)}_${String(f.assignment).slice(0, 48)}` : null;
+      fileRows.push({
+        user_id:       userId,
+        course_id:     code ? (codeToId[code] ?? null) : null,
+        assignment_id: assignKey ? (assignKeyToId[assignKey] ?? null) : null,
+        lms_file_id:   hashId("ext_file_", fileUrl),
+        name:          f.name || "file",
+        file_type:     extFromName(f.name || fileUrl),
+        source_url:    fileUrl,
+        status:        f.kind === "submitted" ? "submitted" : "course_material",
+        source:        "extension",
+        updated_at:    now,
+      });
+    }
+    if (fileRows.length) await sbUpsert("files", fileRows, "user_id,lms_file_id");
+  }
+
+  // extractFileContents() expects { id, source_url } — expose lms_file_id as id.
+  const downloadList = fileRows.map(r => ({ ...r, id: r.lms_file_id }));
+  return { courses: courses.length, assignments: assignments.length, grades: grades.length, files: fileRows.length, fileRows: downloadList };
 }
 
 // ── Main extraction handler ───────────────────────────────────────────────────
@@ -446,7 +512,16 @@ async function extractFileContents(userId, files) {
 }
 
 async function extract(userId, pageContent, stepHint) {
-  const { text, tables, url, title } = pageContent;
+  const { text, tables, url, title, links } = pageContent;
+
+  // Links power generic file capture: Claude maps the document links on the page
+  // into parsed.files, which we then download through the student's session. This
+  // is what lets submitted files + materials sync on ANY portal, not just the
+  // hardcoded API adapters.
+  const linkList = (links || [])
+    .map(l => `${l.t} -> ${l.h}`)
+    .join("\n")
+    .slice(0, 6000);
 
   const userContent = `Page URL: ${url}
 Page title: ${title}
@@ -455,7 +530,7 @@ Step hint: I'm expecting to find "${stepHint}" data on this page.
 Page content:
 ${text}
 
-${tables ? `Tables found:\n${tables}` : ""}`;
+${tables ? `Tables found:\n${tables}\n` : ""}${linkList ? `Links on this page (text -> url):\n${linkList}` : ""}`;
 
   // Call Claude to parse
   const raw = await callClaude(EXTRACT_SYSTEM, userContent);
@@ -489,12 +564,20 @@ ${tables ? `Tables found:\n${tables}` : ""}`;
   // Write to the structured courses + assignments tables so the WHOLE app
   // (dashboard, study page, AI tutor) sees the data — not just blobs.
   const counts = await ingestStructured(userId, parsed);
+
+  // Download any document links Claude found (submissions + materials), via the
+  // student's session — generic, works on any portal.
+  if (counts.fileRows?.length) {
+    await extractFileContents(userId, counts.fileRows).catch(() => {});
+  }
+
   const stats  = await getCurrentStats(userId);
 
   const parts = [];
   if (counts.courses)     parts.push(`${counts.courses} courses`);
   if (counts.assignments) parts.push(`${counts.assignments} assignments`);
   if (counts.grades)      parts.push(`${counts.grades} grades`);
+  if (counts.files)       parts.push(`${counts.files} files`);
 
   return {
     ok:      true,
