@@ -16,13 +16,13 @@
 // TOOLS: pen (5 styles) · stroke-eraser (tap a line to delete it) · area-eraser
 // (background-coloured brush).
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Point, Stroke, PenStyle } from "../api/whiteboard";
 
 export const BOARD_W = 1000;
 export const BOARD_H = 600;
 
-export type Tool = "pen" | "stroke-erase" | "area-erase";
+export type Tool = "pen" | "stroke-erase" | "area-erase" | "laser";
 
 // ── Palettes ──────────────────────────────────────────────────────────────────
 export const BACKGROUNDS = [
@@ -175,6 +175,7 @@ export default function Whiteboard({
   onToolChange, onStyleChange, onColorChange, onPenWidthChange, onEraserSizeChange, onBgChange,
   onStrokeComplete, onEraseStroke, onLiveStroke, onClear,
   canUndo, canRedo, onUndo, onRedo,
+  peerCursors, laserPositions, onCursorMove, onLaserMove,
   onClose,
 }: {
   strokes: Stroke[];
@@ -194,11 +195,16 @@ export default function Whiteboard({
   canRedo?: boolean;
   onUndo?: () => void;
   onRedo?: () => void;
+  peerCursors?: Record<string, { x: number; y: number; name: string; color: string }>;
+  laserPositions?: Record<string, { x: number; y: number; active: boolean }>;
+  onCursorMove?: (x: number | null, y: number | null) => void;
+  onLaserMove?: (pos: { x: number; y: number } | null) => void;
   onClose: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const drawingRef = useRef(false);
   const currentRef = useRef<Point[]>([]);
+  const [localLaser, setLocalLaser] = useState<{ x: number; y: number } | null>(null);
   const erasedThisDragRef = useRef<Set<string>>(new Set());
   // Snapshot of the canvas at the start of each stroke. Restored on every
   // pointermove before drawing the in-progress stroke so committed strokes
@@ -233,7 +239,7 @@ export default function Whiteboard({
     }
 
     // The local in-progress stroke, drawn last so it sits on top.
-    if (drawingRef.current && currentRef.current.length && toolRef.current !== "stroke-erase") {
+    if (drawingRef.current && currentRef.current.length && toolRef.current !== "stroke-erase" && toolRef.current !== "laser") {
       drawStroke(ctx, {
         mode: toolRef.current === "area-erase" ? "erase" : "pen",
         style: styleRef.current,
@@ -290,6 +296,11 @@ export default function Whiteboard({
     (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     drawingRef.current = true;
     const pt = toBoard(e);
+    if (toolRef.current === "laser") {
+      setLocalLaser(pt);
+      onLaserMove?.({ x: pt.x, y: pt.y });
+      return;
+    }
     if (toolRef.current === "stroke-erase") {
       erasedThisDragRef.current = new Set();
       eraseAt(pt);
@@ -306,8 +317,15 @@ export default function Whiteboard({
   }
 
   function onPointerMove(e: React.PointerEvent) {
-    if (!drawingRef.current) return;
     const pt = toBoard(e);
+    // Always broadcast cursor position for live-cursor feature (throttled in parent).
+    onCursorMove?.(pt.x, pt.y);
+    if (!drawingRef.current) return;
+    if (toolRef.current === "laser") {
+      setLocalLaser(pt);
+      onLaserMove?.({ x: pt.x, y: pt.y });
+      return;
+    }
     if (toolRef.current === "stroke-erase") { eraseAt(pt); return; }
     currentRef.current.push(pt);
     // Restore snapshot (committed strokes) then draw in-progress stroke on top.
@@ -339,6 +357,11 @@ export default function Whiteboard({
     if (!drawingRef.current) return;
     drawingRef.current = false;
     snapshotRef.current = null;
+    if (toolRef.current === "laser") {
+      setLocalLaser(null);
+      onLaserMove?.(null);
+      return;
+    }
     if (toolRef.current === "stroke-erase") { erasedThisDragRef.current = new Set(); return; }
     const points = currentRef.current;
     currentRef.current = [];
@@ -357,6 +380,11 @@ export default function Whiteboard({
 
   finishStrokeRef.current = finishStroke;
 
+  function handlePointerLeave() {
+    finishStroke();
+    onCursorMove?.(null, null);
+  }
+
   // ── Small UI helpers ────────────────────────────────────────────────────────
   const chip = (active: boolean, accent = "#c49a3c"): React.CSSProperties => ({
     padding: "6px 10px", fontSize: "12px", borderRadius: "8px", cursor: "pointer",
@@ -367,7 +395,17 @@ export default function Whiteboard({
   });
 
   const isPen = tool === "pen";
-  const cursor = tool === "stroke-erase" ? "pointer" : "crosshair";
+  const cursor = tool === "stroke-erase" ? "pointer" : tool === "laser" ? "none" : "crosshair";
+  const isCustomColor = !PEN_COLORS.includes(color);
+
+  function handleExport() {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const a = document.createElement("a");
+    a.href = canvas.toDataURL("image/png");
+    a.download = "whiteboard.png";
+    a.click();
+  }
 
   return (
     <div style={{
@@ -375,6 +413,7 @@ export default function Whiteboard({
       background: "rgba(196,154,60,0.03)", marginBottom: "20px", overflow: "hidden",
       touchAction: "none", overscrollBehavior: "none",
     }} data-no-swipe="true">
+      <style>{`@keyframes laserFade{to{opacity:0;transform:translate(-50%,-50%) scale(2.5)}}`}</style>
       {/* Header */}
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: "1px solid rgba(196,154,60,0.12)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
@@ -392,6 +431,7 @@ export default function Whiteboard({
         <button style={chip(tool === "pen")} onClick={() => onToolChange("pen")}>✏️ Pen</button>
         <button style={chip(tool === "stroke-erase")} onClick={() => onToolChange("stroke-erase")} title="Tap a line to delete the whole stroke">🧽 Stroke erase</button>
         <button style={chip(tool === "area-erase")} onClick={() => onToolChange("area-erase")} title="Drag to rub out an area">⭕ Area erase</button>
+        <button style={chip(tool === "laser")} onClick={() => onToolChange("laser")} title="Laser pointer — point without drawing">🔴 Laser</button>
 
         <span style={{ width: "1px", height: "20px", background: "rgba(255,255,255,0.1)", margin: "0 2px" }} />
 
@@ -426,7 +466,12 @@ export default function Whiteboard({
         ))}
 
         <button
-          style={{ ...chip(false), marginLeft: "auto", color: "rgba(255,100,90,0.85)", borderColor: "rgba(255,59,48,0.18)", background: "rgba(255,59,48,0.06)" }}
+          style={{ ...chip(false), marginLeft: "auto", color: "rgba(100,210,120,0.9)", borderColor: "rgba(80,190,100,0.18)", background: "rgba(80,190,100,0.06)" }}
+          onClick={handleExport}
+          title="Save board as PNG"
+        >⬇ Export</button>
+        <button
+          style={{ ...chip(false), color: "rgba(255,100,90,0.85)", borderColor: "rgba(255,59,48,0.18)", background: "rgba(255,59,48,0.06)" }}
           onClick={() => { if (window.confirm("Clear the whiteboard for everyone in the room?")) onClear(); }}
         >
           🗑 Clear
@@ -460,6 +505,22 @@ export default function Whiteboard({
               }}
             />
           ))}
+          {/* Custom color picker */}
+          <label title="Custom color" style={{ position: "relative", width: "20px", height: "20px", cursor: "pointer", flexShrink: 0 }}>
+            <input
+              type="color"
+              value={isCustomColor ? color : "#000000"}
+              onChange={e => onColorChange(e.target.value)}
+              style={{ position: "absolute", inset: 0, opacity: 0, width: "100%", height: "100%", cursor: "pointer" }}
+            />
+            <div style={{
+              width: "20px", height: "20px", borderRadius: "50%",
+              background: "conic-gradient(red, yellow, lime, cyan, blue, magenta, red)",
+              border: isCustomColor ? "2px solid #fff" : "2px solid rgba(255,255,255,0.15)",
+              outline: isCustomColor ? "1px solid rgba(196,154,60,0.6)" : "none",
+              pointerEvents: "none",
+            }} />
+          </label>
         </div>
       )}
 
@@ -476,23 +537,72 @@ export default function Whiteboard({
         </div>
       )}
 
-      {/* Canvas */}
+      {/* Canvas + overlay */}
       <div style={{ padding: "12px 16px", display: "flex", justifyContent: "center" }}>
-        <canvas
-          ref={canvasRef}
-          width={BOARD_W}
-          height={BOARD_H}
-          onPointerDown={onPointerDown}
-          onPointerMove={onPointerMove}
-          onPointerUp={finishStroke}
-          onPointerCancel={finishStroke}
-          onPointerLeave={finishStroke}
-          style={{
-            width: "100%", maxWidth: `${BOARD_W}px`, aspectRatio: `${BOARD_W} / ${BOARD_H}`,
-            background: bg, borderRadius: "10px", border: "1px solid rgba(255,255,255,0.08)",
-            touchAction: "none", cursor, display: "block",
-          }}
-        />
+        <div style={{ position: "relative", width: "100%", maxWidth: `${BOARD_W}px` }}>
+          <canvas
+            ref={canvasRef}
+            width={BOARD_W}
+            height={BOARD_H}
+            onPointerDown={onPointerDown}
+            onPointerMove={onPointerMove}
+            onPointerUp={finishStroke}
+            onPointerCancel={finishStroke}
+            onPointerLeave={handlePointerLeave}
+            style={{
+              width: "100%", aspectRatio: `${BOARD_W} / ${BOARD_H}`,
+              background: bg, borderRadius: "10px", border: "1px solid rgba(255,255,255,0.08)",
+              touchAction: "none", cursor, display: "block",
+            }}
+          />
+          {/* Peer cursors + laser overlay */}
+          <div style={{ position: "absolute", inset: 0, pointerEvents: "none", overflow: "hidden", borderRadius: "10px" }}>
+            {/* Peer live cursors */}
+            {Object.entries(peerCursors ?? {}).map(([uid, cur]) => (
+              <div key={uid} style={{
+                position: "absolute",
+                left: `${(cur.x / BOARD_W) * 100}%`,
+                top: `${(cur.y / BOARD_H) * 100}%`,
+                transform: "translate(2px, 2px)",
+                display: "flex", flexDirection: "column", alignItems: "flex-start", gap: "2px",
+              }}>
+                <svg width="11" height="13" viewBox="0 0 11 13" style={{ display: "block", filter: "drop-shadow(0 1px 1px rgba(0,0,0,0.5))" }}>
+                  <path d="M0 0 L0 11 L3 8 L5.5 12 L7 11 L4.5 7 L8 7 Z" fill={cur.color} />
+                </svg>
+                <span style={{
+                  background: cur.color, color: "#fff", fontSize: "10px", fontWeight: 600,
+                  padding: "1px 5px", borderRadius: "4px", whiteSpace: "nowrap",
+                  maxWidth: "80px", overflow: "hidden", textOverflow: "ellipsis",
+                }}>{cur.name.split(" ")[0]}</span>
+              </div>
+            ))}
+            {/* Peer laser dots */}
+            {Object.entries(laserPositions ?? {}).map(([uid, las]) => (
+              <div key={uid} style={{
+                position: "absolute",
+                left: `${(las.x / BOARD_W) * 100}%`,
+                top: `${(las.y / BOARD_H) * 100}%`,
+                transform: "translate(-50%, -50%)",
+                width: "14px", height: "14px", borderRadius: "50%",
+                background: "rgba(239,68,68,0.9)",
+                boxShadow: "0 0 0 4px rgba(239,68,68,0.3)",
+                animation: las.active ? "none" : "laserFade 1.2s ease-out forwards",
+              }} />
+            ))}
+            {/* Local laser dot */}
+            {tool === "laser" && localLaser && (
+              <div style={{
+                position: "absolute",
+                left: `${(localLaser.x / BOARD_W) * 100}%`,
+                top: `${(localLaser.y / BOARD_H) * 100}%`,
+                transform: "translate(-50%, -50%)",
+                width: "14px", height: "14px", borderRadius: "50%",
+                background: "rgba(239,68,68,0.9)",
+                boxShadow: "0 0 0 4px rgba(239,68,68,0.3)",
+              }} />
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -937,6 +937,13 @@ function AccessSettingsModal({ initial, hasCourse, onSave, onClose }: {
   );
 }
 
+const CURSOR_COLORS = ["#60a5fa","#f472b6","#34d399","#fbbf24","#a78bfa","#fb923c","#22d3ee","#e879f9"];
+function cursorColor(uid: string) {
+  let h = 0;
+  for (let i = 0; i < uid.length; i++) h = (h * 31 + uid.charCodeAt(i)) >>> 0;
+  return CURSOR_COLORS[h % CURSOR_COLORS.length];
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // RoomView — Phase 2A: + Pomodoro, Goal prompt, Session summary
 // ─────────────────────────────────────────────────────────────────────────────
@@ -979,6 +986,9 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [wbEraserSize,       setWbEraserSize]       = useState(ERASER_SIZES[1]);
   const [wbBg,               setWbBg]               = useState(DEFAULT_BG);
   const [liveStrokes,        setLiveStrokes]        = useState<Record<string, { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }>>({});
+  const [peerCursors,        setPeerCursors]        = useState<Record<string, { x: number; y: number; name: string; color: string }>>({});
+  const [laserPositions,     setLaserPositions]     = useState<Record<string, { x: number; y: number; active: boolean }>>({});
+  const lastCursorSentRef = useRef(0);
   // Undo/redo — track strokes drawn by the local user only.
   const wbUndoStack = useRef<Stroke[]>([]);
   const wbRedoStack = useRef<Stroke[]>([]);
@@ -1163,9 +1173,19 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       }
       const collapsed = Array.from(byUser.values());
       setMembers(collapsed);
-      // Remove live strokes for users no longer present.
+      // Remove live strokes / cursors / lasers for users no longer present.
+      const presentIds = new Set(byUser.keys());
       setLiveStrokes(prev => {
-        const presentIds = new Set(byUser.keys());
+        const next = { ...prev };
+        for (const id of Object.keys(next)) if (!presentIds.has(id)) delete next[id];
+        return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+      });
+      setPeerCursors(prev => {
+        const next = { ...prev };
+        for (const id of Object.keys(next)) if (!presentIds.has(id)) delete next[id];
+        return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+      });
+      setLaserPositions(prev => {
         const next = { ...prev };
         for (const id of Object.keys(next)) if (!presentIds.has(id)) delete next[id];
         return Object.keys(next).length === Object.keys(prev).length ? prev : next;
@@ -1204,6 +1224,23 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     .on("broadcast", { event: "wb_live" }, ({ payload }) => {
       if (payload.userId === userId) return;
       setLiveStrokes(prev => ({ ...prev, [payload.userId]: { mode: payload.mode, style: payload.style, color: payload.color, width: payload.width, points: payload.points } }));
+    })
+    // Whiteboard — peer cursor position
+    .on("broadcast", { event: "wb_cursor" }, ({ payload }) => {
+      if (payload.userId === userId) return;
+      if (payload.x === null || payload.x == null) {
+        setPeerCursors(prev => { const n = { ...prev }; delete n[payload.userId]; return n; });
+      } else {
+        setPeerCursors(prev => ({ ...prev, [payload.userId]: { x: payload.x, y: payload.y, name: payload.name ?? "?", color: cursorColor(payload.userId) } }));
+      }
+    })
+    // Whiteboard — peer laser pointer
+    .on("broadcast", { event: "wb_laser" }, ({ payload }) => {
+      if (payload.userId === userId) return;
+      setLaserPositions(prev => ({ ...prev, [payload.userId]: { x: payload.x, y: payload.y, active: payload.active } }));
+      if (!payload.active) {
+        setTimeout(() => setLaserPositions(prev => { const n = { ...prev }; delete n[payload.userId]; return n; }), 1200);
+      }
     })
     .subscribe(async (status) => {
       if (status === "SUBSCRIBED") await ch.track(presencePayload());
@@ -1612,6 +1649,23 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     channelRef.current?.send({ type: "broadcast", event: "wb_live", payload: { userId, ...draft } }).catch(() => {});
   }
 
+  function handleCursorMove(x: number | null, y: number | null) {
+    const now = Date.now();
+    if (now - lastCursorSentRef.current < 50) return; // ~20/s throttle
+    lastCursorSentRef.current = now;
+    channelRef.current?.send({
+      type: "broadcast", event: "wb_cursor",
+      payload: { userId, name: userData?.name ?? "?", x, y },
+    }).catch(() => {});
+  }
+
+  function handleLaserMove(pos: { x: number; y: number } | null) {
+    channelRef.current?.send({
+      type: "broadcast", event: "wb_laser",
+      payload: { userId, x: pos?.x ?? 0, y: pos?.y ?? 0, active: pos !== null },
+    }).catch(() => {});
+  }
+
   function handleClearBoard() {
     const arr = yjsStrokesRef.current;
     if (arr && arr.length > 0) arr.doc?.transact(() => { arr.delete(0, arr.length); });
@@ -1875,6 +1929,10 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           canRedo={canRedo}
           onUndo={handleUndoStroke}
           onRedo={handleRedoStroke}
+          peerCursors={peerCursors}
+          laserPositions={laserPositions}
+          onCursorMove={handleCursorMove}
+          onLaserMove={handleLaserMove}
           onClose={() => setShowBoard(false)}
         />
       )}
