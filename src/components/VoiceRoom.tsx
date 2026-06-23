@@ -39,6 +39,8 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange 
   const isMobile = window.innerWidth < 600;
 
   const [pttActive, setPttActive] = useState(false);
+  const [ncEnabled, setNcEnabled] = useState(true);
+  const ncEnabledRef = useRef(true);
   const callFrameRef = useRef<any>(null);
 
   const dragging   = useRef(false);
@@ -86,6 +88,11 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange 
     if (!url || !iframeRef.current) return;
     const frame = DailyIframe.wrap(iframeRef.current);
     frame.join({ url, startVideoOff: true, startAudioOff: true }).catch(() => {});
+    frame.on("joined-meeting", () => {
+      if (ncEnabledRef.current) {
+        frame.updateInputSettings({ audio: { processor: { type: "noise-cancellation" } } }).catch(() => {});
+      }
+    });
     frame.on("active-speaker-change", (e: any) => {
       const peerId = e?.activeSpeaker?.peerId;
       if (!peerId) { onSpeakingChange?.(null); return; }
@@ -161,6 +168,15 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange 
     dragging.current   = true;
     dragOffset.current = { x: e.clientX - pos.left, y: e.clientY - pos.top };
     e.preventDefault();
+  }
+
+  function toggleNC() {
+    const next = !ncEnabledRef.current;
+    ncEnabledRef.current = next;
+    setNcEnabled(next);
+    callFrameRef.current?.updateInputSettings({
+      audio: { processor: { type: next ? "noise-cancellation" : "none" } },
+    }).catch(() => {});
   }
 
   const ACCENT = "#60a5fa";
@@ -253,6 +269,28 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange 
               }}
             >
               {pttActive ? "🔴 LIVE" : "🎙 Hold to talk"}
+            </button>
+          )}
+          {status === "ready" && (
+            <button
+              onClick={toggleNC}
+              title={ncEnabled ? "Noise cancellation on (click to disable)" : "Noise cancellation off (click to enable)"}
+              style={{
+                background: ncEnabled ? "rgba(74,222,128,0.12)" : "rgba(255,255,255,0.06)",
+                border: `1px solid ${ncEnabled ? "rgba(74,222,128,0.4)" : "rgba(255,255,255,0.12)"}`,
+                borderRadius: "6px",
+                color: ncEnabled ? "#4ade80" : "var(--text-dim)",
+                fontSize: "11px",
+                fontWeight: 600,
+                padding: "2px 8px",
+                cursor: "pointer",
+                userSelect: "none",
+                transition: "all 0.08s",
+                fontFamily: "inherit",
+                lineHeight: "20px",
+              }}
+            >
+              {ncEnabled ? "🎧 NC On" : "🎧 NC Off"}
             </button>
           )}
         </div>
