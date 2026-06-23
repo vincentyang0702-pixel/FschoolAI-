@@ -13,6 +13,7 @@ import { randomUUID } from "crypto";
 const EMBED_MODEL = "text-embedding-3-small"; // 1536 dims — must match the vector() column
 const EMBED_DIM   = 1536;
 const MAX_CONTEXT_CHARS = 6000;               // cap injected passage text per query
+const EMBED_BATCH = 64;                       // chunks embedded per /embed request (bounded so it never times out)
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
@@ -158,7 +159,8 @@ export function chunkText(text) {
 }
 
 // ── Ingest ────────────────────────────────────────────────────────────────────
-async function ingest(body) {
+// Exported so server-side callers (e.g. api/transcribe.ts) can ingest text directly.
+export async function ingest(body) {
   const { userId, courseId = null, title = "Untitled", kind = "text", sourceUrl = null, text, pages } = body ?? {};
   if (!userId) return { status: 400, json: { error: "userId required" } };
 
@@ -195,11 +197,10 @@ async function ingest(body) {
 
   if (!chunkRows.length) return { status: 400, json: { error: "no content to index" } };
 
-  // Embed all chunks, attach vectors.
-  const vectors = await embed(chunkRows.map(c => c.content));
-  chunkRows.forEach((c, i) => { c.embedding = vectors[i]; });
-
-  // Persist: document → sections → chunks (chunks batched to keep payloads sane).
+  // Persist rows WITHOUT embeddings first — fast and never times out. Embeddings get
+  // filled in afterward in bounded batches via action=embed, so a 300-page textbook
+  // can't blow the serverless time limit in one request. Chunks are immediately
+  // keyword-searchable (FTS); vector search activates per chunk as embeddings land.
   const { error: dErr } = await supabase.from("rag_documents").insert({
     id: documentId, user_id: userId, course_id: courseId, title, kind, source_url: sourceUrl,
   });
@@ -216,9 +217,81 @@ async function ingest(body) {
   return { status: 200, json: { ok: true, documentId, sections: sectionRows.length, chunks: chunkRows.length } };
 }
 
+// ── Embed (bounded batch) ─────────────────────────────────────────────────────
+// Embeds the next batch of not-yet-embedded chunks for a document. The client calls
+// this repeatedly until { done: true }, so total embedding work is spread across many
+// short requests instead of one that would time out on a large document.
+export async function embedBatch(body) {
+  const { userId, documentId, batchSize = EMBED_BATCH } = body ?? {};
+  if (!userId || !documentId) return { status: 400, json: { error: "userId and documentId required" } };
+  const limit = Math.min(Math.max(Number(batchSize) || EMBED_BATCH, 1), 128);
+
+  // Pull the next slice of un-embedded chunks (full rows so we can upsert them back).
+  const { data: pending, error: pErr } = await supabase
+    .from("rag_chunks")
+    .select("id, section_id, document_id, user_id, course_id, content")
+    .eq("user_id", userId)
+    .eq("document_id", documentId)
+    .is("embedding", null)
+    .limit(limit);
+  if (pErr) return { status: 500, json: { error: `fetch pending: ${pErr.message}` } };
+  if (!pending?.length) return { status: 200, json: { embedded: 0, done: true } };
+
+  const vectors = await embed(pending.map(c => c.content));
+  const rows = pending.map((c, i) => ({ ...c, embedding: vectors[i] }));
+
+  // One bulk upsert (vs N concurrent updates) — onConflict id updates the embedding.
+  const { error: uErr } = await supabase.from("rag_chunks").upsert(rows, { onConflict: "id" });
+  if (uErr) return { status: 500, json: { error: `embed upsert: ${uErr.message}` } };
+
+  // Fewer than a full batch means we've drained the queue.
+  return { status: 200, json: { embedded: pending.length, done: pending.length < limit } };
+}
+
+// ── Reranking ─────────────────────────────────────────────────────────────────
+// Hybrid search (RRF) is recall-oriented; a cross-encoder-style rerank by actual
+// query↔passage relevance lifts precision so the tutor grounds on the BEST chunks. We use
+// a fast LLM (gpt-4o-mini, listwise) and fall back to the RRF order on any failure, so
+// reranking can never break retrieval.
+
+/** Reorder `hits` by the reranker's index order: dedups, drops invalid, appends any omitted. Pure. */
+export function applyRerankOrder(hits, order) {
+  const seen = new Set();
+  const out = [];
+  for (const i of Array.isArray(order) ? order : []) {
+    if (Number.isInteger(i) && i >= 0 && i < hits.length && !seen.has(i)) { seen.add(i); out.push(hits[i]); }
+  }
+  hits.forEach((h, i) => { if (!seen.has(i)) out.push(h); }); // keep anything the reranker omitted
+  return out;
+}
+
+async function rerankHits(q, hits) {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key || hits.length <= 1) return hits;
+  try {
+    const list = hits.map((h, i) => `[${i}] ${String(h.content || "").replace(/\s+/g, " ").slice(0, 600)}`).join("\n\n");
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model: "gpt-4o-mini", temperature: 0, max_tokens: 200,
+        response_format: { type: "json_object" },
+        messages: [{ role: "user", content:
+          `Rank these passages by how well each helps answer the question.\n` +
+          `Question: "${String(q)}"\n\nPassages:\n${list}\n\n` +
+          `Respond ONLY as JSON: {"order": [passage indices, most relevant first; omit clearly irrelevant ones]}.` }],
+      }),
+    });
+    if (!res.ok) return hits;
+    const json = await res.json();
+    const order = JSON.parse(json.choices?.[0]?.message?.content || "{}").order;
+    return applyRerankOrder(hits, order);
+  } catch { return hits; } // never break retrieval
+}
+
 // ── Query ───────────────────────────────────────────────────────────────────
 async function query(body) {
-  const { userId, courseId = null, query: q, maxSections = 4 } = body ?? {};
+  const { userId, courseId = null, query: q, maxSections = 4, rerank = true } = body ?? {};
   if (!userId) return { status: 400, json: { error: "userId required" } };
   if (!q || !String(q).trim()) return { status: 400, json: { error: "query required" } };
 
@@ -234,10 +307,14 @@ async function query(body) {
   if (error) return { status: 500, json: { error: `search: ${error.message}` } };
   if (!hits?.length) return { status: 200, json: { passages: [], used: 0 } };
 
+  // Rerank candidate chunks by query relevance (precision boost over RRF) before choosing
+  // which parent sections to inject. Falls back to the RRF order on any failure.
+  const ranked = rerank ? await rerankHits(q, hits) : hits;
+
   // Map winning chunks to their parent sections, best section first, deduped.
   const sectionOrder = [];
   const seen = new Set();
-  for (const h of hits) {
+  for (const h of ranked) {
     if (h.section_id && !seen.has(h.section_id)) { seen.add(h.section_id); sectionOrder.push(h.section_id); }
     if (sectionOrder.length >= maxSections) break;
   }
@@ -290,8 +367,9 @@ export default async function handler(req, res) {
   const action = req.query?.action;
   try {
     const result = action === "ingest" ? await ingest(req.body)
+                 : action === "embed"  ? await embedBatch(req.body)
                  : action === "query"  ? await query(req.body)
-                 : { status: 400, json: { error: "Unknown action. Use ?action=ingest or ?action=query" } };
+                 : { status: 400, json: { error: "Unknown action. Use ?action=ingest|embed|query" } };
     return res.status(result.status).json(result.json);
   } catch (err) {
     console.error("[rag] error:", err?.message ?? err);

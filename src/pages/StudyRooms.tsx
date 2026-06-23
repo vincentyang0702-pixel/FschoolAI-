@@ -3,11 +3,112 @@
 // RoomView receive counts as props. Keeps room core + friends layer modular.
 
 import { useState, useEffect, useRef, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { useApp } from "../context/AppContext";
 import { supabase } from "../api/supabase";
 import { awardTokens } from "../api/tokens";
 import { sendNudge } from "../api/nudge";
+import {
+  listAccessibleRooms, joinRoom, respondRoomRequest,
+  inviteToRoom, leaveRoom, setRoomAccess,
+} from "../api/rooms";
+import type { AccessFilters } from "../api/rooms";
+import { loadRecentMessages, postRoomMessage } from "../api/chat";
+import type { ChatMessage } from "../api/chat";
+import type { Stroke, Point, PenStyle } from "../api/whiteboard";
+import * as Y from "yjs";
+import { SupabaseBroadcastProvider } from "../lib/yjsSupabaseProvider";
+import Whiteboard, { PEN_COLORS, PEN_WIDTHS, ERASER_SIZES, DEFAULT_BG } from "../components/Whiteboard";
+import type { Tool } from "../components/Whiteboard";
 import StudyOrb from "../components/StudyOrb";
+import VoiceRoom from "../components/VoiceRoom";
+
+// ── Access filters ────────────────────────────────────────────────────────────
+// Which eligibility rules an owner can put on a room. Server enforces these via
+// the join_room / list_accessible_rooms RPCs; this is just the UI vocabulary.
+const ACCESS_OPTIONS: { key: keyof AccessFilters; icon: string; label: string; desc: string; needsCourse?: boolean }[] = [
+  { key: "university", icon: "🏫", label: "Same university",   desc: "Only students at your school" },
+  { key: "friends",    icon: "👥", label: "Friends only",       desc: "Only your friends" },
+  { key: "fof",        icon: "🔗", label: "Friends of friends", desc: "Friends and their friends" },
+  { key: "course",     icon: "📚", label: "Course-mates",       desc: "Students taking the linked course", needsCourse: true },
+];
+
+function activeFilterKeys(filters?: AccessFilters | null): (keyof AccessFilters)[] {
+  if (!filters) return [];
+  return ACCESS_OPTIONS.map(o => o.key).filter(k => filters[k]);
+}
+
+// Compact badge row describing the active filters on a room.
+function FilterBadges({ filters, small = false }: { filters?: AccessFilters | null; small?: boolean }) {
+  const keys = activeFilterKeys(filters);
+  if (!keys.length) return null;
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+      {keys.map(k => {
+        const meta = ACCESS_OPTIONS.find(o => o.key === k)!;
+        return (
+          <span key={k} style={{
+            display: "inline-flex", alignItems: "center", gap: "4px",
+            fontSize: small ? "10px" : "11px", fontWeight: 600,
+            padding: small ? "2px 7px" : "3px 9px", borderRadius: "6px",
+            background: "rgba(196,154,60,0.08)", color: "var(--color-accent)",
+            border: "1px solid rgba(196,154,60,0.18)", whiteSpace: "nowrap",
+          }}>
+            {meta.icon} {meta.label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+// Toggle grid reused by CreateRoomModal + the in-room access settings.
+function AccessToggles({ value, onChange, hasCourse }: {
+  value: AccessFilters; onChange: (next: AccessFilters) => void; hasCourse: boolean;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+      {ACCESS_OPTIONS.map(opt => {
+        const disabled = opt.needsCourse && !hasCourse;
+        const on = !!value[opt.key] && !disabled;
+        return (
+          <button
+            key={opt.key}
+            type="button"
+            disabled={disabled}
+            onClick={() => onChange({ ...value, [opt.key]: !on })}
+            style={{
+              display: "flex", alignItems: "center", gap: "10px", textAlign: "left",
+              padding: "10px 12px", borderRadius: "10px", cursor: disabled ? "not-allowed" : "pointer",
+              fontFamily: "inherit", width: "100%",
+              background: on ? "rgba(196,154,60,0.12)" : "rgba(255,255,255,0.03)",
+              border: `1px solid ${on ? "rgba(196,154,60,0.3)" : "rgba(255,255,255,0.08)"}`,
+              opacity: disabled ? 0.4 : 1, transition: "all 0.15s",
+            }}
+          >
+            <span style={{ fontSize: "17px", flexShrink: 0 }}>{opt.icon}</span>
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span style={{ display: "block", fontSize: "13px", fontWeight: 600, color: on ? "var(--color-accent)" : "var(--text-primary)" }}>
+                {opt.label}
+              </span>
+              <span style={{ display: "block", fontSize: "11px", color: "var(--text-dim)", marginTop: "1px" }}>
+                {disabled ? "Link a course first" : opt.desc}
+              </span>
+            </span>
+            <span style={{
+              width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
+              border: `1.5px solid ${on ? "var(--color-accent)" : "rgba(255,255,255,0.2)"}`,
+              background: on ? "var(--color-accent)" : "transparent",
+              display: "flex", alignItems: "center", justifyContent: "center",
+            }}>
+              {on && <span style={{ color: "#111", fontSize: "11px", fontWeight: 700, lineHeight: 1 }}>✓</span>}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
 // ── Room code generator ───────────────────────────────────────────────────────
 // Unambiguous chars (no 0/O, 1/I/L). 6 chars = 32^6 = ~1B combinations.
@@ -176,6 +277,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
   const [pendingReqs,  setPendingReqs]  = useState({});
   const [codeInput,    setCodeInput]    = useState("");
   const [codeError,    setCodeError]    = useState("");
+  const [joinError,    setJoinError]    = useState("");
   const [codeLookingUp, setCodeLookingUp] = useState(false);
   const [activeFilter, setActiveFilter] = useState("all");
   const [friends,      setFriends]      = useState([]);
@@ -218,24 +320,36 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
 
   async function nudgeFriend(friend) {
     setNudged(n => ({ ...n, [friend.id]: "sending" }));
+    // A friend is "online" if they have an active presence entry in the global-studying
+    // channel — regardless of whether they're in a room or just in the lobby.
+    // This prevents sending an email when the friend is right there in the app.
+    const recipientOnline = Object.prototype.hasOwnProperty.call(globalState, friend.id);
     const result = await sendNudge({
       fromUserId: userId, toUserId: friend.id, roomId: null,
-      fromName: userData?.name ?? "Someone", roomName: null, recipientOnline: false,
+      fromName: userData?.name ?? "Someone", roomName: null, recipientOnline,
     });
     setNudged(n => ({ ...n, [friend.id]: result?.sent === false && result.reason === "rate_limited" ? "limited" : "sent" }));
   }
 
   async function fetchRooms() {
     setLoading(true);
-    const { data } = await supabase
-      .from("study_rooms")
-      .select("id, name, room_type, created_by, last_active, course_id")
-      .eq("is_active", true)
-      .order("last_active", { ascending: false })
-      .limit(30);
-    setRooms(data || []);
+    try {
+      // Server-filtered: only rooms this user is eligible to see.
+      const data = await listAccessibleRooms(userId);
+      setRooms(data || []);
+    } catch (err) {
+      console.error("[rooms] list:", (err as any)?.message);
+      setRooms([]);
+    }
     setLoading(false);
   }
+
+  // Auto-clear the "not eligible" banner.
+  useEffect(() => {
+    if (!joinError) return;
+    const t = setTimeout(() => setJoinError(""), 4000);
+    return () => clearTimeout(t);
+  }, [joinError]);
 
   async function fetchPendingRequests() {
     const { data } = await supabase
@@ -252,13 +366,10 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
     const ch = supabase.channel("lobby-watch-" + userId);
     ch.on("postgres_changes", {
       event: "INSERT", schema: "public", table: "study_rooms",
-    }, (payload) => {
-      if (payload.new?.is_active) {
-        setRooms(prev => {
-          if (prev.some(r => r.id === payload.new.id)) return prev;
-          return [payload.new, ...prev];
-        });
-      }
+    }, () => {
+      // A new room appeared — refetch through the access RPC so we never show a
+      // room this user isn't eligible for (can't tell from the raw row alone).
+      fetchRooms();
     });
     ch.on("postgres_changes", {
       event: "UPDATE", schema: "public", table: "room_members",
@@ -277,18 +388,23 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
     lobbyChannelRef.current = ch;
   }
 
-  async function handleCreate({ name, courseId, roomType }) {
+  async function handleCreate({ name, courseId, roomType, accessFilters }) {
+    // Course-mates filter is meaningless without a linked course — drop it.
+    const filters = { ...(accessFilters ?? {}) };
+    if (!courseId) delete filters.course;
+
     let room = null;
     for (let attempt = 0; attempt < 5; attempt++) {
       const join_code = generateRoomCode();
       const { data, error } = await supabase
         .from("study_rooms")
         .insert({
-          created_by: userId,
-          name:       name.trim(),
-          course_id:  courseId ? Number(courseId) : null,
-          room_type:  roomType,
+          created_by:     userId,
+          name:           name.trim(),
+          course_id:      courseId ? Number(courseId) : null,
+          room_type:      roomType,
           join_code,
+          access_filters: filters,
         })
         .select()
         .single();
@@ -298,10 +414,15 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
       }
     }
     if (!room) { console.error("[rooms] create: failed to generate unique code"); return; }
-    await supabase.from("room_members").upsert(
-      { room_id: room.id, user_id: userId, role: "host", status: "joined" },
-      { onConflict: "room_id,user_id" }
-    );
+    // Host membership is written by the RPC (direct room_members writes are revoked).
+    try {
+      await joinRoom(userId, room.id);
+    } catch (err) {
+      console.error("[rooms] host join:", (err as any)?.message);
+      // Room row exists but host couldn't join — mark inactive so it doesn't linger as an ownerless room.
+      await supabase.from("study_rooms").update({ is_active: false }).eq("id", room.id);
+      return;
+    }
     setShowCreate(false);
     onJoin(room);
   }
@@ -312,37 +433,35 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
       onJoin(room); return;
     }
     setJoiningId(room.id);
-    const isHost = room.created_by === userId;
-    if (room.room_type === "invite" && !isHost) {
-      const { error } = await supabase.from("room_members").upsert(
-        { room_id: room.id, user_id: userId, role: "member", status: "requested" },
-        { onConflict: "room_id,user_id" }
-      );
-      if (!error) {
+    setJoinError("");
+    try {
+      const status = await joinRoom(userId, room.id);
+      if (status === "joined") { setJoiningId(null); onJoin(room); return; }
+      if (status === "requested") {
         setPendingReqs(p => ({ ...p, [room.id]: "requested" }));
+        // Ping the host so they see the request promptly.
         supabase.from("nudges").insert({
           from_user_id: userId, to_user_id: room.created_by,
           room_id: room.id, kind: "nudge",
         }).then(() => {});
+        setJoiningId(null);
+        return;
+      }
+      if (status === "denied") {
+        setJoinError("You're not eligible to join this room.");
+        setRooms(prev => prev.filter(r => r.id !== room.id)); // hide what we can't access
       }
       setJoiningId(null);
-      return;
+    } catch (err) {
+      console.error("[rooms] join:", (err as any)?.message);
+      setJoiningId(null);
     }
-    const { error } = await supabase.from("room_members").upsert(
-      { room_id: room.id, user_id: userId,
-        role: isHost ? "host" : "member", status: "joined" },
-      { onConflict: "room_id,user_id" }
-    );
-    setJoiningId(null);
-    if (!error) onJoin(room);
   }
 
   async function acceptInvite(invite) {
     onDismissInvite?.(invite.id);
-    await supabase.from("room_members").upsert(
-      { room_id: invite.room_id, user_id: userId, role: "member", status: "joined" },
-      { onConflict: "room_id,user_id" }
-    );
+    // An 'invited' row already exists → join_room flips it to joined.
+    try { await joinRoom(userId, invite.room_id); } catch (err) { console.error("[rooms] accept invite:", (err as any)?.message); }
     const { data: room } = await supabase
       .from("study_rooms").select().eq("id", invite.room_id).single();
     if (room) onJoin(room);
@@ -361,12 +480,15 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
       .maybeSingle();
     setCodeLookingUp(false);
     if (!room) { setCodeError("No active room found with that code."); return; }
-    await supabase.from("room_members").upsert(
-      { room_id: room.id, user_id: userId, role: "member", status: "joined" },
-      { onConflict: "room_id,user_id" }
-    );
-    setCodeInput("");
-    onJoin(room);
+    // A valid code bypasses room type + access filters (server-side).
+    try {
+      const status = await joinRoom(userId, room.id, code);
+      if (status === "joined") { setCodeInput(""); onJoin(room); }
+      else { setCodeError("Couldn't join this room."); }
+    } catch (err) {
+      console.error("[rooms] join by code:", (err as any)?.message);
+      setCodeError("Couldn't join this room.");
+    }
   }
 
   const S = styles;
@@ -415,36 +537,49 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
       </div>
 
       {/* ── Join with code ─────────────────────────────────────── */}
-      <div style={{
-        display:"flex", gap:"8px", alignItems:"center", marginBottom:"6px",
-        background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.07)",
-        borderRadius:"12px", padding:"9px 12px", transition:"border-color 0.15s",
-      }}
-        onFocusCapture={e => ((e.currentTarget as HTMLDivElement).style.borderColor = "rgba(196,154,60,0.25)")}
-        onBlurCapture={e  => ((e.currentTarget as HTMLDivElement).style.borderColor = "rgba(255,255,255,0.07)")}
-      >
-        <input
-          value={codeInput}
-          onChange={e => { setCodeInput(e.target.value.toUpperCase().slice(0, 6)); setCodeError(""); }}
-          onKeyDown={e => e.key === "Enter" && handleJoinByCode()}
-          placeholder="Enter room code…"
-          maxLength={6}
-          style={{
-            flex:1, background:"transparent", border:"none",
-            color:"var(--text-primary)", fontSize:"13px",
-            outline:"none", fontFamily:"monospace", letterSpacing:"3px",
-          }}
-        />
-        <button
-          onClick={handleJoinByCode}
-          disabled={codeInput.length < 6 || codeLookingUp}
-          style={{ ...S.accentBtn, padding:"6px 14px", fontSize:"12px", opacity: codeInput.length < 6 ? 0.35 : 1, flexShrink:0 }}
+      <div style={{ marginBottom:"6px" }}>
+        <p style={{ fontSize:"11px", color:"var(--text-dim)", letterSpacing:"1.5px", textTransform:"uppercase", marginBottom:"8px" }}>Have a room code?</p>
+        <div style={{
+          display:"flex", gap:"10px", alignItems:"center",
+          background:"rgba(196,154,60,0.04)", border:"1px solid rgba(196,154,60,0.18)",
+          borderRadius:"14px", padding:"12px 16px", transition:"border-color 0.15s, box-shadow 0.15s",
+        }}
+          onFocusCapture={e => { (e.currentTarget as HTMLDivElement).style.borderColor = "rgba(196,154,60,0.45)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "0 0 0 3px rgba(196,154,60,0.08)"; }}
+          onBlurCapture={e  => { (e.currentTarget as HTMLDivElement).style.borderColor = "rgba(196,154,60,0.18)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}
         >
-          {codeLookingUp ? "…" : "Join →"}
-        </button>
+          <span style={{ fontSize:"18px", flexShrink:0 }}>🔑</span>
+          <input
+            value={codeInput}
+            onChange={e => { setCodeInput(e.target.value.toUpperCase().slice(0, 6)); setCodeError(""); }}
+            onKeyDown={e => e.key === "Enter" && handleJoinByCode()}
+            placeholder="A3B2C1"
+            maxLength={6}
+            style={{
+              flex:1, minWidth:0, background:"transparent", border:"none",
+              color:"var(--text-primary)", fontSize:"18px",
+              outline:"none", fontFamily:"monospace", letterSpacing:"6px", fontWeight:"700",
+            }}
+          />
+          <button
+            onClick={handleJoinByCode}
+            disabled={codeInput.length < 6 || codeLookingUp}
+            style={{ ...S.primaryBtn, padding:"9px 14px", fontSize:"13px", opacity: codeInput.length < 6 ? 0.4 : 1, flexShrink:0 }}
+          >
+            {codeLookingUp ? "…" : "Join Room"}
+          </button>
+        </div>
       </div>
       {codeError && (
         <p style={{ fontSize:"12px", color:"rgba(255,100,90,0.8)", marginBottom:"10px", paddingLeft:"4px" }}>{codeError}</p>
+      )}
+      {joinError && (
+        <div style={{
+          background:"rgba(255,59,48,0.07)", border:"1px solid rgba(255,59,48,0.2)",
+          borderRadius:"12px", padding:"11px 16px", margin:"4px 0 10px",
+          fontSize:"13px", color:"rgba(255,120,110,0.95)",
+        }}>
+          🔒 {joinError}
+        </div>
       )}
 
       {/* ── Pending invites ────────────────────────────────────── */}
@@ -478,6 +613,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
                 <span style={{ width:8, height:8, borderRadius:"50%", background:"var(--color-accent)", flexShrink:0 }} />
                 <div style={{ flex:1, minWidth:0 }}>
                   <p style={{ fontSize:"13px", fontWeight:"500", color:"var(--text-primary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.name}</p>
+                  {f.email && <p style={{ fontSize:"11px", color:"var(--text-dim)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.email}</p>}
                   <p style={{ fontSize:"11px", color:"var(--color-accent)" }}>studying now</p>
                 </div>
                 <button onClick={() => joinFriendRoom(friendRoomMap[f.id])} style={{ ...S.accentBtn, padding:"6px 14px", fontSize:"12px" }}>Join</button>
@@ -485,17 +621,23 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
             ))}
             {offlineFriends.map(f => {
               const st = nudged[f.id];
+              const nudgedDone = st === "sent";
               return (
                 <div key={f.id} style={{ display:"flex", alignItems:"center", gap:"10px", background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"12px", padding:"10px 14px" }}>
                   <span style={{ width:8, height:8, borderRadius:"50%", background:"rgba(255,255,255,0.15)", flexShrink:0 }} />
                   <div style={{ flex:1, minWidth:0 }}>
                     <p style={{ fontSize:"13px", fontWeight:"500", color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.name}</p>
+                    {f.email && <p style={{ fontSize:"11px", color:"var(--text-dim)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.email}</p>}
                     <p style={{ fontSize:"11px", color:"var(--text-dim)" }}>offline</p>
                   </div>
                   <button
                     onClick={() => { if (!st) nudgeFriend(f); }}
                     disabled={!!st}
-                    style={{ ...S.ghostBtn, marginTop:0, padding:"6px 12px", fontSize:"12px", opacity: st ? 0.5 : 1, cursor: st ? "default" : "pointer" }}
+                    style={{
+                      ...S.ghostBtn, marginTop:0, padding:"6px 12px", fontSize:"12px",
+                      cursor: st ? "default" : "pointer",
+                      ...(nudgedDone ? { background:"rgba(74,222,128,0.1)", border:"1px solid rgba(74,222,128,0.3)", color:"#4ade80", opacity:1 } : { opacity: st ? 0.5 : 1 }),
+                    }}
                   >
                     {st === "sent" ? "Nudged ✓" : st === "limited" ? "Limit reached" : st === "sending" ? "…" : "Nudge"}
                   </button>
@@ -637,6 +779,13 @@ function RoomCard({ room, liveCount, joining, pendingStatus, courseLabel, onJoin
         </p>
       )}
 
+      {/* Access filter badges */}
+      {activeFilterKeys(room.access_filters).length > 0 && (
+        <div style={{ marginBottom: "12px" }}>
+          <FilterBadges filters={room.access_filters} small />
+        </div>
+      )}
+
       {/* Divider */}
       <div style={{ height: "1px", background: "rgba(255,255,255,0.05)", margin: courseLabel ? "0 0 12px" : "8px 0 12px" }} />
 
@@ -679,13 +828,14 @@ function CreateRoomModal({ courses, onCreate, onClose }) {
   const [name,     setName]     = useState("");
   const [courseId, setCourseId] = useState("");
   const [roomType, setRoomType] = useState("public");
+  const [accessFilters, setAccessFilters] = useState<AccessFilters>({});
   const [saving,   setSaving]   = useState(false);
   const S = styles;
 
   async function handleSubmit() {
     if (!name.trim() || saving) return;
     setSaving(true);
-    await onCreate({ name, courseId, roomType });
+    await onCreate({ name, courseId, roomType, accessFilters });
     setSaving(false);
   }
 
@@ -727,6 +877,20 @@ function CreateRoomModal({ courses, onCreate, onClose }) {
             </button>
           ))}
         </div>
+
+        {/* Who can join — access filters (combined with OR) */}
+        <label style={S.fieldLabel}>Who can join</label>
+        <p style={{ fontSize:"11px", color:"var(--text-dim)", margin:"4px 0 10px" }}>
+          Leave all off for anyone. Pick one or more — a student who matches <b>any</b> of them can join.
+        </p>
+        <div style={{ marginBottom:"22px" }}>
+          <AccessToggles
+            value={accessFilters}
+            onChange={setAccessFilters}
+            hasCourse={!!courseId}
+          />
+        </div>
+
         <div style={{ display:"flex", gap:"10px" }}>
           <button onClick={onClose} style={S.ghostBtnLarge}>Cancel</button>
           <button
@@ -743,6 +907,37 @@ function CreateRoomModal({ courses, onCreate, onClose }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// AccessSettingsModal — owner edits who can join an existing room
+// ─────────────────────────────────────────────────────────────────────────────
+function AccessSettingsModal({ initial, hasCourse, onSave, onClose }: {
+  initial: AccessFilters; hasCourse: boolean;
+  onSave: (f: AccessFilters) => void; onClose: () => void;
+}) {
+  const [filters, setFilters] = useState<AccessFilters>(initial || {});
+  const S = styles;
+  return (
+    <div style={S.modalOverlay}>
+      <div style={{ ...S.modalCard, maxWidth:"380px" }}>
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"6px" }}>
+          <h2 style={{ fontSize:"18px", fontWeight:"700", color:"var(--text-primary)" }}>Who can join</h2>
+          <button onClick={onClose} style={{ background:"none", border:"none", color:"var(--text-dim)", fontSize:"18px", cursor:"pointer", padding:"0 4px" }}>×</button>
+        </div>
+        <p style={{ fontSize:"12px", color:"var(--text-dim)", margin:"0 0 16px", lineHeight:1.5 }}>
+          Leave all off for anyone. Pick one or more — a student who matches <b>any</b> of them can join. Already-joined members stay.
+        </p>
+        <div style={{ marginBottom:"22px" }}>
+          <AccessToggles value={filters} onChange={setFilters} hasCourse={hasCourse} />
+        </div>
+        <div style={{ display:"flex", gap:"10px" }}>
+          <button onClick={onClose} style={S.ghostBtnLarge}>Cancel</button>
+          <button onClick={() => onSave(filters)} style={S.primaryBtnLarge}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // RoomView — Phase 2A: + Pomodoro, Goal prompt, Session summary
 // ─────────────────────────────────────────────────────────────────────────────
 function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
@@ -751,6 +946,8 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [workingOn,          setWorkingOn]          = useState("");
   const [requests,           setRequests]           = useState([]);
   const [showInvite,         setShowInvite]         = useState(false);
+  const [showAccess,         setShowAccess]         = useState(false);
+  const [accessFilters,      setAccessFilters]      = useState<AccessFilters>(room.access_filters || {});
   const [tick,               setTick]               = useState(0);
   const [pomo,               setPomo]               = useState(null);
   const [showGoalPrompt,     setShowGoalPrompt]     = useState(false);
@@ -761,9 +958,36 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [buddyQAs,           setBuddyQAs]           = useState([]);
   const [buddyStreaming,     setBuddyStreaming]     = useState(false);
   const [courseName,         setCourseName]         = useState("");
+  // Voice chat (Daily.co placeholder)
+  const [showVoice,          setShowVoice]          = useState(false);
+  // Room header overflow menu (admin actions)
+  const [showRoomMenu,       setShowRoomMenu]       = useState(false);
+  const roomMenuRef = useRef<HTMLDivElement>(null);
+  // Phase 2 — Chat
+  const [showChat,           setShowChat]           = useState(false);
+  const [chatMessages,       setChatMessages]       = useState<ChatMessage[]>([]);
+  const [chatInput,          setChatInput]          = useState("");
+  const [chatSending,        setChatSending]        = useState(false);
+  const chatLoadedRef = useRef(false);
+  // Phase 3 — Whiteboard
+  const [showBoard,          setShowBoard]          = useState(false);
+  const [strokes,            setStrokes]            = useState<Stroke[]>([]);
+  const [wbTool,             setWbTool]             = useState<Tool>("pen");
+  const [wbStyle,            setWbStyle]            = useState<PenStyle>("normal");
+  const [wbColor,            setWbColor]            = useState(PEN_COLORS[2]);
+  const [wbPenWidth,         setWbPenWidth]         = useState(PEN_WIDTHS[1]);
+  const [wbEraserSize,       setWbEraserSize]       = useState(ERASER_SIZES[1]);
+  const [wbBg,               setWbBg]               = useState(DEFAULT_BG);
+  const [liveStrokes,        setLiveStrokes]        = useState<Record<string, { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }>>({});
+  const lastLiveSentRef = useRef(0);
+  const yjsDocRef       = useRef<Y.Doc | null>(null);
+  const yjsProviderRef  = useRef<SupabaseBroadcastProvider | null>(null);
+  const yjsStrokesRef   = useRef<Y.Array<any> | null>(null);
+  const yjsMetaRef      = useRef<Y.Map<any> | null>(null);
 
   const channelRef          = useRef(null);
   const reqChRef            = useRef(null);
+  const wbChRef             = useRef(null);
   const sessionIdRef        = useRef(null);
   const joinedAtRef         = useRef(Date.now());
   const workingOnRef        = useRef("");
@@ -777,6 +1001,18 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
 
   const isHost = room.created_by === userId;
 
+  // Close the ⋯ room menu when clicking outside
+  useEffect(() => {
+    if (!showRoomMenu) return;
+    function handleClick(e: MouseEvent) {
+      if (roomMenuRef.current && !roomMenuRef.current.contains(e.target as Node)) {
+        setShowRoomMenu(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [showRoomMenu]);
+
   // Main setup
   useEffect(() => {
     startSession();
@@ -784,6 +1020,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     fetchPomodoroState();
     fetchCourseName();
     if (isHost) subscribeRequests();
+    wbChRef.current = subscribeWhiteboard();
     const timer = setInterval(() => setTick(n => n + 1), 1000);
     const handleUnload = () => void endSession();
     window.addEventListener("beforeunload", handleUnload);
@@ -793,6 +1030,9 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       window.removeEventListener("beforeunload", handleUnload);
       // Abort any in-flight buddy stream on unmount
       buddyAbortRef.current?.abort();
+      yjsProviderRef.current?.destroy();
+      yjsDocRef.current?.destroy();
+      try { wbChRef.current?.unsubscribe(); } catch {}
       endSession();
     };
   }, []); // eslint-disable-line
@@ -903,13 +1143,37 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       config: { presence: { key: userId } },
     });
     ch.on("presence", { event: "sync" }, () => {
-      setMembers(Object.values(ch.presenceState()).flat());
+      const all = Object.values(ch.presenceState()).flat();
+      // Collapse duplicate presences for the same user (a stale "ghost" presence
+      // can linger under the same key after a re-track). Prefer the entry that has
+      // a goal set; otherwise the most recently joined one.
+      const byUser = new Map();
+      for (const m of all as any[]) {
+        const prev = byUser.get(m.userId);
+        if (!prev) { byUser.set(m.userId, m); continue; }
+        const better = (!!m.workingOn !== !!prev.workingOn)
+          ? !!m.workingOn
+          : (m.joinedAt ?? 0) >= (prev.joinedAt ?? 0);
+        if (better) byUser.set(m.userId, m);
+      }
+      const collapsed = Array.from(byUser.values());
+      setMembers(collapsed);
+      // Remove live strokes for users no longer present.
+      setLiveStrokes(prev => {
+        const presentIds = new Set(byUser.keys());
+        const next = { ...prev };
+        for (const id of Object.keys(next)) if (!presentIds.has(id)) delete next[id];
+        return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+      });
     })
     .on("broadcast", { event: "room_closed" }, () => {
       if (!leftRef.current) endSession().then(() => onLeave());
     })
     .on("broadcast", { event: "pomodoro" }, ({ payload }) => {
       setPomo(payload);
+    })
+    .on("broadcast", { event: "access_changed" }, ({ payload }) => {
+      setAccessFilters(payload?.filters || {});
     })
     // AI Buddy — shared Q&A events
     .on("broadcast", { event: "buddy_question" }, ({ payload }) => {
@@ -924,6 +1188,17 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     })
     .on("broadcast", { event: "buddy_done" }, ({ payload }) => {
       setBuddyQAs(prev => prev.map(qa => qa.id === payload.qaId ? { ...qa, answer: payload.text, done: true, streaming: false } : qa));
+    })
+    .on("broadcast", { event: "chat_message" }, ({ payload }) => {
+      setChatMessages(prev => {
+        if (prev.some(m => m.id === payload.id)) return prev;
+        return [...prev, payload as ChatMessage];
+      });
+    })
+    // Whiteboard — a peer is actively drawing (live preview)
+    .on("broadcast", { event: "wb_live" }, ({ payload }) => {
+      if (payload.userId === userId) return;
+      setLiveStrokes(prev => ({ ...prev, [payload.userId]: { mode: payload.mode, style: payload.style, color: payload.color, width: payload.width, points: payload.points } }));
     })
     .subscribe(async (status) => {
       if (status === "SUBSCRIBED") await ch.track(presencePayload());
@@ -950,6 +1225,54 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     reqChRef.current = ch;
   }
 
+  function subscribeWhiteboard() {
+    const ch = supabase.channel("wb-" + room.id);
+
+    const doc = new Y.Doc();
+    const yStrokes = doc.getArray<any>("strokes");
+    const yMeta    = doc.getMap<any>("meta");
+
+    yjsDocRef.current      = doc;
+    yjsStrokesRef.current  = yStrokes;
+    yjsMetaRef.current     = yMeta;
+
+    // When the strokes array changes, update React state and clear the live
+    // preview for any peer whose stroke just committed.
+    let prevLength = 0;
+    yStrokes.observe(() => {
+      const arr = yStrokes.toArray() as Stroke[];
+      setStrokes(arr);
+      if (arr.length > prevLength) {
+        const added = arr.slice(prevLength);
+        setLiveStrokes(prev => {
+          const next = { ...prev };
+          added.forEach((s: any) => { if (s.user_id && s.user_id !== userId) delete next[s.user_id]; });
+          return next;
+        });
+      }
+      prevLength = arr.length;
+    });
+
+    // Background colour is stored in the Yjs meta map so it syncs like strokes.
+    yMeta.observe(() => {
+      const bg = yMeta.get("bg");
+      if (bg) setWbBg(bg as string);
+    });
+
+    const provider = new SupabaseBroadcastProvider(doc, ch, room.id);
+    yjsProviderRef.current = provider;
+
+    ch.subscribe(async (status) => {
+      if (status === "SUBSCRIBED") {
+        // Seed from persisted DB state, then ask live peers for any newer updates.
+        await provider.loadPersistedState();
+        provider.requestSync();
+      }
+    });
+
+    return ch;
+  }
+
   async function enrichRequests(rows) {
     const ids = rows.map(r => r.user_id);
     const { data: users } = await supabase.from("users").select("id, name").in("id", ids);
@@ -965,15 +1288,14 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   }
 
   async function acceptRequest(requesterId) {
-    await supabase.from("room_members")
-      .update({ status: "joined" })
-      .eq("room_id", room.id).eq("user_id", requesterId);
+    try { await respondRoomRequest(userId, room.id, requesterId, true); }
+    catch (err) { console.error("[rooms] accept:", (err as any)?.message); }
     setRequests(prev => prev.filter(r => r.userId !== requesterId));
   }
 
   async function declineRequest(requesterId) {
-    await supabase.from("room_members")
-      .delete().eq("room_id", room.id).eq("user_id", requesterId);
+    try { await respondRoomRequest(userId, room.id, requesterId, false); }
+    catch (err) { console.error("[rooms] decline:", (err as any)?.message); }
     setRequests(prev => prev.filter(r => r.userId !== requesterId));
   }
 
@@ -981,6 +1303,22 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     if (leftRef.current) return;
     leftRef.current = true;
     if (channelRef.current) {
+      // Session-only whiteboard: if I'm the last present member, wipe the board.
+      // Read presence BEFORE untracking and clear BEFORE leaveRoom drops my
+      // membership (the clear RPC requires me to still be a joined member).
+      try {
+        const present = Object.values(channelRef.current.presenceState()).flat() as any[];
+        const othersOnline = new Set(present.map(p => p.userId).filter(id => id !== userId));
+        if (othersOnline.size === 0) {
+          // Last person leaving — wipe board so next session starts fresh.
+          const arr = yjsStrokesRef.current;
+          if (arr && arr.length > 0) arr.doc?.transact(() => { arr.delete(0, arr.length); });
+          yjsMetaRef.current?.set("bg", DEFAULT_BG);
+          await yjsProviderRef.current?.persistState().catch(() => {});
+        } else {
+          yjsProviderRef.current?.persistState().catch(() => {});
+        }
+      } catch {}
       try { await channelRef.current.untrack(); } catch {}
       supabase.removeChannel(channelRef.current);
       channelRef.current = null;
@@ -1003,8 +1341,9 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         awardTokens("study_session_15min", { sessionId: sid }).catch(() => {});
       });
     }
-    supabase.from("room_members").delete()
-      .eq("room_id", room.id).eq("user_id", userId).then(() => {});
+    // Owners keep their membership so they can re-enter without re-joining.
+    // Only guests have their row cleaned up when they leave.
+    if (!isHost) leaveRoom(userId, room.id).catch(() => {});
   }
 
   function handleWorkingOnChange(val) {
@@ -1154,6 +1493,109 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     onLeave();
   }
 
+  // Owner-only: persist new access filters (server checks ownership) + tell the room.
+  async function saveAccess(filters: AccessFilters) {
+    const clean = { ...filters };
+    if (!room.course_id) delete clean.course;
+    setAccessFilters(clean);
+    setShowAccess(false);
+    try {
+      await setRoomAccess(userId, room.id, clean);
+      room.access_filters = clean; // keep the prop mirror in sync for re-renders
+      channelRef.current?.send({ type: "broadcast", event: "access_changed", payload: { filters: clean } }).catch(() => {});
+    } catch (err) {
+      console.error("[rooms] set access:", (err as any)?.message);
+    }
+  }
+
+  function handleOpenChat() {
+    setShowChat(true);
+    if (!chatLoadedRef.current) {
+      chatLoadedRef.current = true;
+      loadRecentMessages(userId, room.id).then(setChatMessages).catch(err => {
+        console.error("[chat] load:", (err as any)?.message);
+        chatLoadedRef.current = false; // allow retry on next open if it failed
+      });
+    }
+  }
+
+  function handleOpenBoard() {
+    setShowBoard(true);
+    // Push a fake history entry so Android swipe-back closes the board
+    // instead of navigating away from the room.
+    history.pushState({ boardGuard: true }, '');
+  }
+
+  useEffect(() => {
+    if (!showBoard) return;
+    function onPop() { setShowBoard(false); }
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [showBoard]);
+
+  function handleStrokeComplete(stroke: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) {
+    const newStroke = {
+      id: (crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)),
+      room_id: room.id,
+      user_id: userId,
+      name: userData?.name ?? "Anonymous",
+      created_at: new Date().toISOString(),
+      ...stroke,
+    };
+    setStrokes(prev => [...prev, newStroke]);
+    yjsStrokesRef.current?.push([newStroke]);
+    // Yjs observer also fires setStrokes (idempotent). Provider broadcasts delta to peers.
+  }
+
+  function handleEraseStroke(strokeId: string) {
+    const arr = yjsStrokesRef.current;
+    if (!arr) return;
+    const idx = (arr.toArray() as any[]).findIndex(s => s.id === strokeId);
+    if (idx !== -1) arr.delete(idx, 1);
+    // Yjs observer fires → setStrokes() → canvas re-renders and peers sync.
+  }
+
+  function handleBgChange(bg: string) {
+    setWbBg(bg);
+    yjsMetaRef.current?.set("bg", bg);
+    // Yjs meta observer on peers fires → setWbBg(). Provider broadcasts the delta.
+  }
+
+  function handleLiveStroke(draft: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] } | null) {
+    if (!draft) return; // stroke finished — wb_stroke broadcast clears peers' live preview
+    const now = Date.now();
+    if (now - lastLiveSentRef.current < 70) return; // ~14/s — under the 30/s realtime budget
+    lastLiveSentRef.current = now;
+    channelRef.current?.send({ type: "broadcast", event: "wb_live", payload: { userId, ...draft } }).catch(() => {});
+  }
+
+  function handleClearBoard() {
+    const arr = yjsStrokesRef.current;
+    if (arr && arr.length > 0) arr.doc?.transact(() => { arr.delete(0, arr.length); });
+    yjsMetaRef.current?.set("bg", DEFAULT_BG);
+    setLiveStrokes({});
+    // Yjs observers fire on all peers → canvas clears everywhere.
+  }
+
+  async function sendChatMessage() {
+    const body = chatInput.trim();
+    if (!body || chatSending) return;
+    setChatInput("");
+    setChatSending(true);
+    try {
+      const msg = await postRoomMessage(userId, room.id, userData?.name ?? "Anonymous", body);
+      setChatMessages(prev => prev.some(m => m.id === msg.id) ? prev : [...prev, msg]);
+      channelRef.current?.send({
+        type: "broadcast", event: "chat_message", payload: msg,
+      }).catch(() => {});
+    } catch (err) {
+      console.error("[chat] send:", (err as any)?.message);
+      setChatInput(body);
+    } finally {
+      setChatSending(false);
+    }
+  }
+
   const totalFocusMins = members.reduce((sum, m) => {
     return sum + Math.floor((Date.now() - m.joinedAt) / 60000);
   }, 0);
@@ -1164,7 +1606,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   return (
     <div>
       {/* Header */}
-      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:"20px" }}>
+      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", flexWrap:"wrap", gap:"10px", marginBottom:"20px" }}>
         <div>
           <p style={S.sectionLabel}>Study Room</p>
           <h1 style={{ ...S.pageTitle, fontSize:"22px" }}>{room.name}</h1>
@@ -1176,39 +1618,56 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
               </span>
             )}
           </p>
-        </div>
-        <div style={{ display:"flex", gap:"8px", flexShrink:0 }}>
-          <button
-            onClick={() => setShowBuddy(b => !b)}
-            style={{
-              ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px",
-              background: showBuddy ? "rgba(111,179,196,0.1)" : "none",
-              borderColor: showBuddy ? "rgba(111,179,196,0.3)" : "rgba(255,255,255,0.09)",
-              color: showBuddy ? "#6fb3c4" : "var(--text-dim)",
-            }}
-          >
-            🤖 AI
-          </button>
-          <button
-            onClick={() => setShowInvite(true)}
-            style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px" }}
-          >
-            Invite friends
-          </button>
-          {isHost && (
-            <button
-              onClick={handleCloseRoom}
-              style={{
-                background:"rgba(255,59,48,0.07)", border:"1px solid rgba(255,59,48,0.18)",
-                borderRadius:"8px", padding:"8px 14px", color:"rgba(255,100,90,0.7)",
-                fontSize:"12px", fontWeight:"500", cursor:"pointer", fontFamily:"inherit",
-              }}
-              title="Close room for everyone"
-            >
-              Close room
-            </button>
+          {activeFilterKeys(accessFilters).length > 0 && (
+            <div style={{ marginTop:"8px" }}>
+              <FilterBadges filters={accessFilters} small />
+            </div>
           )}
-          <button onClick={handleLeave} style={S.leaveBtn}>Leave</button>
+        </div>
+        <div style={{ display:"flex", gap:"6px", alignItems:"center", flexWrap:"wrap" }}>
+          {/* Panel toggles */}
+          <button onClick={() => setShowBuddy(b => !b)} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showBuddy ? "rgba(111,179,196,0.1)" : "none", borderColor: showBuddy ? "rgba(111,179,196,0.3)" : "rgba(255,255,255,0.09)", color: showBuddy ? "#6fb3c4" : "var(--text-dim)" }}>🤖 AI</button>
+          <button onClick={() => showChat ? setShowChat(false) : handleOpenChat()} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showChat ? "rgba(127,174,110,0.1)" : "none", borderColor: showChat ? "rgba(127,174,110,0.3)" : "rgba(255,255,255,0.09)", color: showChat ? "#7fae6e" : "var(--text-dim)" }}>💬 Chat</button>
+          <button onClick={() => showBoard ? setShowBoard(false) : handleOpenBoard()} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showBoard ? "rgba(196,154,60,0.1)" : "none", borderColor: showBoard ? "rgba(196,154,60,0.3)" : "rgba(255,255,255,0.09)", color: showBoard ? "#c49a3c" : "var(--text-dim)" }}>🖊 Board</button>
+          <button onClick={() => setShowVoice(v => !v)} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showVoice ? "rgba(96,165,250,0.1)" : "none", borderColor: showVoice ? "rgba(96,165,250,0.3)" : "rgba(255,255,255,0.09)", color: showVoice ? "#60a5fa" : "var(--text-dim)" }}>🎙 Voice</button>
+          <button onClick={() => setShowInvite(true)} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px" }}>+ Invite</button>
+
+          {/* ⋯ overflow — admin actions + leave */}
+          <div ref={roomMenuRef} style={{ position:"relative" }}>
+            <button
+              onClick={() => setShowRoomMenu(m => !m)}
+              style={{ ...S.ghostBtn, marginTop:0, padding:"8px 12px", fontSize:"14px", letterSpacing:"1px", background: showRoomMenu ? "rgba(255,255,255,0.07)" : "none" }}
+              title="More options"
+            >
+              ⋯
+            </button>
+            {showRoomMenu && (
+              <div style={{
+                position:"absolute", top:0, left:"calc(100% + 6px)", zIndex:200,
+                background:"var(--color-surface)", border:"1px solid var(--color-border)",
+                borderRadius:"12px", padding:"6px", minWidth:"160px",
+                boxShadow:"0 8px 32px rgba(0,0,0,0.45)",
+              }}>
+                {isHost && (
+                  <button onClick={() => { setShowAccess(true); setShowRoomMenu(false); }} style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", borderRadius:"8px", padding:"9px 12px", fontSize:"13px", color:"var(--text-secondary)", cursor:"pointer", fontFamily:"inherit" }}
+                    onMouseEnter={e => (e.currentTarget.style.background="rgba(255,255,255,0.06)")}
+                    onMouseLeave={e => (e.currentTarget.style.background="none")}
+                  >⚙ Access settings</button>
+                )}
+                {isHost && (
+                  <button onClick={() => { handleCloseRoom(); setShowRoomMenu(false); }} style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", borderRadius:"8px", padding:"9px 12px", fontSize:"13px", color:"rgba(255,100,90,0.8)", cursor:"pointer", fontFamily:"inherit" }}
+                    onMouseEnter={e => (e.currentTarget.style.background="rgba(255,59,48,0.07)")}
+                    onMouseLeave={e => (e.currentTarget.style.background="none")}
+                  >✕ Close room</button>
+                )}
+                <div style={{ height:"1px", background:"var(--color-border)", margin:"4px 0" }} />
+                <button onClick={() => { handleLeave(); setShowRoomMenu(false); }} style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", borderRadius:"8px", padding:"9px 12px", fontSize:"13px", color:"rgba(255,100,90,0.8)", cursor:"pointer", fontFamily:"inherit" }}
+                  onMouseEnter={e => (e.currentTarget.style.background="rgba(255,59,48,0.07)")}
+                  onMouseLeave={e => (e.currentTarget.style.background="none")}
+                >↩ Leave room</button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1327,8 +1786,60 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         />
       )}
 
+      {/* Voice chat panel — Daily.co placeholder, audio-first */}
+      {showVoice && (
+        <VoiceRoom roomId={room.id} userName={userData?.name ?? ""} onClose={() => setShowVoice(false)} />
+      )}
+
+      {/* Chat panel — persisted, WhatsApp-style */}
+      {showChat && (
+        <ChatPanel
+          messages={chatMessages}
+          myUserId={userId}
+          input={chatInput}
+          sending={chatSending}
+          onInputChange={setChatInput}
+          onSend={sendChatMessage}
+          onClose={() => setShowChat(false)}
+        />
+      )}
+
+      {/* Whiteboard panel — session-only, clears when everyone leaves */}
+      {showBoard && (
+        <Whiteboard
+          strokes={strokes}
+          liveStrokes={liveStrokes}
+          tool={wbTool}
+          style={wbStyle}
+          color={wbColor}
+          penWidth={wbPenWidth}
+          eraserSize={wbEraserSize}
+          bg={wbBg}
+          onToolChange={setWbTool}
+          onStyleChange={setWbStyle}
+          onColorChange={setWbColor}
+          onPenWidthChange={setWbPenWidth}
+          onEraserSizeChange={setWbEraserSize}
+          onBgChange={handleBgChange}
+          onStrokeComplete={handleStrokeComplete}
+          onEraseStroke={handleEraseStroke}
+          onLiveStroke={handleLiveStroke}
+          onClear={handleClearBoard}
+          onClose={() => setShowBoard(false)}
+        />
+      )}
+
       {showInvite && (
         <InviteModal room={room} userId={userId} userData={userData} onlineIds={onlineIds} onClose={() => setShowInvite(false)} />
+      )}
+
+      {showAccess && (
+        <AccessSettingsModal
+          initial={accessFilters}
+          hasCourse={!!room.course_id}
+          onSave={saveAccess}
+          onClose={() => setShowAccess(false)}
+        />
       )}
 
       {/* Goal prompt on enter */}
@@ -1457,7 +1968,9 @@ function PomodoroPanel({ pomo, remaining, isHost, onStart, onPause, onResume, on
 function GoalPromptModal({ onSet, onSkip }) {
   const [goal, setGoal] = useState("");
   const S = styles;
-  return (
+  // Render into document.body so position:fixed centers against the true
+  // viewport — not the transformed app-page-transition ancestor.
+  return createPortal(
     <div style={S.modalOverlay}>
       <div style={{ ...S.modalCard, maxWidth:"360px" }}>
         <div style={{ textAlign:"center", marginBottom:"20px" }}>
@@ -1491,7 +2004,8 @@ function GoalPromptModal({ onSet, onSkip }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -1507,8 +2021,8 @@ function SessionSummaryModal({ durationSecs, goal, onConfirm, onBack }) {
   // completed 15-min block. Display only — the server is authoritative.
   const tokensEarned = 2 + Math.floor(durationSecs / (15 * 60)) * 5;
   const S = styles;
-  return (
-    <div style={S.modalOverlay}>
+  return createPortal(
+    <div style={{ position:"fixed", top:0, left:0, width:"100vw", height:"100vh", zIndex:9999, background:"rgba(8,8,10,0.75)", backdropFilter:"blur(14px)", display:"flex", alignItems:"center", justifyContent:"center", padding:"24px" }}>
       <div style={{ ...S.modalCard, maxWidth:"340px", textAlign:"center", position:"relative" }}>
         <button
           onClick={onBack}
@@ -1572,7 +2086,8 @@ function SessionSummaryModal({ durationSecs, goal, onConfirm, onBack }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -1749,10 +2264,8 @@ function InviteModal({ room, userId, userData, onlineIds = [], onClose }) {
 
   async function handleInvite(friend) {
     setInvited(i => ({ ...i, [friend.id]: "sending" }));
-    await supabase.from("room_members").upsert(
-      { room_id: room.id, user_id: friend.id, role: "member", status: "invited" },
-      { onConflict: "room_id,user_id" }
-    );
+    try { await inviteToRoom(userId, room.id, friend.id); }
+    catch (err) { console.error("[rooms] invite:", (err as any)?.message); }
 
     // Server enforces the 2/friend/24h rate limit, writes the nudge row, and
     // emails the friend if they're offline. onlineIds = who's present in rooms now.
@@ -1831,6 +2344,119 @@ function InviteModal({ room, userId, userData, onlineIds = [], onClose }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// ChatPanel — persisted room chat, WhatsApp-style
+// ─────────────────────────────────────────────────────────────────────────────
+function ChatPanel({ messages, myUserId, input, sending, onInputChange, onSend, onClose }: {
+  messages: ChatMessage[]; myUserId: string;
+  input: string; sending: boolean;
+  onInputChange: (v: string) => void; onSend: () => void; onClose: () => void;
+}) {
+  const endRef = useRef<HTMLDivElement>(null);
+  const S = styles;
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages.length]);
+
+  return (
+    <div style={{
+      border: "1px solid rgba(127,174,110,0.2)",
+      borderRadius: "14px",
+      background: "rgba(127,174,110,0.03)",
+      marginBottom: "20px",
+      overflow: "hidden",
+    }}>
+      {/* Header */}
+      <div style={{
+        display: "flex", alignItems: "center", justifyContent: "space-between",
+        padding: "12px 16px",
+        borderBottom: "1px solid rgba(127,174,110,0.12)",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <span style={{ fontSize: "15px" }}>💬</span>
+          <span style={{ fontSize: "13px", fontWeight: "600", color: "#7fae6e" }}>Room Chat</span>
+          <span style={{ fontSize: "11px", color: "var(--text-dim)", background: "rgba(255,255,255,0.05)", borderRadius: "6px", padding: "2px 7px" }}>
+            persists across refresh
+          </span>
+        </div>
+        <button onClick={onClose} style={{ background: "none", border: "none", color: "var(--text-dim)", fontSize: "18px", cursor: "pointer", lineHeight: 1, padding: "0 2px" }}>×</button>
+      </div>
+
+      {/* Message list */}
+      <div style={{ height: "320px", overflowY: "auto", padding: "12px 16px", display: "flex", flexDirection: "column", gap: "10px" }}>
+        {messages.length === 0 ? (
+          <div style={{ margin: "auto 0", textAlign: "center" }}>
+            <p style={{ fontSize: "13px", color: "var(--text-dim)", lineHeight: 1.5 }}>
+              No messages yet — say hello!<br />
+              <span style={{ fontSize: "11px", opacity: 0.6 }}>History stays even after a refresh.</span>
+            </p>
+          </div>
+        ) : (
+          messages.map(msg => {
+            const isMe = msg.user_id === myUserId;
+            return (
+              <div key={msg.id} style={{ display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
+                {!isMe && (
+                  <span style={{ fontSize: "10px", color: "var(--text-dim)", marginBottom: "3px", paddingLeft: "4px" }}>
+                    {msg.name}
+                  </span>
+                )}
+                <div style={{
+                  maxWidth: "78%", padding: "8px 12px", wordBreak: "break-word",
+                  borderRadius: isMe ? "12px 12px 3px 12px" : "12px 12px 12px 3px",
+                  background: isMe ? "rgba(196,154,60,0.14)" : "rgba(255,255,255,0.06)",
+                  border: `1px solid ${isMe ? "rgba(196,154,60,0.22)" : "rgba(255,255,255,0.09)"}`,
+                  fontSize: "13px", color: "var(--text-primary)", lineHeight: 1.5,
+                }}>
+                  {msg.body}
+                </div>
+                <span style={{ fontSize: "10px", color: "var(--text-dim)", marginTop: "2px", paddingRight: isMe ? "2px" : 0, paddingLeft: isMe ? 0 : "4px" }}>
+                  {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                </span>
+              </div>
+            );
+          })
+        )}
+        <div ref={endRef} />
+      </div>
+
+      {/* Input */}
+      <div style={{ borderTop: "1px solid rgba(127,174,110,0.12)", padding: "10px 12px", display: "flex", gap: "8px", alignItems: "center" }}>
+        <input
+          value={input}
+          onChange={e => onInputChange(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); onSend(); } }}
+          placeholder="Message the room…"
+          maxLength={2000}
+          style={{
+            flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
+            borderRadius: "9px", padding: "9px 12px", fontSize: "13px",
+            color: "var(--text-primary)", outline: "none", fontFamily: "inherit",
+            transition: "border-color 0.15s",
+          }}
+          onFocus={e => (e.target.style.borderColor = "rgba(127,174,110,0.35)")}
+          onBlur={e  => (e.target.style.borderColor = "rgba(255,255,255,0.09)")}
+        />
+        <button
+          onClick={onSend}
+          disabled={!input.trim() || sending}
+          style={{
+            background: "rgba(127,174,110,0.12)", color: "#7fae6e",
+            border: "1px solid rgba(127,174,110,0.28)", borderRadius: "9px",
+            padding: "9px 16px", fontSize: "13px", fontWeight: "600",
+            cursor: (!input.trim() || sending) ? "default" : "pointer",
+            fontFamily: "inherit", flexShrink: 0,
+            opacity: (!input.trim() || sending) ? 0.4 : 1,
+          }}
+        >
+          {sending ? "…" : "Send →"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // MemberCard
 // ─────────────────────────────────────────────────────────────────────────────
 function MemberCard({ member, isMe }) {
@@ -1882,8 +2508,10 @@ function MemberCard({ member, isMe }) {
         </p>
       </div>
       <div style={{ textAlign:"right", flexShrink:0 }}>
-        <p style={{ fontSize:"14px", fontWeight:"700", color:"var(--color-accent)", fontVariantNumeric:"tabular-nums" }}>{time}</p>
-        <p style={{ fontSize:"10px", color:"var(--text-dim)", marginTop:"2px" }}>focused</p>
+        <p style={{ fontSize:"14px", fontWeight:"700", color: elapsed >= 3600 ? "#f59e0b" : elapsed >= 1800 ? "#c49a3c" : "var(--color-accent)", fontVariantNumeric:"tabular-nums" }}>{time}</p>
+        <p style={{ fontSize:"10px", color:"var(--text-dim)", marginTop:"2px" }}>
+          {elapsed >= 3600 ? "🔥 focused" : elapsed >= 1800 ? "⚡ focused" : "focused"}
+        </p>
       </div>
     </div>
   );
@@ -1904,7 +2532,7 @@ const styles: Record<string, React.CSSProperties> = {
   ghostBtnLarge:  { flex:1, background:"transparent", border:"1px solid rgba(255,255,255,0.1)", borderRadius:"10px", padding:"12px", color:"var(--text-dim)", fontSize:"14px", cursor:"pointer", fontFamily:"inherit" },
   primaryBtnLarge:{ flex:2, background:"var(--color-accent)", color:"#111", border:"none", borderRadius:"10px", padding:"12px", fontSize:"14px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit" },
   leaveBtn:       { background:"rgba(255,59,48,0.1)", border:"1px solid rgba(255,59,48,0.22)", borderRadius:"8px", padding:"9px 16px", color:"rgba(255,100,90,0.9)", fontSize:"13px", fontWeight:"600", cursor:"pointer", fontFamily:"inherit", flexShrink:0 },
-  modalOverlay:   { position:"fixed", inset:0, zIndex:1000, background:"rgba(8,8,10,0.75)", backdropFilter:"blur(14px)", display:"flex", alignItems:"center", justifyContent:"center", padding:"24px" },
+  modalOverlay:   { position:"fixed", top:0, left:0, right:0, bottom:0, zIndex:1000, background:"rgba(8,8,10,0.75)", backdropFilter:"blur(14px)", display:"flex", alignItems:"center", justifyContent:"center", padding:"24px" },
   modalCard:      { width:"100%", maxWidth:"400px", background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"20px", padding:"28px 24px", boxShadow:"0 32px 80px rgba(0,0,0,0.5)" },
   fieldLabel:     { fontSize:"12px", color:"var(--text-secondary)", fontWeight:"500" },
 };

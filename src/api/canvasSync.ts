@@ -75,18 +75,28 @@ async function generateAndSaveFlashcards(userId, courseDbId, courseName, assignm
     const data = await res.json();
     const text = data.content ?? '';
 
-    const cards = text
-      .split('\n')
-      .filter(line => line.includes('Q:') && line.includes(' | ') && line.includes('A:'))
-      .map((line, i) => {
+    const allLines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    const cards = [];
+    const pipeLines = allLines.filter(l => l.includes('Q:') && l.includes(' | ') && l.includes('A:'));
+    if (pipeLines.length > 0) {
+      pipeLines.forEach((line, i) => {
         const [qPart, aPart] = line.split(' | ');
-        return {
-          id:       i,
-          question: (qPart || '').replace(/^Q:\s*/i, '').trim(),
-          answer:   (aPart || '').replace(/^A:\s*/i, '').trim(),
-        };
-      })
-      .filter(c => c.question && c.answer);
+        const question = (qPart || '').replace(/^(?:\d+[\.\)]\s*)?(?:\*+)?Q:\s*(?:\*+)?/i, '').trim();
+        const answer   = (aPart || '').replace(/^(?:\d+[\.\)]\s*)?(?:\*+)?A:\s*(?:\*+)?/i, '').trim();
+        if (question && answer) cards.push({ id: i, question, answer });
+      });
+    } else {
+      for (let i = 0; i < allLines.length - 1; i++) {
+        const qMatch = allLines[i].match(/^(?:\d+[\.\)]\s*)?(?:\*+)?Q:\s*(?:\*+)?(.+)/i);
+        if (qMatch) {
+          const aMatch = allLines[i + 1].match(/^(?:\*+)?A:\s*(?:\*+)?(.+)/i);
+          if (aMatch) {
+            cards.push({ id: cards.length, question: qMatch[1].trim(), answer: aMatch[1].trim() });
+            i++;
+          }
+        }
+      }
+    }
 
     if (!cards.length) return null;
 
@@ -411,8 +421,38 @@ export async function syncCanvasData(userId, canvasToken, canvasBaseUrl) {
     err => console.error('[canvasSync] brain sync failed:', err.message)
   );
 
+  // Manual + past courses live only in the DB (the Canvas API doesn't return them).
+  // Without merging them in, this sync's result would be Canvas-only and overwrite
+  // them in the UI's `courses` state — so a manually-added course would vanish on the
+  // next sync even though it's saved. Re-read them and append (deduped against Canvas).
+  let extraCourses = [];
+  try {
+    const { data: extra } = await supabase
+      .from('courses')
+      .select('*')
+      .eq('user_id', userId)
+      .or('source.eq.manual,source.eq.past_canvas,is_manual.eq.true');
+    const canvasIds = new Set(courses.map(c => String(c.id)));
+    extraCourses = (extra || [])
+      .map(c => ({
+        id:               c.canvas_course_id ?? c.id,
+        dbId:             c.id,
+        name:             c.name,
+        courseCode:       c.course_code,
+        currentScore:     c.current_score,
+        finalScore:       c.final_score,
+        imageUrl:         c.image_url,
+        source:           c.source,
+        isManual:         c.source === 'manual' || c.is_manual === true,
+        enrollmentState:  'active',
+        accessRestricted: false,
+        assignmentGroups: null,
+      }))
+      .filter(c => !canvasIds.has(String(c.id))); // Canvas (live) rows win on overlap
+  } catch { /* non-fatal — return Canvas courses alone */ }
+
   return {
-    courses,
+    courses:          [...courses, ...extraCourses],
     assignments:      allAssignments,
     announcements,
     modules:          allModules,
@@ -458,12 +498,6 @@ export async function loadCanvasData(userId) {
   // Build a lookup map from the single blob query
   const blobMap = {};
   (blobResult.data || []).forEach(row => { blobMap[row.data_type] = row.payload; });
-
-  console.log("[loadCanvasData] userId:", userId,
-    "| blob types:", Object.keys(blobMap),
-    "| ext_courses:", blobMap['ext_courses']?.length ?? 0,
-    "| ext_assignments:", blobMap['ext_assignments']?.length ?? 0,
-    "| ext_grades:", blobMap['ext_grades']?.length ?? 0);
 
   const annResult  = { data: { payload: blobMap['announcements']    ?? [] } };
   const modResult  = { data: { payload: blobMap['modules']          ?? [] } };
@@ -624,8 +658,22 @@ export async function loadCanvasData(userId) {
     });
   }
 
+  // Past courses (manually added or imported) live in the courses table with a
+  // past-ish source — surface them in the Past Courses section, and keep them out of
+  // the main/current course list (semester isn't a column, so they group under "Past").
+  const isPastCourse = (c) => c.source === 'manual_past' || c.source === 'past_canvas';
+  const pastDbCourses = courses.filter(isPastCourse).map(c => ({
+    id:           c.dbId ?? c.id,
+    dbId:         c.dbId ?? c.id,
+    name:         c.name,
+    courseCode:   c.courseCode,
+    currentScore: c.currentScore,
+    semester:     'Past',
+    manual:       true,
+  }));
+
   return {
-    courses,
+    courses:          courses.filter(c => !isPastCourse(c)),
     assignments,
     files,
     announcements:    annResult.data?.payload  ?? [],
@@ -636,7 +684,7 @@ export async function loadCanvasData(userId) {
     courseFiles:      filesResult.data?.payload ?? [],
     coursePages:      pagesResult.data?.payload ?? [],
     quizzes:          quizResult.data?.payload  ?? [],
-    pastCourses:      pastResult.data?.payload  ?? [],
+    pastCourses:      [...(pastResult.data?.payload ?? []), ...pastDbCourses],
     flashcardMap,
     syncedAt:         null,
   };

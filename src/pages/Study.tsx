@@ -1,33 +1,50 @@
 // Study.jsx — Course picker, Flashcards / Study Guide modes.
 // Flashcard study session: fullscreen, one card at a time, 3D flip, swipe-to-judge.
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import { groq }         from "../api/groq";
 import { useApp }        from "../context/AppContext";
 import { supabase }      from "../api/supabase";
 import { awardTokens }   from "../api/tokens";
+import { cardKey, sm2, isDue, GRADE } from "../lib/srs";
 
 
 const SYSTEM =
   "You are a study assistant. When generating flashcards, format EVERY card as exactly: Q: [question] | A: [answer] — one per line, no extra text. For study guides, use clear headings and concise bullet points.";
 
 function parseFlashcards(text) {
-  return text
-    .split("\n")
-    .filter((line) => line.includes("Q:") && line.includes(" | ") && line.includes("A:"))
-    .map((line, i) => {
+  const cards = [];
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+
+  // Primary format: "Q: question | A: answer" on one line
+  const pipeLines = lines.filter(l => l.includes("Q:") && l.includes(" | ") && l.includes("A:"));
+  if (pipeLines.length > 0) {
+    pipeLines.forEach((line, i) => {
       const [qPart, aPart] = line.split(" | ");
-      return {
-        id:       i,
-        question: (qPart || "").replace(/^Q:\s*/i, "").trim(),
-        answer:   (aPart || "").replace(/^A:\s*/i, "").trim(),
-      };
-    })
-    .filter((c) => c.question && c.answer);
+      const question = (qPart || "").replace(/^(?:\d+[\.\)]\s*)?(?:\*+)?Q:\s*(?:\*+)?/i, "").trim();
+      const answer   = (aPart || "").replace(/^(?:\d+[\.\)]\s*)?(?:\*+)?A:\s*(?:\*+)?/i, "").trim();
+      if (question && answer) cards.push({ id: i, question, answer });
+    });
+    return cards;
+  }
+
+  // Fallback: "Q: question" on one line, "A: answer" on the next
+  for (let i = 0; i < lines.length - 1; i++) {
+    const qMatch = lines[i].match(/^(?:\d+[\.\)]\s*)?(?:\*+)?Q:\s*(?:\*+)?(.+)/i);
+    if (qMatch) {
+      const aMatch = lines[i + 1].match(/^(?:\*+)?A:\s*(?:\*+)?(.+)/i);
+      if (aMatch) {
+        cards.push({ id: cards.length, question: qMatch[1].trim(), answer: aMatch[1].trim() });
+        i++;
+      }
+    }
+  }
+
+  return cards;
 }
 
 // ── Fullscreen study session ──────────────────────────────────────────────────
-function StudySession({ cards, onExit, updateUserField, userData }) {
+function StudySession({ cards, onExit, updateUserField, userData, onJudge = null }) {
   const [idx, setIdx]         = useState(0);
   const [flipped, setFlipped] = useState(false);
   const [results, setResults] = useState([]);
@@ -79,6 +96,7 @@ function StudySession({ cards, onExit, updateUserField, userData }) {
   const judge = useCallback((correct) => {
     if (judgeLock.current || isDone) return;
     resetIdle(); // reset idle on every judge action
+    onJudge?.(cards[idx], correct); // record spaced-repetition result (review mode)
     judgeLock.current = true;
     setExitDir(correct ? "right" : "left");
     setTimeout(() => {
@@ -89,7 +107,7 @@ function StudySession({ cards, onExit, updateUserField, userData }) {
       setExitDir(null);
       judgeLock.current = false;
     }, 280);
-  }, [isDone, resetIdle]);
+  }, [isDone, resetIdle, onJudge, cards, idx]);
 
   // Keyboard controls: Space = flip, ArrowRight = got it, ArrowLeft = missed
   useEffect(() => {
@@ -530,6 +548,61 @@ export default function Study() {
   const [guide,      setGuide]      = useState("");
   const [inSession,  setInSession]  = useState(false);
   const [toast,      setToast]      = useState("");
+  // docMode: when set, Study is showing flashcards for a specific uploaded document
+  // rather than a Canvas course. Persisted in localStorage so refresh survives.
+  const [docMode, setDocMode] = useState<{ id: string; title: string } | null>(() => {
+    try { const s = localStorage.getItem("fschool_study_doc"); return s ? JSON.parse(s) : null; }
+    catch { return null; }
+  });
+
+  // ── Spaced repetition ───────────────────────────────────────────────────────
+  const [srsStates,   setSrsStates]   = useState({}); // card_key → { dueAt, ease, ... }
+  const [reviewCards, setReviewCards] = useState(null); // non-null = in a review session
+
+  const loadSrs = useCallback(async () => {
+    if (!userId) return;
+    try {
+      const { data } = await supabase
+        .from("srs_reviews")
+        .select("card_key, due_at, ease, interval_days, reps, lapses")
+        .eq("user_id", userId);
+      const map = {};
+      (data || []).forEach(r => {
+        map[r.card_key] = { dueAt: r.due_at, ease: r.ease, interval: r.interval_days, reps: r.reps, lapses: r.lapses };
+      });
+      setSrsStates(map);
+    } catch { /* table may not exist yet */ }
+  }, [userId]);
+  useEffect(() => { loadSrs(); }, [loadSrs]);
+
+  // Every flashcard (across all courses) that's new or whose review is due.
+  const dueCards = useMemo(() => {
+    const out = [];
+    const now = Date.now();
+    for (const [dbId, entry] of Object.entries(flashcardMap || {})) {
+      for (const c of ((entry as any)?.cards || [])) {
+        const key = cardKey(dbId, c.question);
+        if (isDue(srsStates[key], now)) out.push({ ...c, courseId: dbId, key });
+      }
+    }
+    return out;
+  }, [flashcardMap, srsStates]);
+
+  // Record one review result (got-it → good, missed → again) and reschedule the card.
+  const recordReview = useCallback(async (card, correct) => {
+    const courseId = card?.courseId ?? null;
+    const key = card?.key ?? cardKey(courseId, card?.question);
+    const next = sm2(srsStates[key], correct ? GRADE.good : GRADE.again);
+    setSrsStates(s => ({ ...s, [key]: next }));
+    try {
+      await supabase.from("srs_reviews").upsert({
+        user_id: userId, card_key: key, course_id: courseId,
+        question: card?.question, answer: card?.answer,
+        ease: next.ease, interval_days: next.interval, reps: next.reps, lapses: next.lapses,
+        due_at: next.dueAt, last_reviewed_at: new Date().toISOString(),
+      }, { onConflict: "user_id,card_key" });
+    } catch { /* non-fatal */ }
+  }, [srsStates, userId]);
 
   // Sync selected course when live courses load in
   useEffect(() => {
@@ -554,6 +627,13 @@ export default function Study() {
       pendingConfig.current = studyConfig;
       setStudyConfig(null);
       setConfigTick(t => t + 1);
+      // YouLearn doc mode: wire in docId so Study loads cards for this document
+      if (studyConfig.docId) {
+        const dm = { id: studyConfig.docId, title: studyConfig.docTitle ?? "Document" };
+        setDocMode(dm);
+        setFlashcards([]);
+        try { localStorage.setItem("fschool_study_doc", JSON.stringify(dm)); } catch {}
+      }
     }
   }, [studyConfig, setStudyConfig]);
 
@@ -584,6 +664,30 @@ export default function Study() {
     }
   }, [liveCourses, configTick]);
 
+  // Auto-load cards whenever docMode is set (on redirect AND on page refresh)
+  useEffect(() => {
+    if (!docMode || !userId) return;
+    setLoading(true);
+    fetch("/api/flashcards", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "load", userId, courseId: docMode.id }),
+    })
+      .then(r => r.json())
+      .then(data => {
+        if (data?.cards?.length > 0) setFlashcards(data.cards);
+        else setToast("No flashcards saved for this document yet.");
+      })
+      .catch(() => setToast("Couldn't load document flashcards."))
+      .finally(() => setLoading(false));
+  }, [docMode?.id, userId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function clearDocMode() {
+    setDocMode(null);
+    setFlashcards([]);
+    try { localStorage.removeItem("fschool_study_doc"); } catch {}
+  }
+
   // Find the DB course id for the currently selected course label
   function getCourseDbId() {
     const selectedCourse = liveCourses.find(c => `${c.courseCode} — ${c.name}` === course);
@@ -599,16 +703,20 @@ export default function Study() {
         setGuide("");
         return;
       }
-      // Not in memory — try DB directly
+      // Not in memory — try DB via server route (bypasses RLS)
       setLoading(true);
-      const { data } = await supabase
-        .from("flashcards")
-        .select("cards")
-        .eq("user_id", userId)
-        .eq("course_id", dbId)
-        .maybeSingle();
-      if (data?.cards?.length > 0) setFlashcards(data.cards);
-      else setToast("No saved flashcards yet — tap Add New Flashcards to create some.");
+      try {
+        const loadRes = await fetch("/api/flashcards", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ action: "load", userId, courseId: String(dbId) }),
+        });
+        const loadData = await loadRes.json();
+        if (loadData?.cards?.length > 0) setFlashcards(loadData.cards);
+        else setToast("No saved flashcards yet — tap Add New Flashcards to create some.");
+      } catch {
+        setToast("No saved flashcards yet — tap Add New Flashcards to create some.");
+      }
       setLoading(false);
     } else {
       // Study guide — load from canvas_data blob
@@ -743,69 +851,85 @@ export default function Study() {
     setFlashcards([]);
     setGuide("");
 
-    const dbId = getCourseDbId();
-    const courseContext = await buildCourseContext(dbId);
-    const contextBlock = courseContext
-      ? `\n\nHere is real content from the student's course to base your response on:\n${courseContext}`
-      : "";
-
-    const cardCount = Math.min(Math.max(liveCourses.length > 0 ? 10 : 8, 8), 12);
-
-    const prompt =
-      mode === "flashcards"
-        ? `Create exactly ${cardCount} study flashcards for ${course}.${contextBlock}\n\nFormat each card as: Q: [question] | A: [answer] — one per line. Focus on the actual topics listed above. Prioritize concepts from the most recent modules and anything hinted at in announcements. No numbering, no extra text.`
-        : `You are a finals detective. Your job is to figure out exactly what will be on the final exam for ${course} and build a targeted study plan.${contextBlock}\n\nStep 1 — REVERSE ENGINEER THE FINAL: Based on the syllabus, recent modules (especially the last ones), professor announcements, and any file/page titles, identify the 5-7 most likely exam topics. Think like a professor: what did they spend the most time on? What did they announce recently?\n\nStep 2 — BUILD THE STUDY PLAN: For each likely exam topic, write: the concept, why it matters, and 2-3 things to know cold.\n\nStep 3 — PRIORITY ORDER: rank topics by how likely they are to appear.\n\nBe specific to this course's actual content. Do not give generic study advice.`;
-
-    const result = await groq([{ role: "user", content: prompt }], SYSTEM);
-
-    if (mode === "flashcards") {
-      const cards = parseFlashcards(result);
-      setFlashcards(cards);
-      // Save to Supabase
+    try {
       const dbId = getCourseDbId();
-      if (!dbId) {
-        setToast("⚠️ Couldn't link to course — flashcards shown but not saved. Try re-syncing Canvas.");
-      } else if (cards.length > 0) {
-        const { error: saveErr } = await supabase.from("flashcards").upsert(
-          { user_id: userId, course_id: dbId, cards, generated_at: new Date().toISOString() },
-          { onConflict: "user_id,course_id" }
-        );
-        if (saveErr) {
-          console.error("[Study] flashcard save failed:", saveErr.message);
-          setToast("⚠️ Flashcards generated but couldn't save: " + saveErr.message);
+      const courseContext = await buildCourseContext(dbId);
+      const contextBlock = courseContext
+        ? `\n\nHere is real content from the student's course to base your response on:\n${courseContext}`
+        : "";
+
+      const cardCount = Math.min(Math.max(liveCourses.length > 0 ? 10 : 8, 8), 12);
+
+      const prompt =
+        mode === "flashcards"
+          ? `Create exactly ${cardCount} study flashcards for ${course}.${contextBlock}\n\nFormat each card as: Q: [question] | A: [answer] — one per line. Focus on the actual topics listed above. Prioritize concepts from the most recent modules and anything hinted at in announcements. No numbering, no extra text.`
+          : `You are a finals detective. Your job is to figure out exactly what will be on the final exam for ${course} and build a targeted study plan.${contextBlock}\n\nStep 1 — REVERSE ENGINEER THE FINAL: Based on the syllabus, recent modules (especially the last ones), professor announcements, and any file/page titles, identify the 5-7 most likely exam topics. Think like a professor: what did they spend the most time on? What did they announce recently?\n\nStep 2 — BUILD THE STUDY PLAN: For each likely exam topic, write: the concept, why it matters, and 2-3 things to know cold.\n\nStep 3 — PRIORITY ORDER: rank topics by how likely they are to appear.\n\nBe specific to this course's actual content. Do not give generic study advice.`;
+
+      const result = await groq(
+        [{ role: "user", content: prompt }],
+        SYSTEM,
+        mode === "guide" ? 2048 : 1024
+      );
+
+      if (mode === "flashcards") {
+        const cards = parseFlashcards(result);
+        if (cards.length === 0) {
+          setToast("⚠️ Couldn't parse any flashcards — try generating again.");
         } else {
-          setToast("✓ Flashcards saved!");
-          awardTokens("flashcards_generated", { courseId: String(dbId) }).catch(() => {});
+          setFlashcards(cards);
+          if (!dbId) {
+            setToast("⚠️ Couldn't link to course — flashcards shown but not saved. Try re-syncing Canvas.");
+          } else {
+            const saveRes = await fetch("/api/flashcards", {
+              method:  "POST",
+              headers: { "Content-Type": "application/json" },
+              body:    JSON.stringify({ action: "save", userId, courseId: String(dbId), cards }),
+            });
+            if (!saveRes.ok) {
+              const saveErr = await saveRes.json().catch(() => ({}));
+              console.error("[Study] flashcard save failed:", saveErr.error);
+              setToast("⚠️ Flashcards generated but couldn't save: " + (saveErr.error ?? "unknown error"));
+            } else {
+              setToast("✓ Flashcards saved!");
+              awardTokens("flashcards_generated", { courseId: String(dbId) }).catch(() => {});
+            }
+          }
         }
-      }
-    } else {
-      setGuide(result);
-      // Save study guide to canvas_data blob
-      const dbId = getCourseDbId();
-      if (!dbId) {
-        setToast("⚠️ Couldn't link to course — guide shown but not saved. Try re-syncing Canvas.");
       } else {
-        const { error: saveErr } = await supabase.from("canvas_data").upsert(
-          { user_id: userId, data_type: `study_guide_${dbId}`, payload: { text: result }, synced_at: new Date().toISOString() },
-          { onConflict: "user_id,data_type" }
-        );
-        if (saveErr) {
-          console.error("[Study] guide save failed:", saveErr.message);
-          setToast("⚠️ Guide generated but couldn't save: " + saveErr.message);
+        setGuide(result);
+        if (!dbId) {
+          setToast("⚠️ Couldn't link to course — guide shown but not saved. Try re-syncing Canvas.");
         } else {
-          setToast("✓ Study guide saved!");
+          const { error: saveErr } = await supabase.from("canvas_data").upsert(
+            { user_id: userId, data_type: `study_guide_${dbId}`, payload: { text: result }, synced_at: new Date().toISOString() },
+            { onConflict: "user_id,data_type" }
+          );
+          if (saveErr) {
+            console.error("[Study] guide save failed:", saveErr.message);
+            setToast("⚠️ Guide generated but couldn't save: " + saveErr.message);
+          } else {
+            setToast("✓ Study guide saved!");
+          }
         }
       }
+    } catch (err) {
+      console.error("[Study] generate error:", err.message);
+      setToast("⚠️ Generation failed — " + (err.message ?? "unexpected error"));
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
+
+  if (reviewCards && reviewCards.length > 0) {
+    return <StudySession cards={reviewCards} onExit={() => { setReviewCards(null); loadSrs(); }} onJudge={recordReview} updateUserField={updateUserField} userData={userData} />;
+  }
 
   if (inSession && flashcards.length > 0) {
     return <StudySession cards={flashcards} onExit={() => setInSession(false)} updateUserField={updateUserField} userData={userData} />;
   }
 
-  // No Canvas connected yet
-  if (!hasCanvasCourses) {
+  // No Canvas connected — allow through if docMode is active (YouLearn cards don't need Canvas)
+  if (!hasCanvasCourses && !docMode) {
     return (
       <div>
         <h1 style={{ fontSize: "26px", fontWeight: "600", color: "var(--text-primary)", marginBottom: "24px", letterSpacing: "-0.3px" }}>
@@ -827,47 +951,89 @@ export default function Study() {
         Study
       </h1>
 
-      <select
-        value={course}
-        onChange={e => { setCourse(e.target.value); setFlashcards([]); setGuide(""); }}
-        style={{
-          width: "100%", background: "var(--color-surface)",
-          border: "1px solid var(--color-border)", borderRadius: "var(--radius-btn)",
-          padding: "12px 36px 12px 14px", color: "var(--text-primary)",
-          fontSize: "14px", outline: "none", fontFamily: "inherit",
-          marginBottom: "14px", cursor: "pointer", appearance: "none", WebkitAppearance: "none",
-          backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='rgba(255,255,255,0.35)' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-          backgroundRepeat: "no-repeat", backgroundPosition: "right 14px center",
-        }}
-      >
-        {COURSES.map((c) => <option key={c} value={c} style={{ background: "#1a1a1a" }}>{c}</option>)}
-      </select>
+      {/* Spaced-repetition review — cards new or due today, across all courses */}
+      {dueCards.length > 0 && (
+        <button
+          onClick={() => setReviewCards(dueCards)}
+          style={{
+            width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between",
+            background: "rgba(0,210,190,0.08)", border: "1px solid rgba(0,210,190,0.28)",
+            borderRadius: "var(--radius-btn)", padding: "14px 16px", marginBottom: "14px",
+            cursor: "pointer", fontFamily: "inherit",
+          }}
+        >
+          <span style={{ color: "rgba(0,210,190,0.95)", fontSize: "14px", fontWeight: 600 }}>
+            🔁 Review {dueCards.length} card{dueCards.length !== 1 ? "s" : ""} due
+          </span>
+          <span style={{ color: "rgba(0,210,190,0.7)", fontSize: "13px" }}>Start →</span>
+        </button>
+      )}
 
-      {/* Mode toggle */}
-      <div style={{
-        display: "flex", gap: "6px", marginBottom: "20px",
-        background: "rgba(255,255,255,0.04)", border: "1px solid var(--color-border)",
-        borderRadius: "var(--radius-btn)", padding: "4px",
-      }}>
-        {["flashcards", "guide"].map((m) => (
+      {/* Course picker — hidden in doc mode; shown in normal Canvas mode */}
+      {docMode ? (
+        <div style={{
+          display: "flex", alignItems: "center", gap: "10px", marginBottom: "14px",
+          background: "rgba(196,154,60,0.07)", border: "1px solid rgba(196,154,60,0.22)",
+          borderRadius: "var(--radius-btn)", padding: "12px 14px",
+        }}>
+          <span style={{ fontSize: "15px" }}>📄</span>
+          <span style={{ flex: 1, color: "var(--text-primary)", fontSize: "14px", fontWeight: 500,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+            {docMode.title}
+          </span>
           <button
-            key={m}
-            onClick={() => { setMode(m); setFlashcards([]); setGuide(""); }}
-            style={{
-              flex: 1,
-              background: mode === m ? "var(--color-surface-hover)" : "transparent",
-              border:     mode === m ? "1px solid var(--color-border-strong)" : "1px solid transparent",
-              borderRadius: "9px", padding: "8px",
-              color:      mode === m ? "var(--text-primary)" : "var(--text-secondary)",
-              fontSize:   "13px", fontWeight: mode === m ? "600" : "400",
-              cursor:     "pointer", fontFamily: "inherit",
-              transition: "all var(--dur-fast) var(--ease-apple)",
-            }}
+            onClick={() => { clearDocMode(); setCourse(COURSES[0] ?? ""); }}
+            style={{ background: "none", border: "none", color: "var(--text-dim)",
+              fontSize: "12px", cursor: "pointer", padding: "2px 6px", fontFamily: "inherit" }}
           >
-            {m === "guide" ? "Study Guide" : "Flashcards"}
+            ✕ courses
           </button>
-        ))}
-      </div>
+        </div>
+      ) : (
+        <select
+          value={course}
+          onChange={e => { setCourse(e.target.value); setFlashcards([]); setGuide(""); }}
+          style={{
+            width: "100%", background: "var(--color-surface)",
+            border: "1px solid var(--color-border)", borderRadius: "var(--radius-btn)",
+            padding: "12px 36px 12px 14px", color: "var(--text-primary)",
+            fontSize: "14px", outline: "none", fontFamily: "inherit",
+            marginBottom: "14px", cursor: "pointer", appearance: "none", WebkitAppearance: "none",
+            backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='rgba(255,255,255,0.35)' stroke-width='1.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
+            backgroundRepeat: "no-repeat", backgroundPosition: "right 14px center",
+          }}
+        >
+          {COURSES.map((c) => <option key={c} value={c} style={{ background: "#1a1a1a" }}>{c}</option>)}
+        </select>
+      )}
+
+      {/* Mode toggle — hidden in doc mode (YouLearn cards are always flashcards) */}
+      {!docMode && (
+        <div style={{
+          display: "flex", gap: "6px", marginBottom: "20px",
+          background: "rgba(255,255,255,0.04)", border: "1px solid var(--color-border)",
+          borderRadius: "var(--radius-btn)", padding: "4px",
+        }}>
+          {["flashcards", "guide"].map((m) => (
+            <button
+              key={m}
+              onClick={() => { setMode(m); setFlashcards([]); setGuide(""); }}
+              style={{
+                flex: 1,
+                background: mode === m ? "var(--color-surface-hover)" : "transparent",
+                border:     mode === m ? "1px solid var(--color-border-strong)" : "1px solid transparent",
+                borderRadius: "9px", padding: "8px",
+                color:      mode === m ? "var(--text-primary)" : "var(--text-secondary)",
+                fontSize:   "13px", fontWeight: mode === m ? "600" : "400",
+                cursor:     "pointer", fontFamily: "inherit",
+                transition: "all var(--dur-fast) var(--ease-apple)",
+              }}
+            >
+              {m === "guide" ? "Study Guide" : "Flashcards"}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Toast */}
       {toast && (
@@ -883,7 +1049,7 @@ export default function Study() {
           alignItems: "center",
           gap: "8px",
         }}>
-          <span style={{ color: "rgba(255,200,80,0.8)", fontSize: "14px" }}>⚠</span>
+          {toast.startsWith("⚠️") && <span style={{ color: "rgba(255,200,80,0.8)", fontSize: "14px" }}>⚠</span>}
           {toast}
         </div>
       )}

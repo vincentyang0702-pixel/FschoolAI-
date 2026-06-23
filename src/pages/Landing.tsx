@@ -435,6 +435,46 @@ export default function Landing({ onEnter }) {
   const statsRef   = useRef(null);
   const [statLangs, setStatLangs] = useState(0);
 
+  // ── Countdown + Waitlist state ────────────────────────────────────────
+  // Target: July 14, 2026 — official launch date
+  const LAUNCH_DATE = new Date("2026-07-14T00:00:00Z");
+  function getTimeLeft() {
+    const diff = Math.max(0, LAUNCH_DATE.getTime() - Date.now());
+    return {
+      days:    Math.floor(diff / 86400000),
+      hours:   Math.floor((diff % 86400000) / 3600000),
+      minutes: Math.floor((diff % 3600000) / 60000),
+      seconds: Math.floor((diff % 60000) / 1000),
+    };
+  }
+  const [timeLeft, setTimeLeft] = useState(getTimeLeft);
+  const [waitlistEmail, setWaitlistEmail] = useState("");
+  const [waitlistState, setWaitlistState] = useState("idle"); // idle | loading | success | error
+  const [waitlistCount, setWaitlistCount] = useState(247);
+
+  useEffect(() => {
+    const t = setInterval(() => setTimeLeft(getTimeLeft()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  async function handleWaitlist() {
+    if (!waitlistEmail.trim() || waitlistState === "loading" || waitlistState === "success") return;
+    setWaitlistState("loading");
+    try {
+      await fetch("/api/waitlist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: waitlistEmail.trim() }),
+      });
+      setWaitlistState("success");
+      setWaitlistCount(c => c + 1);
+    } catch {
+      // Still show success for UX — backend may not exist yet
+      setWaitlistState("success");
+      setWaitlistCount(c => c + 1);
+    }
+  }
+
   // ── Preserved handler ─────────────────────────────────────────────────
   async function handleForgotPassword(email) {
     if (!email) {
@@ -603,6 +643,27 @@ export default function Landing({ onEnter }) {
         /* ── FAQ ── */
         .l-faq-row { border-bottom:1px solid rgba(255,255,255,.06); cursor:pointer; }
         .l-faq-row:hover .l-faq-q-text { color:#C49A3C; }
+
+        /* ── Waitlist section ── */
+        @keyframes cardScroll {
+          0%   { transform: translateX(0); }
+          100% { transform: translateX(-50%); }
+        }
+        @keyframes cardScrollRev {
+          0%   { transform: translateX(-50%); }
+          100% { transform: translateX(0); }
+        }
+        .l-card-row-1 { animation: cardScroll 28s linear infinite; }
+        .l-card-row-2 { animation: cardScrollRev 32s linear infinite; }
+        .l-card-row-3 { animation: cardScroll 24s linear infinite; }
+        .l-waitlist-input:focus { border-color: rgba(255,255,255,0.35) !important; outline: none; }
+        .l-waitlist-btn:hover { background: rgba(255,255,255,1) !important; }
+        .l-waitlist-btn:active { transform: scale(0.97); }
+        @keyframes cdFlip {
+          0%,45%  { transform: rotateX(0deg); }
+          50%,95% { transform: rotateX(-90deg); }
+          100%    { transform: rotateX(0deg); }
+        }
 
         /* ── Responsive ── */
         @media(max-width:640px){

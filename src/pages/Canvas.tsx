@@ -745,6 +745,9 @@ export default function Canvas() {
       { name: course.name, courseCode: course.courseCode, source: "manual_past", semester: course.semester },
       []
     );
+    // Re-read from Supabase so the new past course lands in the Past Courses bucket
+    // (loadCanvasData splits past-source courses out of the main list) right away.
+    await refreshFromSupabase().catch(() => {});
     const next = new Set(addedPastIds);
     next.add(tempId);
     setAddedPastIds(next);

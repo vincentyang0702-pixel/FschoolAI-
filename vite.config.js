@@ -59,6 +59,7 @@ import { resolve }      from "path";
 import tutorContextHandler from "./api/tutor-context.js";
 import extractHandler from "./api/extract.js";
 import fileUrlHandler from "./api/file-url.js";
+import flashcardsHandler from "./api/flashcards.js";
 
 function loadEnvKey(key) {
   // Read .env.local first (Vite's convention, where users put local secrets), then
@@ -72,6 +73,19 @@ function loadEnvKey(key) {
   }
   return process.env[key];
 }
+
+// Pre-wire server-side env aliases from VITE_ vars when the bare versions are absent.
+// All API proxies call loadEnvKey("SUPABASE_URL") etc. — these must resolve locally.
+// In production (Vercel) the real service key is set; locally we fall back to the
+// anon key (works because RLS is disabled on all app tables).
+;(() => {
+  if (!loadEnvKey("SUPABASE_URL"))
+    process.env.SUPABASE_URL = loadEnvKey("VITE_SUPABASE_URL") ?? "";
+  if (!loadEnvKey("SUPABASE_ANON_KEY"))
+    process.env.SUPABASE_ANON_KEY = loadEnvKey("VITE_SUPABASE_ANON_KEY") ?? "";
+  if (!loadEnvKey("SUPABASE_SERVICE_KEY"))
+    process.env.SUPABASE_SERVICE_KEY = loadEnvKey("VITE_SUPABASE_ANON_KEY") ?? "";
+})();
 
 const groqProxyPlugin = {
   name: "groq-proxy",
@@ -303,6 +317,9 @@ const extractProxyPlugin = {
     server.middlewares.use("/api/extract", async (req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
       if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+      process.env.OPENAI_API_KEY       = loadEnvKey("OPENAI_API_KEY"); // image OCR + media transcription
+      process.env.SUPABASE_URL         = loadEnvKey("SUPABASE_URL");         // read large uploads from Storage
+      process.env.SUPABASE_SERVICE_KEY = loadEnvKey("SUPABASE_SERVICE_KEY");
       let body = "";
       req.on("data", c => { body += c; });
       req.on("end", async () => {
@@ -411,6 +428,39 @@ const ragProxyPlugin = {
   },
 };
 
+// Transcribe proxy — runs the real api/transcribe.ts handler (large media → Storage
+// → ElevenLabs Scribe → RAG) under the dev server. Same module-load env caveat → inject
+// env first, dynamic import. Reads ?action=sign|start|status.
+const transcribeProxyPlugin = {
+  name: "transcribe-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/transcribe", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+      process.env.SUPABASE_URL         = loadEnvKey("SUPABASE_URL");
+      process.env.SUPABASE_SERVICE_KEY = loadEnvKey("SUPABASE_SERVICE_KEY");
+      process.env.OPENAI_API_KEY       = loadEnvKey("OPENAI_API_KEY");
+      process.env.ELEVENLABS_API_KEY   = loadEnvKey("ELEVENLABS_API_KEY");
+      const url = new URL(req.url, "http://localhost");
+      req.query = Object.fromEntries(url.searchParams.entries());
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try {
+          const { default: handler } = await import("./api/transcribe.js");
+          await handler(req, res);
+        } catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
 // Token-engine proxy — runs the real api/token-engine.ts handler under the dev
 // server so Study Rooms token awards + the header points summary work with
 // `npm run dev`, not just on Vercel. Builds its Supabase client at MODULE LOAD
@@ -435,6 +485,62 @@ const tokenEngineProxyPlugin = {
         res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
         try {
           const { default: handler } = await import("./api/token-engine.js");
+          await handler(req, res);
+        } catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
+// Flashcards proxy — runs the real api/flashcards.js handler under the dev server
+// so save/load uses the service key (bypasses RLS) with `npm run dev`.
+const flashcardsProxyPlugin = {
+  name: "flashcards-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/flashcards", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+      process.env.SUPABASE_URL         = loadEnvKey("SUPABASE_URL");
+      process.env.SUPABASE_SERVICE_KEY = loadEnvKey("SUPABASE_SERVICE_KEY");
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try { await flashcardsHandler(req, res); }
+        catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
+// Daily-room proxy — runs the real api/daily-room.ts handler under the dev server
+// so the Voice button works with `npm run dev`. Injects DAILY_API_KEY from
+// .env.local; returns 503 if missing (matches prod behaviour).
+const dailyRoomProxyPlugin = {
+  name: "daily-room-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/daily-room", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+      if (req.method === "OPTIONS") { res.statusCode = 204; res.end(); return; }
+      process.env.DAILY_API_KEY = loadEnvKey("DAILY_API_KEY");
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try {
+          const { default: handler } = await import("./api/daily-room.js");
           await handler(req, res);
         } catch (err) {
           res.statusCode = 502; res.setHeader("Content-Type", "application/json");
@@ -478,7 +584,33 @@ const nudgeProxyPlugin = {
   },
 };
 
+// Summarize proxy — runs api/summarize.ts in dev so the YouLearn reader works locally
+const summarizeProxyPlugin = {
+  name: "summarize-proxy",
+  configureServer(server) {
+    server.middlewares.use("/api/summarize", async (req, res) => {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+      process.env.ANTHROPIC_API_KEY = loadEnvKey("ANTHROPIC_API_KEY");
+      let body = "";
+      req.on("data", c => { body += c; });
+      req.on("end", async () => {
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
+        try {
+          const { default: handler } = await import("./api/summarize.js");
+          await handler(req, res);
+        } catch (err) {
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+    });
+  },
+};
+
 export default defineConfig({
-  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin, ragProxyPlugin, tokenEngineProxyPlugin, nudgeProxyPlugin],
+  plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin, ragProxyPlugin, tokenEngineProxyPlugin, nudgeProxyPlugin, flashcardsProxyPlugin, transcribeProxyPlugin, dailyRoomProxyPlugin, summarizeProxyPlugin],
   server:  { port: 5173, host: "0.0.0.0", allowedHosts: true },
 });

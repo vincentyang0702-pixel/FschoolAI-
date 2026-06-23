@@ -5,7 +5,7 @@ export default async function handler(req, res) {
   const key = process.env.GROQ_KEY;
   if (!key) return res.status(500).json({ error: "GROQ_KEY not configured" });
 
-  const { messages, system } = req.body;
+  const { messages, system, max_tokens } = req.body;
   if (!messages || !Array.isArray(messages)) return res.status(400).json({ error: "messages array required" });
 
   const body = JSON.stringify({
@@ -14,7 +14,7 @@ export default async function handler(req, res) {
       ...(system ? [{ role: "system", content: system }] : []),
       ...messages,
     ],
-    max_tokens: 1024,
+    max_tokens: max_tokens ?? 1024,
     temperature: 0.7,
   });
 
