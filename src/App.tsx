@@ -3,29 +3,38 @@
 // Adding a page: create pages/NewPage.jsx, import it here, add to PAGES.
 // PLACE IN: /src/App.jsx (replaces existing file)
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { useState, useCallback, useRef, useEffect, lazy, Suspense } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { NAV, LABEL }       from "./navigation/navConfig";
 import { useSwipe }         from "./navigation/useSwipe";
 import PageDots             from "./components/PageDots";
-import BottomNav            from "./components/BottomNav";
 import NeuralRing           from "./components/NeuralRing";
-import Landing              from "./pages/Landing";
-import Onboarding           from "./pages/Onboarding";
+import BottomNav            from "./components/BottomNav";
+import Landing              from "./pages/Landing"; // eager — logged-out entry, shown on first paint
 import { useApp }           from "./context/AppContext";
 import { supabase }         from "./api/supabase";
+import { signIn, signUp }   from "./api/auth";
 import { usePageTracking }  from "./hooks/usePageTracking";
 import { awardTokens }      from "./api/tokens";
 import TokenToast           from "./components/TokenToast";
+import NotificationPanel    from "./components/NotificationPanel";
+import { fetchUnreadCount, AppNotification } from "./api/notifications";
 
-import Work        from "./pages/Work";
-import Canvas      from "./pages/Canvas";
-import Assignment  from "./pages/Assignment";
-import Study       from "./pages/Study";
-import Toolkit     from "./pages/Toolkit";
-import Files       from "./pages/Files";
-import Identity    from "./pages/Identity";
-import Leaderboard from "./pages/Leaderboard";
-import StudyRooms  from "./pages/StudyRooms";
+// Pages are code-split: each loads as its own chunk only when first navigated to, so
+// the initial bundle stays small and a page's JS isn't downloaded until it's used.
+// (Only one page is mounted at a time — PAGES[currentPage] — so nothing offscreen renders.)
+const Card        = lazy(() => import("./pages/Card"));
+const Work        = lazy(() => import("./pages/Work"));
+const Canvas      = lazy(() => import("./pages/Canvas"));
+const Assignment  = lazy(() => import("./pages/Assignment"));
+const Study       = lazy(() => import("./pages/Study"));
+const Toolkit     = lazy(() => import("./pages/Toolkit"));
+const Identity    = lazy(() => import("./pages/Identity"));
+const Leaderboard = lazy(() => import("./pages/Leaderboard"));
+const Files       = lazy(() => import("./pages/Files"));
+const StudyRooms  = lazy(() => import("./pages/StudyRooms"));
+const Onboarding  = lazy(() => import("./pages/Onboarding"));
+const Spaces      = lazy(() => import("./pages/Spaces"));
 
 const PAGES = {
   work:        Work,
@@ -33,10 +42,11 @@ const PAGES = {
   assignment:  Assignment,
   study:       Study,
   toolkit:     Toolkit,
-  files:       Files,
   identity:    Identity,
   leaderboard: Leaderboard,
+  files:       Files,
   rooms:       StudyRooms,
+  spaces:      Spaces,
 };
 
 const LOGGED_IN_KEY = "fschool_logged_in";
@@ -73,31 +83,47 @@ const SHELL_STYLES = `
   .app-main {
     padding: 20px 22px 100px;
   }
-  /* Tabs nav mode — mobile: bottom bar needs clearance below content. */
-  .app-nav-tabs .app-main {
-    padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px));
-  }
-  /* Tabs nav mode — web (≥768px): sidebar replaces the bottom bar, so shift
-     content right to clear it (232px rail + 22px gutter) and drop the bottom pad. */
+  /* Tabs mode on web (≥768px): BottomNav becomes a fixed left sidebar, so push
+     the page content over to make room (232px rail / 64px collapsed — must match
+     RAIL_W in BottomNav.tsx). Only applies in tabs mode (.nav-tabs). */
   @media (min-width: 768px) {
-    .app-nav-tabs .app-header { padding-left: calc(var(--nav-rail, 232px) + 22px); }
-    .app-nav-tabs .app-main   { padding-left: calc(var(--nav-rail, 232px) + 22px); padding-bottom: 100px; }
+    .nav-tabs .app-page-transition {
+      margin-left: 232px;
+      transition: margin-left 0.2s var(--ease-apple);
+    }
+    .nav-tabs.nav-collapsed .app-page-transition {
+      margin-left: 64px;
+    }
   }
 `;
 
-{
-  // Update in place so HMR / style tweaks take effect without a manual reload.
-  let tag = document.getElementById("app-shell-styles");
-  if (!tag) {
-    tag = document.createElement("style");
-    tag.id = "app-shell-styles";
-    document.head.appendChild(tag);
-  }
+if (!document.getElementById("app-shell-styles")) {
+  const tag = document.createElement("style");
+  tag.id = "app-shell-styles";
   tag.textContent = SHELL_STYLES;
+  document.head.appendChild(tag);
+}
+
+// Shown briefly while a lazily-loaded page chunk downloads.
+function PageLoader() {
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "center", padding: "72px 0" }}>
+      <style>{`@keyframes appSpin{to{transform:rotate(360deg)}}`}</style>
+      <span style={{
+        width: 20, height: 20, borderRadius: "50%", display: "inline-block",
+        border: "2px solid rgba(255,255,255,0.14)", borderTopColor: "rgba(255,255,255,0.55)",
+        animation: "appSpin 0.7s linear infinite",
+      }} />
+    </div>
+  );
 }
 
 export default function App() {
-  const { userId, setUserId, refreshUser, userData, saveCanvasCredentials, updateUserField, pendingNav, setPendingNav, tokenSummary, navMode, setNavMode } = useApp();
+  // ── /card route — standalone page, no auth required ─────────────────────
+  if (window.location.pathname === "/card") {
+    return <Suspense fallback={<PageLoader />}><Card /></Suspense>;
+  }
+  const { userId, setUserId, refreshUser, userData, saveCanvasCredentials, updateUserField, pendingNav, setPendingNav, tokenSummary, navMode } = useApp();
 
   const [isLoggedIn, setIsLoggedIn] = useState(
     () => Boolean(localStorage.getItem(LOGGED_IN_KEY))
@@ -107,17 +133,46 @@ export default function App() {
   const [onboardingInitName,  setOnboardingInitName] = useState("");
   const [currentPage,         setCurrentPage]        = useState("work");
   const [visible,             setVisible]            = useState(true);
-  // Web sidebar (tabs mode) collapse state — persisted.
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(
-    () => { try { return localStorage.getItem("fschool_sidebar_collapsed") === "1"; } catch { return false; } }
-  );
-  const toggleSidebar = useCallback(() => {
-    setSidebarCollapsed(v => {
-      const next = !v;
-      try { localStorage.setItem("fschool_sidebar_collapsed", next ? "1" : "0"); } catch { /* quota */ }
-      return next;
-    });
-  }, []);
+  const [navCollapsed,        setNavCollapsed]       = useState(false);
+
+  // ── Notification bell state ────────────────────────────────────────────────
+  const [unreadCount,   setUnreadCount]   = useState(0);
+  const [showBell,      setShowBell]      = useState(false);
+  const [liveNotifs,    setLiveNotifs]    = useState<AppNotification[]>([]);
+  const [bellRing,      setBellRing]      = useState(false);
+  const prevUnreadRef = useRef(0);
+
+  // Fetch initial unread count on login
+  useEffect(() => {
+    if (!userId) return;
+    fetchUnreadCount(userId).then(c => { setUnreadCount(c); prevUnreadRef.current = c; });
+  }, [userId]);
+
+  // Subscribe to new notifications via postgres_changes (clean, no WS needed server-side)
+  useEffect(() => {
+    if (!userId) return;
+    const ch = supabase.channel(`notifs:${userId}`);
+    ch.on("postgres_changes", {
+      event: "INSERT", schema: "public", table: "notifications",
+      filter: `user_id=eq.${userId}`,
+    }, (payload) => {
+      const n = payload.new as AppNotification;
+      setLiveNotifs(prev => [n, ...prev]);
+      if (!showBell) setUnreadCount(c => c + 1); // panel is closed → increment badge
+    }).subscribe();
+    return () => { supabase.removeChannel(ch); };
+  }, [userId]); // eslint-disable-line
+
+  // Bell wobble: fires once when a new notification arrives while panel is closed
+  useEffect(() => {
+    if (unreadCount > prevUnreadRef.current && !showBell) {
+      setBellRing(true);
+      const t = setTimeout(() => setBellRing(false), 600);
+      prevUnreadRef.current = unreadCount;
+      return () => clearTimeout(t);
+    }
+    prevUnreadRef.current = unreadCount;
+  }, [unreadCount, showBell]); // eslint-disable-line
 
   // ── Verify banner state ────────────────────────────────────────────────────
   const [verifyBanner, setVerifyBanner] = useState(() => {
@@ -165,11 +220,15 @@ export default function App() {
     setResetLoading(true);
     setResetError("");
     try {
-      // Legacy reset: hash the new password and write it straight to the users row,
-      // then burn the one-time token. No Supabase Auth.
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(resetPw));
-      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-      await supabase.from("users").update({ password_hash, email_verify_token: null }).eq("id", resetMode.userId);
+      // Reset via Supabase Auth (GoTrue), not the legacy password_hash. The endpoint
+      // validates the one-time token, sets the GoTrue password (creating + linking the
+      // auth user if this account never migrated), and burns the token server-side.
+      const res = await fetch("/api/auth-migrate?action=reset", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ userId: resetMode.userId, token: resetMode.token, password: resetPw }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "Failed to reset password. Try again.");
       setResetDone(true);
       setTimeout(() => { setResetMode(null); setResetDone(false); }, 3000);
       const url = new URL(window.location.href);
@@ -178,7 +237,7 @@ export default function App() {
       url.searchParams.delete("userId");
       window.history.replaceState({}, "", url.toString());
     } catch (err) {
-      setResetError("Failed to reset password. Try again.");
+      setResetError(err?.message || "Failed to reset password. Try again.");
     }
     setResetLoading(false);
   }
@@ -255,99 +314,52 @@ export default function App() {
   const { onTouchStart, onTouchEnd } = useSwipe(swipeNavigate);
 
   // ── Auth ───────────────────────────────────────────────────────────────────
-  const handleEnter = useCallback(async (creds: any = {}) => {
+  const handleEnter = useCallback(async (creds: {
+    mode?: string; email?: string; password?: string; name?: string;
+  } = {}) => {
+    const email = (creds.email || "").toLowerCase().trim();
+
+    // ── Login — Supabase Auth (lazily migrates legacy SHA-256 accounts) ──────────
     if (creds.mode === "login") {
-      // Legacy auth: SHA-256 the password client-side and match it directly against
-      // the users row (RLS off, anon key). No Supabase Auth / GoTrue / service key.
-      const email = creds.email.toLowerCase().trim();
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
-      const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-      const { data: user, error } = await supabase
-        .from("users")
-        .select("id, name, school")
-        .eq("email", email)
-        .eq("password_hash", password_hash)
-        .maybeSingle();
-      if (error || !user) throw new Error("Incorrect email or password.");
-      localStorage.setItem("fschool_uid", user.id);
+      const profile = await signIn(email, creds.password); // establishes a GoTrue session
+      localStorage.setItem("fschool_uid", profile.id);
       localStorage.setItem(LOGGED_IN_KEY, "1");
-      if (user.name) localStorage.setItem("fschool_name", user.name);
+      if (profile.name) localStorage.setItem("fschool_name", profile.name);
       window.location.reload();
       return;
     }
 
-    // ── Signup ────────────────────────────────────────────────────────────────
+    // ── Signup — creates the GoTrue user + a fresh profile, then signs in ─────────
+    // (The server mints a brand-new profile id, so signing up on a device already
+    // logged into another account can't clobber it — the old "merge" bug.)
     localStorage.setItem("fschool_name", creds.name);
+    const profile = await signUp({ name: creds.name, email, password: creds.password });
+    localStorage.setItem("fschool_uid", profile.id);
 
-    const email = creds.email.toLowerCase().trim();
-
-    // Legacy signup: SHA-256 the password, then insert the users row directly. No GoTrue.
-    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(creds.password));
-    const password_hash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("");
-
-    // Reject a duplicate email (mirrors the old signup guard).
-    const { data: existing } = await supabase
-      .from("users")
-      .select("id")
-      .eq("email", email)
-      .maybeSingle();
-    if (existing) {
-      throw new Error("An account with this email already exists. Please sign in instead.");
-    }
-
-    // CRITICAL: every signup gets a brand-new id — never reuse the device's existing
-    // fschool_uid, or signing up on a device already logged into another account
-    // overwrites it (the old "merge" bug).
-    const newId = crypto.randomUUID();
-    localStorage.setItem("fschool_uid", newId);
-
-    try {
-      // insert, not upsert — a fresh signup is always a new row.
-      const { error: insertErr } = await supabase
-        .from("users")
-        .insert({ id: newId, name: creds.name, email, password_hash });
-      if (insertErr) throw insertErr;
-
-      // Send the beta verification email — non-blocking, won't fail signup if email fails.
-      fetch("/api/email?action=send", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ userId: newId, email, name: creds.name }),
-      }).catch(() => {});
-    } catch (err: any) {
-      console.warn("Supabase signup failed:", err.message);
-    }
+    // Verification email — non-blocking, won't fail signup if email fails.
+    fetch("/api/email?action=send", {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ userId: profile.id, email, name: creds.name }),
+    }).catch(() => {});
 
     // Point app state at the new account so onboarding + page-tracking write to it.
-    setUserId(newId);
-
+    setUserId(profile.id);
     setOnboardingEmail(creds.email);
     setOnboardingInitName(creds.name);
     setShowOnboarding(true);
   }, [setUserId]);
 
-  // Resume onboarding after a signup reload — identity is now the new user, so
-  // any writes from onboarding land on the correct (fresh) id.
-  useEffect(() => {
-    const pending = localStorage.getItem("fschool_pending_onboarding");
-    if (!pending) return;
-    localStorage.removeItem("fschool_pending_onboarding");
-    try {
-      const { email, name } = JSON.parse(pending);
-      setOnboardingEmail(email);
-      setOnboardingInitName(name);
-      setShowOnboarding(true);
-    } catch { /* ignore malformed */ }
-  }, []);
-
   // ── Onboarding complete ────────────────────────────────────────────────────
   const handleOnboardingComplete = useCallback(async ({
-    preferredName, schoolName, schoolCity, schoolCountry, schoolContinent, token, baseUrl, navMode: chosenNavMode,
+    preferredName, schoolName, schoolCity, schoolCountry, schoolContinent, token, baseUrl,
   }) => {
     if (preferredName) localStorage.setItem("fschool_name", preferredName);
-    if (chosenNavMode) setNavMode(chosenNavMode);
     try {
-      const patch: any = { id: userId };
+      const patch: {
+        id: string; name?: string; school?: string;
+        school_city?: string; school_country?: string; school_continent?: string;
+      } = { id: userId };
       if (preferredName)   patch.name            = preferredName;
       if (schoolName)      patch.school          = schoolName;
       if (schoolCity)      patch.school_city     = schoolCity;
@@ -361,7 +373,7 @@ export default function App() {
     localStorage.setItem(LOGGED_IN_KEY, "1");
     setShowOnboarding(false);
     setIsLoggedIn(true);
-  }, [userId, updateUserField, saveCanvasCredentials, setNavMode]);
+  }, [userId, updateUserField, saveCanvasCredentials]);
 
   // ── Overlays (render in BOTH logged-in and logged-out states so a reset
   // link works even when the user isn't signed in on this device) ───────────
@@ -508,11 +520,13 @@ export default function App() {
   // ── Render ─────────────────────────────────────────────────────────────────
   if (showOnboarding) {
     return (
-      <Onboarding
-        email={onboardingEmail}
-        preferredName={onboardingInitName}
-        onComplete={handleOnboardingComplete}
-      />
+      <Suspense fallback={<PageLoader />}>
+        <Onboarding
+          email={onboardingEmail}
+          preferredName={onboardingInitName}
+          onComplete={handleOnboardingComplete}
+        />
+      </Suspense>
     );
   }
 
@@ -523,7 +537,7 @@ export default function App() {
   // ── Email verification gate ───────────────────────────────────────────────
   // Block access until the user verifies their email. Only gates accounts
   // where email_verified is explicitly false (null = legacy user, let through).
-  if (false && userData && userData.email_verified === false) { // TODO: revert — dev bypass only
+  if (userData && userData.email_verified === false) {
     return (
       <>
         {overlays}
@@ -553,7 +567,7 @@ export default function App() {
             </button>
             <p style={{ marginTop:"22px", fontSize:"12px", color:"rgba(255,255,255,0.22)" }}>
               Wrong account?{" "}
-              <button onClick={async () => { try { await supabase.auth.signOut(); } catch {} localStorage.clear(); window.location.reload(); }} style={{ background:"none", border:"none", color:"rgba(255,255,255,0.32)", fontSize:"12px", cursor:"pointer", padding:0, textDecoration:"underline" }}>
+              <button onClick={() => { localStorage.clear(); window.location.reload(); }} style={{ background:"none", border:"none", color:"rgba(255,255,255,0.32)", fontSize:"12px", cursor:"pointer", padding:0, textDecoration:"underline" }}>
                 Sign out
               </button>
             </p>
@@ -567,9 +581,9 @@ export default function App() {
 
   return (
     <div
-      className={navMode === "tabs" ? "app-shell app-nav-tabs" : "app-shell"}
-      style={{ "--nav-rail": sidebarCollapsed ? "64px" : "232px" } as React.CSSProperties}
-      {...(navMode === "tabs" ? {} : { onTouchStart, onTouchEnd })}
+      className={`app-shell${navMode === "tabs" ? " nav-tabs" : ""}${navCollapsed ? " nav-collapsed" : ""}`}
+      onTouchStart={navMode === "tabs" ? undefined : onTouchStart}
+      onTouchEnd={navMode === "tabs" ? undefined : onTouchEnd}
     >
       {overlays}
       <TokenToast />
@@ -585,45 +599,126 @@ export default function App() {
           <span className="app-page-label">
             {LABEL[currentPage]}
           </span>
-          {tokenSummary && (
-            <button
-              onClick={() => navigate("leaderboard")}
-              style={{
-                display: "flex", alignItems: "center", gap: "5px",
-                background: "rgba(196,154,60,0.08)", border: "1px solid rgba(196,154,60,0.22)",
-                borderRadius: "20px", padding: "4px 10px",
-                cursor: "pointer", fontFamily: "inherit", outline: "none",
-                transition: "background 0.15s",
-              }}
-              onMouseEnter={e => e.currentTarget.style.background = "rgba(196,154,60,0.15)"}
-              onMouseLeave={e => e.currentTarget.style.background = "rgba(196,154,60,0.08)"}
-            >
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#C49A3C", display: "inline-block", flexShrink: 0 }} />
-              <span style={{ color: "#C49A3C", fontSize: "11px", fontWeight: "600", letterSpacing: "-0.1px" }}>
-                {tokenSummary.points}
-              </span>
-              <span style={{ color: "rgba(196,154,60,0.5)", fontSize: "10px" }}>·</span>
-              <span style={{ color: "rgba(255,255,255,0.35)", fontSize: "10px", letterSpacing: "0.3px" }}>
-                {tokenSummary.tier}
-              </span>
-            </button>
-          )}
-          {navMode === "tabs" ? <span style={{ width: 24 }} /> : <PageDots currentPage={currentPage} />}
+          {/* ── Header cluster: token status + notification bell ───────────── */}
+          {/* Single intentional unit — consistent height (32px), same border
+              treatment, token pill + hairline divider + bell circle. */}
+          <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
+            <div style={{
+              display: "flex", alignItems: "center",
+              height: "32px",
+              background: "rgba(255,255,255,0.04)",
+              border: "1px solid rgba(255,255,255,0.09)",
+              borderRadius: "16px",
+              overflow: "visible",  // badge overflows the pill boundary
+            }}>
+              {/* Token status — tappable, navigates to leaderboard */}
+              {tokenSummary && (
+                <>
+                  <button
+                    onClick={() => navigate("leaderboard")}
+                    style={{
+                      display: "flex", alignItems: "center", gap: "5px",
+                      padding: "0 8px 0 11px", height: "100%",
+                      background: "none", border: "none",
+                      cursor: "pointer", fontFamily: "inherit", outline: "none",
+                      borderRadius: "16px 0 0 16px",
+                      transition: "opacity 0.15s",
+                    }}
+                    onMouseEnter={e => (e.currentTarget.style.opacity = "0.72")}
+                    onMouseLeave={e => (e.currentTarget.style.opacity = "1")}
+                  >
+                    <span style={{ width: 6, height: 6, borderRadius: "50%", background: "#C49A3C", display: "inline-block", flexShrink: 0 }} />
+                    <span style={{ color: "#C49A3C", fontSize: "11px", fontWeight: "600", letterSpacing: "-0.1px" }}>
+                      {tokenSummary.points}
+                    </span>
+                    <span style={{ color: "rgba(196,154,60,0.45)", fontSize: "10px", margin: "0 1px" }}>·</span>
+                    <span style={{ color: "rgba(255,255,255,0.3)", fontSize: "10px", letterSpacing: "0.3px" }}>
+                      {tokenSummary.tier}
+                    </span>
+                  </button>
+                  {/* Hairline divider between token and bell */}
+                  <div style={{ width: 1, height: 16, background: "rgba(255,255,255,0.09)", flexShrink: 0 }} />
+                </>
+              )}
+
+              {/* Bell — circle sits flush inside the pill */}
+              <motion.button
+                onClick={() => { setShowBell(v => !v); if (!showBell) setUnreadCount(0); }}
+                animate={bellRing ? { rotate: [0, -14, 11, -8, 5, -3, 1, 0] } : { rotate: 0 }}
+                transition={{ duration: 0.52, ease: "easeOut" }}
+                style={{
+                  width: 32, height: 32, flexShrink: 0,
+                  borderRadius: tokenSummary ? "0 15px 15px 0" : "15px",
+                  border: "none",
+                  background: showBell ? "rgba(255,255,255,0.08)" : "transparent",
+                  cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center",
+                  color: unreadCount > 0 ? "#C49A3C" : "rgba(255,255,255,0.38)",
+                  position: "relative",
+                  transition: "background 0.15s, color 0.15s",
+                }}
+                aria-label="Notifications"
+              >
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                  <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                </svg>
+                {/* Unread badge — spring pops in, re-mounts on count change */}
+                <AnimatePresence>
+                  {unreadCount > 0 && (
+                    <motion.span
+                      key={unreadCount}
+                      initial={{ scale: 0, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      exit={{ scale: 0, opacity: 0 }}
+                      transition={{ type: "spring", stiffness: 520, damping: 22 }}
+                      style={{
+                        position: "absolute", top: "3px", right: "3px",
+                        minWidth: "15px", height: "15px",
+                        background: "#C49A3C", color: "#111",
+                        borderRadius: "8px", fontSize: "9px", fontWeight: "700",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        padding: "0 3px", lineHeight: 1,
+                        boxShadow: "0 0 0 2px var(--color-bg)",
+                      }}
+                    >
+                      {unreadCount > 99 ? "99+" : unreadCount}
+                    </motion.span>
+                  )}
+                </AnimatePresence>
+              </motion.button>
+            </div>
+
+            {/* Panel — position:fixed, so parent stacking context doesn't matter */}
+            <AnimatePresence>
+              {showBell && (
+                <NotificationPanel
+                  key="notif-panel"
+                  userId={userId}
+                  liveNotifs={liveNotifs}
+                  onClose={() => setShowBell(false)}
+                  onNavigate={navigate}
+                  onUnreadChange={setUnreadCount}
+                />
+              )}
+            </AnimatePresence>
+          </div>
+          {navMode !== "tabs" && <PageDots currentPage={currentPage} />}
         </header>
 
         <main className="app-main">
-          {PageComponent && <PageComponent />}
+          <Suspense fallback={<PageLoader />}>
+            {PageComponent && <PageComponent />}
+          </Suspense>
         </main>
       </div>
 
       <NeuralRing />
-
       {navMode === "tabs" && (
         <BottomNav
           currentPage={currentPage}
           onNavigate={navigate}
-          collapsed={sidebarCollapsed}
-          onToggleCollapse={toggleSidebar}
+          collapsed={navCollapsed}
+          onToggleCollapse={() => setNavCollapsed(v => !v)}
         />
       )}
     </div>

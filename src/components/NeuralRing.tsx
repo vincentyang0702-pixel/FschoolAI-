@@ -5,7 +5,8 @@
 //  • Position is global and persists across page navigation.
 //  • Ring hides (opacity 0, pointer-events none) while the chat is open.
 //  • Ring drag sets document.body[data-ring-drag] so useSwipe ignores the gesture.
-//  • Chat can be closed by swiping down on the drag handle or tapping the backdrop.
+//  • Chat is a non-modal floating window (bottom-right); the app stays interactive while open.
+//  • Chat can be closed by the × button, swiping down on the drag handle, or a navigation command.
 //  • Renders via createPortal into document.body to escape any ancestor overflow/stacking context.
 //  • Ring name label below the sphere is editable and saved to Supabase users.ring_name.
 //  • Voice mode: mute toggle in header. When unmuted, AI replies are spoken via ElevenLabs TTS.
@@ -1126,8 +1127,6 @@ export default function NeuralRing() {
     setStreamingMsg("");
   }, []); // uses only refs — stable
 
-  const sheetStartY             = useRef(null);
-  const [sheetDragY, setSheetDragY] = useState(0);
 
   useEffect(() => {
     const name = userData?.ring_name ?? "";
@@ -1142,7 +1141,6 @@ export default function NeuralRing() {
   useEffect(() => {
     // Secondary sync — fires after paint. Direct assignments below are the primary.
     if (voiceModeRef.current !== voiceMode) {
-      console.log("[voiceMode] useEffect sync:", voiceModeRef.current, "→", voiceMode, new Error("voiceMode useEffect").stack?.split("\n")[2]?.trim());
       voiceModeRef.current = voiceMode;
     }
   }, [voiceMode]);
@@ -1525,24 +1523,58 @@ export default function NeuralRing() {
     }
   }, [isDragging]);
 
-  // ── Sheet swipe-to-close ────────────────────────────────────────────────────
-  const handleSheetHandleTouchStart = useCallback((e) => {
-    sheetStartY.current = e.touches[0].clientY;
-    setSheetDragY(0);
+  // ── Movable / resizable / maximizable chat window ───────────────────────────
+  const [maximized, setMaximized] = useState(false);
+  const [winGeom, setWinGeom] = useState(() => {
+    const vw = typeof window !== "undefined" ? window.innerWidth  : 1024;
+    const vh = typeof window !== "undefined" ? window.innerHeight : 768;
+    const width  = Math.min(384, vw - 24);
+    const height = Math.min(580, vh - 96);
+    return { left: vw - width - 16, top: vh - height - 16, width, height };
+  });
+  const winDragRef = useRef<any>(null); // { mode, startX, startY, start:{left,top,width,height} }
+
+  // Pointer move during a move/resize gesture (stable ref so we can remove the listener).
+  const onWinPointerMove = useCallback((e: PointerEvent) => {
+    const d = winDragRef.current; if (!d) return;
+    const MINW = 300, MINH = 360;
+    const dx = e.clientX - d.startX, dy = e.clientY - d.startY;
+    let { left, top, width, height } = d.start;
+    if (d.mode === "move") { left += dx; top += dy; }
+    else {
+      if (d.mode.includes("e")) width  = d.start.width  + dx;
+      if (d.mode.includes("s")) height = d.start.height + dy;
+      if (d.mode.includes("w")) { width  = d.start.width  - dx; left = d.start.left + dx; }
+      if (d.mode.includes("n")) { height = d.start.height - dy; top  = d.start.top  + dy; }
+      // enforce minimums while keeping the opposite (anchored) edge fixed
+      if (width  < MINW) { if (d.mode.includes("w")) left = d.start.left + (d.start.width  - MINW); width  = MINW; }
+      if (height < MINH) { if (d.mode.includes("n")) top  = d.start.top  + (d.start.height - MINH); height = MINH; }
+    }
+    const vw = window.innerWidth, vh = window.innerHeight;
+    width  = Math.min(width,  vw - 8);
+    height = Math.min(height, vh - 8);
+    left = Math.max(48 - width, Math.min(left, vw - 48)); // always keep ≥48px on screen
+    top  = Math.max(0, Math.min(top, vh - 40));
+    setWinGeom({ left, top, width, height });
   }, []);
 
-  const handleSheetHandleTouchMove = useCallback((e) => {
-    if (sheetStartY.current === null) return;
-    const dy = e.touches[0].clientY - sheetStartY.current;
-    if (dy > 0) { e.preventDefault(); setSheetDragY(dy); }
-  }, []);
+  const onWinPointerUp = useCallback(() => {
+    winDragRef.current = null;
+    window.removeEventListener("pointermove", onWinPointerMove);
+    window.removeEventListener("pointerup", onWinPointerUp);
+    try { document.body.style.userSelect = ""; } catch { /* noop */ }
+  }, [onWinPointerMove]);
 
-  const handleSheetHandleTouchEnd = useCallback(() => {
-    const dy = sheetDragY;
-    sheetStartY.current = null;
-    setSheetDragY(0);
-    if (dy > 80) { setChatOpen(false); setEditingName(false); }
-  }, [sheetDragY]);
+  // Start a move ("move") or resize ("n"/"s"/"e"/"w"/"ne"/… ) gesture.
+  const beginWinDrag = (mode: string) => (e: React.PointerEvent) => {
+    if (maximized) return; // can't move/resize while full-screen
+    if (mode === "move" && (e.target as HTMLElement)?.closest?.("button, input")) return; // let controls work
+    e.preventDefault();
+    winDragRef.current = { mode, startX: e.clientX, startY: e.clientY, start: { ...winGeom } };
+    try { document.body.style.userSelect = "none"; } catch { /* noop */ }
+    window.addEventListener("pointermove", onWinPointerMove);
+    window.addEventListener("pointerup", onWinPointerUp);
+  };
 
   // ── Session close queue — fires living mind rewrite when chat closes ────────
   const prevChatOpenClose = useRef(false);
@@ -1914,7 +1946,6 @@ export default function NeuralRing() {
   function exitVoiceMode() {
     // Set ref synchronously FIRST so any in-flight async code sees false immediately,
     // without waiting for the useEffect to run after paint.
-    console.log("[voiceMode] exitVoiceMode() called — setting ref false synchronously", new Error("exitVoiceMode").stack?.split("\n")[2]?.trim());
     voiceModeRef.current = false;
     if (mediaRecorderRef.current?.state === "recording") mediaRecorderRef.current.stop();
     micStreamRef.current?.getTracks().forEach(t => t.stop());
@@ -1993,7 +2024,6 @@ export default function NeuralRing() {
     // Guard: if voice mode was exited between recording start and onstop firing,
     // discard the audio — don't send a stale recording as a text-mode message.
     if (!voiceModeRef.current) {
-      console.log("[voiceMode] _transcribeAndSend: voiceModeRef.current is false — discarding stale recording");
       return;
     }
     sphereStateRef.current = "thinking";
@@ -2112,7 +2142,6 @@ export default function NeuralRing() {
     }
 
     // ── DIAGNOSTIC LOGS — remove after confirming voice gates ───────────────
-    console.log("[vdiag] sendMessage | voiceModeRef.current:", voiceModeRef.current, "| muted:", muted, "| text:", text.slice(0, 40));
 
     // ── Instant nav shortcut (pre-API) ────────────────────────────────────────
     const navMatch = NAV_INTENTS.find(n => n.re.test(text));
@@ -2172,7 +2201,6 @@ export default function NeuralRing() {
         .then(r => r.ok ? r.json() : null)
         .then(d => {
           const passages = d?.passages ?? [];
-          console.log("[rag] retrieved", passages.length, "passage(s) for grounding");
           if (passages.length) {
             ragContext = passages.map((p, i) =>
               `[${i + 1}] ${p.title}${p.heading ? " — " + p.heading : ""}${p.loc ? " (" + p.loc + ")" : ""}\n${p.text}`
@@ -2184,7 +2212,6 @@ export default function NeuralRing() {
       // Wait briefly so retrieval can ground the reply, but never block the chat for long.
       await Promise.race([ragFetch, new Promise(r => setTimeout(r, 3000))]);
 
-      console.log("[vdiag] system-prompt gate | voiceModeRef.current:", voiceModeRef.current, "→ using:", voiceModeRef.current ? "buildVoiceSystem" : "buildChatSystem");
       const system = voiceModeRef.current
         ? buildVoiceSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, availableVoices, leaderboardRank)
         : buildChatSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, messages.length === 0, availableVoices, courses);
@@ -2195,7 +2222,7 @@ export default function NeuralRing() {
       // prompt caching (PR #12). RAG source material is query-specific, so it goes in
       // its own block (kept out of the cached prefix, which must stay stable).
       const ragBlock = ragContext
-        ? `SOURCE MATERIAL — passages from the student's own uploaded documents. When you use one, ground your answer in it and cite it inline as [n].\n\n${ragContext}`
+        ? `SOURCE MATERIAL — passages retrieved RIGHT NOW from the student's own uploaded documents. They ARE available to you. Answer grounded in them and cite inline as [n]. Ignore any EARLIER message in this conversation that claimed you had no documents or told them to sync Canvas — that is outdated; these materials are available now.\n\n${ragContext}`
         : "";
       let finalSystem;
       if (preloadedContext) {
@@ -2228,7 +2255,6 @@ export default function NeuralRing() {
 
       let voiceTTSDone = null; // resolves when all sentence-chunked TTS finishes
 
-      console.log("[vdiag] TTS-path gate | voiceModeRef.current:", voiceModeRef.current, "| muted:", muted, "→", (voiceModeRef.current && !muted) ? "STREAMING VOICE" : "NON-VOICE fallback");
       if (voiceModeRef.current && !muted) {
         // ── Streaming voice: sentence-chunked TTS pipeline ───────────────────
         // Each sentence is sent to TTS the moment Claude generates it,
@@ -2312,22 +2338,18 @@ export default function NeuralRing() {
           try {
             console.warn("[tutor] Sonnet stream failed, trying non-streaming:", err.message);
             raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
-            console.log("[tutor] served by: claude-sonnet-4-6 (non-streaming fallback)");
           } catch (claudeErr) {
             console.warn("[tutor] Sonnet also failed, falling back to Groq:", claudeErr.message);
             raw = await groq(apiMessages, groqSystem);
-            console.log("[tutor] served by: groq/llama-3.1-8b-instant (double fallback)");
           }
         }
       } else {
         // Text chat / muted voice — non-streaming Sonnet, Groq fallback
         try {
           raw = await claudeTutor(apiMessages, finalSystem, abortCtrlRef.current?.signal);
-          console.log("[tutor] served by: claude-sonnet-4-6");
         } catch (claudeErr) {
           console.warn("[tutor] Sonnet failed, falling back to Groq:", claudeErr.message);
           raw = await groq(apiMessages, groqSystem);
-          console.log("[tutor] served by: groq/llama-3.1-8b-instant (fallback)");
         }
       }
 
@@ -2336,7 +2358,6 @@ export default function NeuralRing() {
 
       // Apply VOICE tag — match by name, persist + apply immediately
       if (voiceTags.VOICE) {
-        console.log("[vdiag] VOICE tag:", voiceTags.VOICE, "| availableVoices.length:", availableVoices.length);
         const query  = voiceTags.VOICE.toLowerCase().trim();
         const words  = query.split(/\s+/).filter(w => w.length > 2);
         // Score each voice: exact name > partial name > label words coverage
@@ -2349,7 +2370,6 @@ export default function NeuralRing() {
           return { v, score: hits };
         }).filter(x => x.score > 0).sort((a, b) => b.score - a.score);
         const match = scored[0]?.v;
-        console.log("[vdiag] VOICE match:", match?.name ?? "NO MATCH", "| top-3:", scored.slice(0,3).map(x=>`${x.v.name}:${x.score}`).join(", "));
         if (match) {
           voiceIdRef.current = match.voice_id;         // sync — next TTS chunk uses this
           setActiveVoiceId(match.voice_id);             // instant chip highlight
@@ -2379,7 +2399,6 @@ export default function NeuralRing() {
       // ── Quiz detection (before parseNav so tags don't confuse nav parser) ───
       const quizCards = parseQuiz(rawClean);
       if (quizCards) {
-        console.log("[vdiag] quiz detected | voiceModeRef.current:", voiceModeRef.current, "→", voiceModeRef.current ? "VOICE one-at-a-time" : "TEXT card dump");
         if (voiceModeRef.current) {
           // ── Voice quiz: one question at a time, spoken ───────────────────
           voiceQuizRef.current = { questions: quizCards, idx: 0, score: 0 };
@@ -2551,34 +2570,51 @@ export default function NeuralRing() {
       {/* Chat sheet */}
       {chatOpen && (
         <>
-          <div onClick={() => setChatOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 9997 }} />
+          {/* Floating, non-modal chat window docked bottom-right. No backdrop, so the
+              rest of the app stays interactive — close via the × button or swipe-down.
+              Responsive width: a 384px widget on web, near-full-width on mobile. */}
           <div
             onTouchStart={e => e.stopPropagation()}
             onTouchEnd={e => e.stopPropagation()}
             style={{
-              position: "fixed", bottom: 0, left: 0, right: 0,
-              height: "72vh", maxHeight: "680px",
-              paddingBottom: "env(safe-area-inset-bottom, 0px)",
+              position: "fixed",
+              ...(maximized
+                ? { inset: 0, borderRadius: 0, border: "none", boxShadow: "none" }
+                : {
+                    left: winGeom.left, top: winGeom.top, width: winGeom.width, height: winGeom.height,
+                    borderRadius: 20, border: "1px solid rgba(255,255,255,0.10)",
+                    boxShadow: "0 18px 60px rgba(0,0,0,0.55)",
+                  }),
               background: "rgba(16,16,16,0.96)",
               backdropFilter: "blur(32px)", WebkitBackdropFilter: "blur(32px)",
-              borderRadius: "22px 22px 0 0",
-              border: "1px solid rgba(255,255,255,0.09)", borderBottom: "none",
               display: "flex", flexDirection: "column",
               fontFamily: "var(--font-sans)",
-              boxShadow: "0 -12px 48px rgba(0,0,0,0.6)",
               zIndex: 9998,
-              transform: `translateY(${sheetDragY}px)`,
-              transition: sheetDragY > 0 ? "none" : "transform 0.28s var(--ease-apple)",
+              overflow: "hidden",
             }}
           >
-            {/* Drag handle */}
+            {/* Resize handles — edges + corners (hidden when maximized). Corners come
+                last so they sit above the edge strips at overlaps. */}
+            {!maximized && [
+              { dir: "n",  s: { top: 0, left: 10, right: 10, height: 7, cursor: "ns-resize" } },
+              { dir: "s",  s: { bottom: 0, left: 10, right: 10, height: 7, cursor: "ns-resize" } },
+              { dir: "e",  s: { top: 10, bottom: 10, right: 0, width: 7, cursor: "ew-resize" } },
+              { dir: "w",  s: { top: 10, bottom: 10, left: 0, width: 7, cursor: "ew-resize" } },
+              { dir: "nw", s: { top: 0, left: 0, width: 16, height: 16, cursor: "nwse-resize" } },
+              { dir: "ne", s: { top: 0, right: 0, width: 16, height: 16, cursor: "nesw-resize" } },
+              { dir: "sw", s: { bottom: 0, left: 0, width: 16, height: 16, cursor: "nesw-resize" } },
+              { dir: "se", s: { bottom: 0, right: 0, width: 16, height: 16, cursor: "nwse-resize" } },
+            ].map(h => (
+              <div key={h.dir} onPointerDown={beginWinDrag(h.dir)}
+                style={{ position: "absolute", zIndex: 10, touchAction: "none", ...h.s }} />
+            ))}
+
+            {/* Title-bar grip — drag to move the window */}
             <div
-              onTouchStart={handleSheetHandleTouchStart}
-              onTouchMove={handleSheetHandleTouchMove}
-              onTouchEnd={handleSheetHandleTouchEnd}
-              style={{ display: "flex", justifyContent: "center", padding: "14px 0 6px", flexShrink: 0, cursor: "grab", touchAction: "none" }}
+              onPointerDown={beginWinDrag("move")}
+              style={{ display: "flex", justifyContent: "center", padding: "14px 0 6px", flexShrink: 0, cursor: maximized ? "default" : "grab", touchAction: "none" }}
             >
-              <div style={{ width: 40, height: 4, borderRadius: 2, background: "rgba(255,255,255,0.18)" }} />
+              {!maximized && <div style={{ width: 40, height: 4, borderRadius: 2, background: "rgba(255,255,255,0.18)" }} />}
             </div>
 
             {/* Header */}
@@ -2648,6 +2684,43 @@ export default function NeuralRing() {
 
                 {/* Voice toggle */}
                 <VoiceToggle muted={muted} onClick={toggleMute} speaking={speaking} />
+
+                {/* Maximize / restore — expand to cover the screen and back */}
+                <button
+                  onClick={() => setMaximized(m => !m)}
+                  title={maximized ? "Restore" : "Expand to full screen"}
+                  aria-label={maximized ? "Restore window" : "Maximize window"}
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 32, height: 32, flexShrink: 0, borderRadius: "50%",
+                    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                    cursor: "pointer", outline: "none", WebkitTapHighlightColor: "transparent",
+                  }}
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    {maximized
+                      ? <path d="M8 3v3a2 2 0 0 1-2 2H3M16 3v3a2 2 0 0 0 2 2h3M3 16h3a2 2 0 0 1 2 2v3M21 16h-3a2 2 0 0 0-2 2v3" />
+                      : <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M21 16v3a2 2 0 0 1-2 2h-3M3 16v3a2 2 0 0 0 2 2h3" />}
+                  </svg>
+                </button>
+
+                {/* Close — the window is non-modal (no backdrop), so this is the
+                    primary way to dismiss it on desktop. */}
+                <button
+                  onClick={() => setChatOpen(false)}
+                  title="Close chat"
+                  aria-label="Close chat"
+                  style={{
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    width: 32, height: 32, flexShrink: 0, borderRadius: "50%",
+                    background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.12)",
+                    cursor: "pointer", outline: "none", WebkitTapHighlightColor: "transparent",
+                  }}
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.6)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M18 6 6 18M6 6l12 12" />
+                  </svg>
+                </button>
               </div>
             </div>
 
@@ -2920,7 +2993,7 @@ export default function NeuralRing() {
               <div style={{ display: "flex", gap: "10px", padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
                 {/* Subtle waveform glyph — enters voice mode */}
                 <button
-                  onClick={() => { getAudioContext(); voiceModeRef.current = true; console.log("[voiceMode] entered — ref set true synchronously"); setVoiceMode(true); startAutoListen(); }}
+                  onClick={() => { getAudioContext(); voiceModeRef.current = true; setVoiceMode(true); startAutoListen(); }}
                   title="Voice mode"
                   style={{
                     background: "none", border: "none", padding: "8px 6px",

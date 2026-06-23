@@ -15,11 +15,13 @@ import {
 import type { AccessFilters } from "../api/rooms";
 import { loadRecentMessages, postRoomMessage } from "../api/chat";
 import type { ChatMessage } from "../api/chat";
-import { loadStrokes, loadBackground, addStroke, deleteStroke, setBackground, clearBoard } from "../api/whiteboard";
 import type { Stroke, Point, PenStyle } from "../api/whiteboard";
+import * as Y from "yjs";
+import { SupabaseBroadcastProvider } from "../lib/yjsSupabaseProvider";
 import Whiteboard, { PEN_COLORS, PEN_WIDTHS, ERASER_SIZES, DEFAULT_BG } from "../components/Whiteboard";
 import type { Tool } from "../components/Whiteboard";
 import StudyOrb from "../components/StudyOrb";
+import VoiceRoom from "../components/VoiceRoom";
 
 // ── Access filters ────────────────────────────────────────────────────────────
 // Which eligibility rules an owner can put on a room. Server enforces these via
@@ -318,9 +320,13 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
 
   async function nudgeFriend(friend) {
     setNudged(n => ({ ...n, [friend.id]: "sending" }));
+    // A friend is "online" if they have an active presence entry in the global-studying
+    // channel — regardless of whether they're in a room or just in the lobby.
+    // This prevents sending an email when the friend is right there in the app.
+    const recipientOnline = Object.prototype.hasOwnProperty.call(globalState, friend.id);
     const result = await sendNudge({
       fromUserId: userId, toUserId: friend.id, roomId: null,
-      fromName: userData?.name ?? "Someone", roomName: null, recipientOnline: false,
+      fromName: userData?.name ?? "Someone", roomName: null, recipientOnline,
     });
     setNudged(n => ({ ...n, [friend.id]: result?.sent === false && result.reason === "rate_limited" ? "limited" : "sent" }));
   }
@@ -531,33 +537,37 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
       </div>
 
       {/* ── Join with code ─────────────────────────────────────── */}
-      <div style={{
-        display:"flex", gap:"8px", alignItems:"center", marginBottom:"6px",
-        background:"rgba(255,255,255,0.025)", border:"1px solid rgba(255,255,255,0.07)",
-        borderRadius:"12px", padding:"9px 12px", transition:"border-color 0.15s",
-      }}
-        onFocusCapture={e => ((e.currentTarget as HTMLDivElement).style.borderColor = "rgba(196,154,60,0.25)")}
-        onBlurCapture={e  => ((e.currentTarget as HTMLDivElement).style.borderColor = "rgba(255,255,255,0.07)")}
-      >
-        <input
-          value={codeInput}
-          onChange={e => { setCodeInput(e.target.value.toUpperCase().slice(0, 6)); setCodeError(""); }}
-          onKeyDown={e => e.key === "Enter" && handleJoinByCode()}
-          placeholder="Enter room code…"
-          maxLength={6}
-          style={{
-            flex:1, background:"transparent", border:"none",
-            color:"var(--text-primary)", fontSize:"13px",
-            outline:"none", fontFamily:"monospace", letterSpacing:"3px",
-          }}
-        />
-        <button
-          onClick={handleJoinByCode}
-          disabled={codeInput.length < 6 || codeLookingUp}
-          style={{ ...S.accentBtn, padding:"6px 14px", fontSize:"12px", opacity: codeInput.length < 6 ? 0.35 : 1, flexShrink:0 }}
+      <div style={{ marginBottom:"6px" }}>
+        <p style={{ fontSize:"11px", color:"var(--text-dim)", letterSpacing:"1.5px", textTransform:"uppercase", marginBottom:"8px" }}>Have a room code?</p>
+        <div style={{
+          display:"flex", gap:"10px", alignItems:"center",
+          background:"rgba(196,154,60,0.04)", border:"1px solid rgba(196,154,60,0.18)",
+          borderRadius:"14px", padding:"12px 16px", transition:"border-color 0.15s, box-shadow 0.15s",
+        }}
+          onFocusCapture={e => { (e.currentTarget as HTMLDivElement).style.borderColor = "rgba(196,154,60,0.45)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "0 0 0 3px rgba(196,154,60,0.08)"; }}
+          onBlurCapture={e  => { (e.currentTarget as HTMLDivElement).style.borderColor = "rgba(196,154,60,0.18)"; (e.currentTarget as HTMLDivElement).style.boxShadow = "none"; }}
         >
-          {codeLookingUp ? "…" : "Join →"}
-        </button>
+          <span style={{ fontSize:"18px", flexShrink:0 }}>🔑</span>
+          <input
+            value={codeInput}
+            onChange={e => { setCodeInput(e.target.value.toUpperCase().slice(0, 6)); setCodeError(""); }}
+            onKeyDown={e => e.key === "Enter" && handleJoinByCode()}
+            placeholder="A3B2C1"
+            maxLength={6}
+            style={{
+              flex:1, minWidth:0, background:"transparent", border:"none",
+              color:"var(--text-primary)", fontSize:"18px",
+              outline:"none", fontFamily:"monospace", letterSpacing:"6px", fontWeight:"700",
+            }}
+          />
+          <button
+            onClick={handleJoinByCode}
+            disabled={codeInput.length < 6 || codeLookingUp}
+            style={{ ...S.primaryBtn, padding:"9px 14px", fontSize:"13px", opacity: codeInput.length < 6 ? 0.4 : 1, flexShrink:0 }}
+          >
+            {codeLookingUp ? "…" : "Join Room"}
+          </button>
+        </div>
       </div>
       {codeError && (
         <p style={{ fontSize:"12px", color:"rgba(255,100,90,0.8)", marginBottom:"10px", paddingLeft:"4px" }}>{codeError}</p>
@@ -603,6 +613,7 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
                 <span style={{ width:8, height:8, borderRadius:"50%", background:"var(--color-accent)", flexShrink:0 }} />
                 <div style={{ flex:1, minWidth:0 }}>
                   <p style={{ fontSize:"13px", fontWeight:"500", color:"var(--text-primary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.name}</p>
+                  {f.email && <p style={{ fontSize:"11px", color:"var(--text-dim)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.email}</p>}
                   <p style={{ fontSize:"11px", color:"var(--color-accent)" }}>studying now</p>
                 </div>
                 <button onClick={() => joinFriendRoom(friendRoomMap[f.id])} style={{ ...S.accentBtn, padding:"6px 14px", fontSize:"12px" }}>Join</button>
@@ -610,17 +621,23 @@ function Lobby({ onJoin, totalOnline, roomCounts, globalState = {}, pendingInvit
             ))}
             {offlineFriends.map(f => {
               const st = nudged[f.id];
+              const nudgedDone = st === "sent";
               return (
                 <div key={f.id} style={{ display:"flex", alignItems:"center", gap:"10px", background:"var(--color-surface)", border:"1px solid var(--color-border)", borderRadius:"12px", padding:"10px 14px" }}>
                   <span style={{ width:8, height:8, borderRadius:"50%", background:"rgba(255,255,255,0.15)", flexShrink:0 }} />
                   <div style={{ flex:1, minWidth:0 }}>
                     <p style={{ fontSize:"13px", fontWeight:"500", color:"var(--text-secondary)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.name}</p>
+                    {f.email && <p style={{ fontSize:"11px", color:"var(--text-dim)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{f.email}</p>}
                     <p style={{ fontSize:"11px", color:"var(--text-dim)" }}>offline</p>
                   </div>
                   <button
                     onClick={() => { if (!st) nudgeFriend(f); }}
                     disabled={!!st}
-                    style={{ ...S.ghostBtn, marginTop:0, padding:"6px 12px", fontSize:"12px", opacity: st ? 0.5 : 1, cursor: st ? "default" : "pointer" }}
+                    style={{
+                      ...S.ghostBtn, marginTop:0, padding:"6px 12px", fontSize:"12px",
+                      cursor: st ? "default" : "pointer",
+                      ...(nudgedDone ? { background:"rgba(74,222,128,0.1)", border:"1px solid rgba(74,222,128,0.3)", color:"#4ade80", opacity:1 } : { opacity: st ? 0.5 : 1 }),
+                    }}
                   >
                     {st === "sent" ? "Nudged ✓" : st === "limited" ? "Limit reached" : st === "sending" ? "…" : "Nudge"}
                   </button>
@@ -941,6 +958,11 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [buddyQAs,           setBuddyQAs]           = useState([]);
   const [buddyStreaming,     setBuddyStreaming]     = useState(false);
   const [courseName,         setCourseName]         = useState("");
+  // Voice chat (Daily.co placeholder)
+  const [showVoice,          setShowVoice]          = useState(false);
+  // Room header overflow menu (admin actions)
+  const [showRoomMenu,       setShowRoomMenu]       = useState(false);
+  const roomMenuRef = useRef<HTMLDivElement>(null);
   // Phase 2 — Chat
   const [showChat,           setShowChat]           = useState(false);
   const [chatMessages,       setChatMessages]       = useState<ChatMessage[]>([]);
@@ -956,10 +978,16 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [wbPenWidth,         setWbPenWidth]         = useState(PEN_WIDTHS[1]);
   const [wbEraserSize,       setWbEraserSize]       = useState(ERASER_SIZES[1]);
   const [wbBg,               setWbBg]               = useState(DEFAULT_BG);
-  const boardLoadedRef = useRef(false);
+  const [liveStrokes,        setLiveStrokes]        = useState<Record<string, { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }>>({});
+  const lastLiveSentRef = useRef(0);
+  const yjsDocRef       = useRef<Y.Doc | null>(null);
+  const yjsProviderRef  = useRef<SupabaseBroadcastProvider | null>(null);
+  const yjsStrokesRef   = useRef<Y.Array<any> | null>(null);
+  const yjsMetaRef      = useRef<Y.Map<any> | null>(null);
 
   const channelRef          = useRef(null);
   const reqChRef            = useRef(null);
+  const wbChRef             = useRef(null);
   const sessionIdRef        = useRef(null);
   const joinedAtRef         = useRef(Date.now());
   const workingOnRef        = useRef("");
@@ -973,6 +1001,18 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
 
   const isHost = room.created_by === userId;
 
+  // Close the ⋯ room menu when clicking outside
+  useEffect(() => {
+    if (!showRoomMenu) return;
+    function handleClick(e: MouseEvent) {
+      if (roomMenuRef.current && !roomMenuRef.current.contains(e.target as Node)) {
+        setShowRoomMenu(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [showRoomMenu]);
+
   // Main setup
   useEffect(() => {
     startSession();
@@ -980,6 +1020,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     fetchPomodoroState();
     fetchCourseName();
     if (isHost) subscribeRequests();
+    wbChRef.current = subscribeWhiteboard();
     const timer = setInterval(() => setTick(n => n + 1), 1000);
     const handleUnload = () => void endSession();
     window.addEventListener("beforeunload", handleUnload);
@@ -989,6 +1030,9 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       window.removeEventListener("beforeunload", handleUnload);
       // Abort any in-flight buddy stream on unmount
       buddyAbortRef.current?.abort();
+      yjsProviderRef.current?.destroy();
+      yjsDocRef.current?.destroy();
+      try { wbChRef.current?.unsubscribe(); } catch {}
       endSession();
     };
   }, []); // eslint-disable-line
@@ -1112,7 +1156,15 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           : (m.joinedAt ?? 0) >= (prev.joinedAt ?? 0);
         if (better) byUser.set(m.userId, m);
       }
-      setMembers(Array.from(byUser.values()));
+      const collapsed = Array.from(byUser.values());
+      setMembers(collapsed);
+      // Remove live strokes for users no longer present.
+      setLiveStrokes(prev => {
+        const presentIds = new Set(byUser.keys());
+        const next = { ...prev };
+        for (const id of Object.keys(next)) if (!presentIds.has(id)) delete next[id];
+        return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+      });
     })
     .on("broadcast", { event: "room_closed" }, () => {
       if (!leftRef.current) endSession().then(() => onLeave());
@@ -1143,25 +1195,10 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         return [...prev, payload as ChatMessage];
       });
     })
-    // Whiteboard — a peer completed a stroke
-    .on("broadcast", { event: "wb_stroke" }, ({ payload }) => {
-      setStrokes(prev => {
-        if (prev.some(s => s.id === payload.id)) return prev;
-        return [...prev, payload as Stroke];
-      });
-    })
-    // Whiteboard — a peer erased a single stroke (stroke eraser)
-    .on("broadcast", { event: "wb_delete" }, ({ payload }) => {
-      setStrokes(prev => prev.filter(s => s.id !== payload.id));
-    })
-    // Whiteboard — a peer changed the background
-    .on("broadcast", { event: "wb_bg" }, ({ payload }) => {
-      setWbBg(payload.bg || DEFAULT_BG);
-    })
-    // Whiteboard — a peer cleared the board
-    .on("broadcast", { event: "wb_clear" }, () => {
-      setStrokes([]);
-      setWbBg(DEFAULT_BG);
+    // Whiteboard — a peer is actively drawing (live preview)
+    .on("broadcast", { event: "wb_live" }, ({ payload }) => {
+      if (payload.userId === userId) return;
+      setLiveStrokes(prev => ({ ...prev, [payload.userId]: { mode: payload.mode, style: payload.style, color: payload.color, width: payload.width, points: payload.points } }));
     })
     .subscribe(async (status) => {
       if (status === "SUBSCRIBED") await ch.track(presencePayload());
@@ -1186,6 +1223,54 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       }
     }).subscribe();
     reqChRef.current = ch;
+  }
+
+  function subscribeWhiteboard() {
+    const ch = supabase.channel("wb-" + room.id);
+
+    const doc = new Y.Doc();
+    const yStrokes = doc.getArray<any>("strokes");
+    const yMeta    = doc.getMap<any>("meta");
+
+    yjsDocRef.current      = doc;
+    yjsStrokesRef.current  = yStrokes;
+    yjsMetaRef.current     = yMeta;
+
+    // When the strokes array changes, update React state and clear the live
+    // preview for any peer whose stroke just committed.
+    let prevLength = 0;
+    yStrokes.observe(() => {
+      const arr = yStrokes.toArray() as Stroke[];
+      setStrokes(arr);
+      if (arr.length > prevLength) {
+        const added = arr.slice(prevLength);
+        setLiveStrokes(prev => {
+          const next = { ...prev };
+          added.forEach((s: any) => { if (s.user_id && s.user_id !== userId) delete next[s.user_id]; });
+          return next;
+        });
+      }
+      prevLength = arr.length;
+    });
+
+    // Background colour is stored in the Yjs meta map so it syncs like strokes.
+    yMeta.observe(() => {
+      const bg = yMeta.get("bg");
+      if (bg) setWbBg(bg as string);
+    });
+
+    const provider = new SupabaseBroadcastProvider(doc, ch, room.id);
+    yjsProviderRef.current = provider;
+
+    ch.subscribe(async (status) => {
+      if (status === "SUBSCRIBED") {
+        // Seed from persisted DB state, then ask live peers for any newer updates.
+        await provider.loadPersistedState();
+        provider.requestSync();
+      }
+    });
+
+    return ch;
   }
 
   async function enrichRequests(rows) {
@@ -1224,7 +1309,15 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       try {
         const present = Object.values(channelRef.current.presenceState()).flat() as any[];
         const othersOnline = new Set(present.map(p => p.userId).filter(id => id !== userId));
-        if (othersOnline.size === 0) await clearBoard(userId, room.id).catch(() => {});
+        if (othersOnline.size === 0) {
+          // Last person leaving — wipe board so next session starts fresh.
+          const arr = yjsStrokesRef.current;
+          if (arr && arr.length > 0) arr.doc?.transact(() => { arr.delete(0, arr.length); });
+          yjsMetaRef.current?.set("bg", DEFAULT_BG);
+          await yjsProviderRef.current?.persistState().catch(() => {});
+        } else {
+          yjsProviderRef.current?.persistState().catch(() => {});
+        }
       } catch {}
       try { await channelRef.current.untrack(); } catch {}
       supabase.removeChannel(channelRef.current);
@@ -1428,59 +1521,60 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
 
   function handleOpenBoard() {
     setShowBoard(true);
-    if (!boardLoadedRef.current) {
-      boardLoadedRef.current = true;
-      Promise.all([loadStrokes(userId, room.id), loadBackground(room.id)])
-        .then(([loaded, bg]) => { setStrokes(loaded); setWbBg(bg || DEFAULT_BG); })
-        .catch(err => {
-          console.error("[wb] load:", (err as any)?.message);
-          boardLoadedRef.current = false; // allow retry on next open if it failed
-        });
-    }
+    // Push a fake history entry so Android swipe-back closes the board
+    // instead of navigating away from the room.
+    history.pushState({ boardGuard: true }, '');
   }
 
-  async function handleStrokeComplete(stroke: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) {
-    // Add optimistically with a temp ID so the stroke eraser can hit-test it
-    // immediately — before the DB round-trip completes.
-    const tempId = crypto.randomUUID();
-    const optimistic: Stroke = {
-      id: tempId, room_id: room.id, user_id: userId,
-      name: userData?.name ?? "Anonymous", created_at: new Date().toISOString(),
+  useEffect(() => {
+    if (!showBoard) return;
+    function onPop() { setShowBoard(false); }
+    window.addEventListener('popstate', onPop);
+    return () => window.removeEventListener('popstate', onPop);
+  }, [showBoard]);
+
+  function handleStrokeComplete(stroke: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) {
+    const newStroke = {
+      id: (crypto.randomUUID?.() ?? Math.random().toString(36).slice(2) + Date.now().toString(36)),
+      room_id: room.id,
+      user_id: userId,
+      name: userData?.name ?? "Anonymous",
+      created_at: new Date().toISOString(),
       ...stroke,
     };
-    setStrokes(prev => [...prev, optimistic]);
-    try {
-      const saved = await addStroke(userId, room.id, stroke.mode, stroke.style, stroke.color, stroke.width, stroke.points);
-      // Swap the temp ID for the real server ID.
-      setStrokes(prev => prev.map(s => s.id === tempId ? saved : s));
-      channelRef.current?.send({ type: "broadcast", event: "wb_stroke", payload: saved }).catch(() => {});
-    } catch (err) {
-      console.error("[wb] stroke:", (err as any)?.message);
-      // Leave the optimistic stroke in local state so it stays visible on the canvas,
-      // but it won't sync to other users or survive a reload.
-    }
+    setStrokes(prev => [...prev, newStroke]);
+    yjsStrokesRef.current?.push([newStroke]);
+    // Yjs observer also fires setStrokes (idempotent). Provider broadcasts delta to peers.
   }
 
-  async function handleEraseStroke(strokeId: string) {
-    setStrokes(prev => prev.filter(s => s.id !== strokeId)); // optimistic
-    channelRef.current?.send({ type: "broadcast", event: "wb_delete", payload: { id: strokeId } }).catch(() => {});
-    try { await deleteStroke(userId, room.id, strokeId); }
-    catch (err) { console.error("[wb] erase:", (err as any)?.message); }
+  function handleEraseStroke(strokeId: string) {
+    const arr = yjsStrokesRef.current;
+    if (!arr) return;
+    const idx = (arr.toArray() as any[]).findIndex(s => s.id === strokeId);
+    if (idx !== -1) arr.delete(idx, 1);
+    // Yjs observer fires → setStrokes() → canvas re-renders and peers sync.
   }
 
-  async function handleBgChange(bg: string) {
+  function handleBgChange(bg: string) {
     setWbBg(bg);
-    channelRef.current?.send({ type: "broadcast", event: "wb_bg", payload: { bg } }).catch(() => {});
-    try { await setBackground(userId, room.id, bg); }
-    catch (err) { console.error("[wb] bg:", (err as any)?.message); }
+    yjsMetaRef.current?.set("bg", bg);
+    // Yjs meta observer on peers fires → setWbBg(). Provider broadcasts the delta.
   }
 
-  async function handleClearBoard() {
-    setStrokes([]);
-    setWbBg(DEFAULT_BG);
-    channelRef.current?.send({ type: "broadcast", event: "wb_clear", payload: {} }).catch(() => {});
-    try { await clearBoard(userId, room.id); }
-    catch (err) { console.error("[wb] clear:", (err as any)?.message); }
+  function handleLiveStroke(draft: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] } | null) {
+    if (!draft) return; // stroke finished — wb_stroke broadcast clears peers' live preview
+    const now = Date.now();
+    if (now - lastLiveSentRef.current < 70) return; // ~14/s — under the 30/s realtime budget
+    lastLiveSentRef.current = now;
+    channelRef.current?.send({ type: "broadcast", event: "wb_live", payload: { userId, ...draft } }).catch(() => {});
+  }
+
+  function handleClearBoard() {
+    const arr = yjsStrokesRef.current;
+    if (arr && arr.length > 0) arr.doc?.transact(() => { arr.delete(0, arr.length); });
+    yjsMetaRef.current?.set("bg", DEFAULT_BG);
+    setLiveStrokes({});
+    // Yjs observers fire on all peers → canvas clears everywhere.
   }
 
   async function sendChatMessage() {
@@ -1512,7 +1606,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   return (
     <div>
       {/* Header */}
-      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", marginBottom:"20px" }}>
+      <div style={{ display:"flex", alignItems:"flex-start", justifyContent:"space-between", flexWrap:"wrap", gap:"10px", marginBottom:"20px" }}>
         <div>
           <p style={S.sectionLabel}>Study Room</p>
           <h1 style={{ ...S.pageTitle, fontSize:"22px" }}>{room.name}</h1>
@@ -1530,69 +1624,50 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
             </div>
           )}
         </div>
-        <div style={{ display:"flex", gap:"8px", flexShrink:0 }}>
-          <button
-            onClick={() => setShowBuddy(b => !b)}
-            style={{
-              ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px",
-              background: showBuddy ? "rgba(111,179,196,0.1)" : "none",
-              borderColor: showBuddy ? "rgba(111,179,196,0.3)" : "rgba(255,255,255,0.09)",
-              color: showBuddy ? "#6fb3c4" : "var(--text-dim)",
-            }}
-          >
-            🤖 AI
-          </button>
-          <button
-            onClick={() => showChat ? setShowChat(false) : handleOpenChat()}
-            style={{
-              ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px",
-              background: showChat ? "rgba(127,174,110,0.1)" : "none",
-              borderColor: showChat ? "rgba(127,174,110,0.3)" : "rgba(255,255,255,0.09)",
-              color: showChat ? "#7fae6e" : "var(--text-dim)",
-            }}
-          >
-            💬 Chat
-          </button>
-          <button
-            onClick={() => showBoard ? setShowBoard(false) : handleOpenBoard()}
-            style={{
-              ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px",
-              background: showBoard ? "rgba(196,154,60,0.1)" : "none",
-              borderColor: showBoard ? "rgba(196,154,60,0.3)" : "rgba(255,255,255,0.09)",
-              color: showBoard ? "#c49a3c" : "var(--text-dim)",
-            }}
-          >
-            🖊 Board
-          </button>
-          <button
-            onClick={() => setShowInvite(true)}
-            style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px" }}
-          >
-            Invite friends
-          </button>
-          {isHost && (
+        <div style={{ display:"flex", gap:"6px", alignItems:"center", flexWrap:"wrap" }}>
+          {/* Panel toggles */}
+          <button onClick={() => setShowBuddy(b => !b)} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showBuddy ? "rgba(111,179,196,0.1)" : "none", borderColor: showBuddy ? "rgba(111,179,196,0.3)" : "rgba(255,255,255,0.09)", color: showBuddy ? "#6fb3c4" : "var(--text-dim)" }}>🤖 AI</button>
+          <button onClick={() => showChat ? setShowChat(false) : handleOpenChat()} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showChat ? "rgba(127,174,110,0.1)" : "none", borderColor: showChat ? "rgba(127,174,110,0.3)" : "rgba(255,255,255,0.09)", color: showChat ? "#7fae6e" : "var(--text-dim)" }}>💬 Chat</button>
+          <button onClick={() => showBoard ? setShowBoard(false) : handleOpenBoard()} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showBoard ? "rgba(196,154,60,0.1)" : "none", borderColor: showBoard ? "rgba(196,154,60,0.3)" : "rgba(255,255,255,0.09)", color: showBoard ? "#c49a3c" : "var(--text-dim)" }}>🖊 Board</button>
+          <button onClick={() => setShowVoice(v => !v)} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px", background: showVoice ? "rgba(96,165,250,0.1)" : "none", borderColor: showVoice ? "rgba(96,165,250,0.3)" : "rgba(255,255,255,0.09)", color: showVoice ? "#60a5fa" : "var(--text-dim)" }}>🎙 Voice</button>
+          <button onClick={() => setShowInvite(true)} style={{ ...S.ghostBtn, marginTop:0, padding:"7px 10px", fontSize:"12px" }}>+ Invite</button>
+
+          {/* ⋯ overflow — admin actions + leave */}
+          <div ref={roomMenuRef} style={{ position:"relative" }}>
             <button
-              onClick={() => setShowAccess(true)}
-              style={{ ...S.ghostBtn, marginTop:0, padding:"8px 14px", fontSize:"12px" }}
-              title="Who can join this room"
+              onClick={() => setShowRoomMenu(m => !m)}
+              style={{ ...S.ghostBtn, marginTop:0, padding:"8px 12px", fontSize:"14px", letterSpacing:"1px", background: showRoomMenu ? "rgba(255,255,255,0.07)" : "none" }}
+              title="More options"
             >
-              ⚙ Access
+              ⋯
             </button>
-          )}
-          {isHost && (
-            <button
-              onClick={handleCloseRoom}
-              style={{
-                background:"rgba(255,59,48,0.07)", border:"1px solid rgba(255,59,48,0.18)",
-                borderRadius:"8px", padding:"8px 14px", color:"rgba(255,100,90,0.7)",
-                fontSize:"12px", fontWeight:"500", cursor:"pointer", fontFamily:"inherit",
-              }}
-              title="Close room for everyone"
-            >
-              Close room
-            </button>
-          )}
-          <button onClick={handleLeave} style={S.leaveBtn}>Leave</button>
+            {showRoomMenu && (
+              <div style={{
+                position:"absolute", top:0, left:"calc(100% + 6px)", zIndex:200,
+                background:"var(--color-surface)", border:"1px solid var(--color-border)",
+                borderRadius:"12px", padding:"6px", minWidth:"160px",
+                boxShadow:"0 8px 32px rgba(0,0,0,0.45)",
+              }}>
+                {isHost && (
+                  <button onClick={() => { setShowAccess(true); setShowRoomMenu(false); }} style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", borderRadius:"8px", padding:"9px 12px", fontSize:"13px", color:"var(--text-secondary)", cursor:"pointer", fontFamily:"inherit" }}
+                    onMouseEnter={e => (e.currentTarget.style.background="rgba(255,255,255,0.06)")}
+                    onMouseLeave={e => (e.currentTarget.style.background="none")}
+                  >⚙ Access settings</button>
+                )}
+                {isHost && (
+                  <button onClick={() => { handleCloseRoom(); setShowRoomMenu(false); }} style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", borderRadius:"8px", padding:"9px 12px", fontSize:"13px", color:"rgba(255,100,90,0.8)", cursor:"pointer", fontFamily:"inherit" }}
+                    onMouseEnter={e => (e.currentTarget.style.background="rgba(255,59,48,0.07)")}
+                    onMouseLeave={e => (e.currentTarget.style.background="none")}
+                  >✕ Close room</button>
+                )}
+                <div style={{ height:"1px", background:"var(--color-border)", margin:"4px 0" }} />
+                <button onClick={() => { handleLeave(); setShowRoomMenu(false); }} style={{ display:"block", width:"100%", textAlign:"left", background:"none", border:"none", borderRadius:"8px", padding:"9px 12px", fontSize:"13px", color:"rgba(255,100,90,0.8)", cursor:"pointer", fontFamily:"inherit" }}
+                  onMouseEnter={e => (e.currentTarget.style.background="rgba(255,59,48,0.07)")}
+                  onMouseLeave={e => (e.currentTarget.style.background="none")}
+                >↩ Leave room</button>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1711,6 +1786,11 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         />
       )}
 
+      {/* Voice chat panel — Daily.co placeholder, audio-first */}
+      {showVoice && (
+        <VoiceRoom roomId={room.id} userName={userData?.name ?? ""} onClose={() => setShowVoice(false)} />
+      )}
+
       {/* Chat panel — persisted, WhatsApp-style */}
       {showChat && (
         <ChatPanel
@@ -1728,6 +1808,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       {showBoard && (
         <Whiteboard
           strokes={strokes}
+          liveStrokes={liveStrokes}
           tool={wbTool}
           style={wbStyle}
           color={wbColor}
@@ -1742,6 +1823,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           onBgChange={handleBgChange}
           onStrokeComplete={handleStrokeComplete}
           onEraseStroke={handleEraseStroke}
+          onLiveStroke={handleLiveStroke}
           onClear={handleClearBoard}
           onClose={() => setShowBoard(false)}
         />
@@ -1886,7 +1968,9 @@ function PomodoroPanel({ pomo, remaining, isHost, onStart, onPause, onResume, on
 function GoalPromptModal({ onSet, onSkip }) {
   const [goal, setGoal] = useState("");
   const S = styles;
-  return (
+  // Render into document.body so position:fixed centers against the true
+  // viewport — not the transformed app-page-transition ancestor.
+  return createPortal(
     <div style={S.modalOverlay}>
       <div style={{ ...S.modalCard, maxWidth:"360px" }}>
         <div style={{ textAlign:"center", marginBottom:"20px" }}>
@@ -1920,7 +2004,8 @@ function GoalPromptModal({ onSet, onSkip }) {
           </button>
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2423,8 +2508,10 @@ function MemberCard({ member, isMe }) {
         </p>
       </div>
       <div style={{ textAlign:"right", flexShrink:0 }}>
-        <p style={{ fontSize:"14px", fontWeight:"700", color:"var(--color-accent)", fontVariantNumeric:"tabular-nums" }}>{time}</p>
-        <p style={{ fontSize:"10px", color:"var(--text-dim)", marginTop:"2px" }}>focused</p>
+        <p style={{ fontSize:"14px", fontWeight:"700", color: elapsed >= 3600 ? "#f59e0b" : elapsed >= 1800 ? "#c49a3c" : "var(--color-accent)", fontVariantNumeric:"tabular-nums" }}>{time}</p>
+        <p style={{ fontSize:"10px", color:"var(--text-dim)", marginTop:"2px" }}>
+          {elapsed >= 3600 ? "🔥 focused" : elapsed >= 1800 ? "⚡ focused" : "focused"}
+        </p>
       </div>
     </div>
   );

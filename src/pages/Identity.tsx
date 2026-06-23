@@ -434,7 +434,7 @@ export default function Identity() {
       </div>
 
       {/* Friends */}
-      {userId && <FriendsSection userId={userId} />}
+      {userId && <FriendsSection userId={userId} ownName={userData?.name} />}
 
       {/* Share card */}
       <ShareCard />

@@ -2,7 +2,7 @@
 // Phase 1: persisted reader with summary + gold highlights.
 // Phase 2: text selection → floating toolbar → streaming chat panel.
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { AnimatePresence } from "framer-motion";
+import {} from "framer-motion"; // framer-motion used in child components
 import { supabase } from "../api/supabase";
 import SelectionToolbar, { type DocAction } from "./SelectionToolbar";
 import DocChat from "./DocChat";
@@ -127,6 +127,8 @@ interface DocFile {
   summary?: string | null;
   highlights?: string[] | null;
   processedAt?: string | null;
+  /** courseDbId — threaded to DocChat so flashcards save to the right course */
+  courseDbId?: number | null;
 }
 
 interface Props {
@@ -432,20 +434,20 @@ export default function DocReader({ file, onBack, onNavigate }: Props) {
         onDismiss={() => { setSelectionText(""); setSelectionRect(null); }}
       />
 
-      <AnimatePresence>
-        {chatOpen && (
-          <DocChat
-            key={chatKey}
-            docId={file.id}
-            docTitle={file.name}
-            docContext={docContext}
-            initialSelection={chatSelection}
-            initialAction={chatAction}
-            onClose={() => setChatOpen(false)}
-            onNavigate={onNavigate ?? (() => {})}
-          />
-        )}
-      </AnimatePresence>
+      {/* DocChat renders via createPortal at document.body — viewport-fixed, no AnimatePresence needed here */}
+      {chatOpen && (
+        <DocChat
+          key={chatKey}
+          docId={file.id}
+          docTitle={file.name}
+          docContext={docContext}
+          courseId={(file as any).courseDbId ?? null}
+          initialSelection={chatSelection}
+          initialAction={chatAction}
+          onClose={() => setChatOpen(false)}
+          onNavigate={onNavigate ?? (() => {})}
+        />
+      )}
     </div>
   );
 }

@@ -73,6 +73,13 @@ export function useSwipe(onSwipe) {
     // Ring drag in progress — ignore entirely
     if (document.body.dataset.ringDrag) return;
 
+    // Ancestor has data-no-swipe — suppress navigation (e.g. whiteboard, modals)
+    let node = e.target;
+    while (node && node !== document.body) {
+      if (node.dataset?.noSwipe) return;
+      node = node.parentElement;
+    }
+
     const { canScrollV, canScrollH } = scrollableAxes(e.target);
 
     startRef.current = {
