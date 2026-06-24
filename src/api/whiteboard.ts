@@ -6,7 +6,7 @@ import { supabase } from "./supabase";
 
 export type Point = { x: number; y: number; t?: string };
 
-export type PenStyle = "normal" | "highlighter" | "pencil" | "ink" | "marker" | "text";
+export type PenStyle = "normal" | "highlighter" | "pencil" | "ink" | "marker" | "text" | "rect" | "circle" | "line" | "arrow";
 
 export type Stroke = {
   id: string;

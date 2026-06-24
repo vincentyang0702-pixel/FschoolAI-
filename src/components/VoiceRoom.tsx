@@ -23,11 +23,13 @@ function clamp(left: number, top: number, popW: number, popH: number) {
   };
 }
 
-export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange }: {
+export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange, handRaised = false, onToggleHand }: {
   roomId: string;
   userName?: string;
   onClose: () => void;
   onSpeakingChange?: (name: string | null) => void;
+  handRaised?: boolean;
+  onToggleHand?: () => void;
 }) {
   const [status, setStatus]       = useState<Status>("loading");
   const [url, setUrl]             = useState<string | null>(null);
@@ -41,6 +43,7 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange 
   const [pttActive, setPttActive] = useState(false);
   const [ncEnabled, setNcEnabled] = useState(true);
   const ncEnabledRef = useRef(true);
+  const [connectionQuality, setConnectionQuality] = useState<"good" | "fair" | "poor" | "unknown">("unknown");
   const callFrameRef = useRef<any>(null);
 
   const dragging   = useRef(false);
@@ -130,6 +133,18 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange 
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup",   onKeyUp);
     };
+  }, []);
+
+  useEffect(() => {
+    const conn = (navigator as any).connection;
+    if (!conn) return;
+    function update() {
+      const type = conn.effectiveType;
+      setConnectionQuality(type === "4g" ? "good" : type === "3g" ? "fair" : "poor");
+    }
+    update();
+    conn.addEventListener("change", update);
+    return () => conn.removeEventListener("change", update);
   }, []);
 
   useEffect(() => {
@@ -292,6 +307,42 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange 
             >
               {ncEnabled ? "🎧 NC On" : "🎧 NC Off"}
             </button>
+          )}
+          {status === "ready" && (
+            <button
+              onClick={onToggleHand}
+              title={handRaised ? "Lower hand" : "Raise hand"}
+              style={{
+                background: handRaised ? "rgba(196,154,60,0.18)" : "rgba(255,255,255,0.06)",
+                border: `1px solid ${handRaised ? "rgba(196,154,60,0.5)" : "rgba(255,255,255,0.12)"}`,
+                borderRadius: "6px",
+                color: handRaised ? "#c49a3c" : "var(--text-dim)",
+                fontSize: "11px",
+                fontWeight: 600,
+                padding: "2px 8px",
+                cursor: "pointer",
+                userSelect: "none",
+                transition: "all 0.08s",
+                fontFamily: "inherit",
+                lineHeight: "20px",
+              }}
+            >
+              ✋ {handRaised ? "Raised" : "Raise"}
+            </button>
+          )}
+          {connectionQuality !== "unknown" && (
+            <span title={`Connection: ${connectionQuality}`} style={{
+              display: "inline-flex", alignItems: "center", gap: "4px",
+              fontSize: "11px", color: connectionQuality === "good" ? "#4ade80" : connectionQuality === "fair" ? "#f59e0b" : "#f87171",
+              padding: "2px 6px",
+            }}>
+              <span style={{
+                width: "8px", height: "8px", borderRadius: "50%",
+                background: connectionQuality === "good" ? "#4ade80" : connectionQuality === "fair" ? "#f59e0b" : "#f87171",
+                flexShrink: 0,
+              }} />
+              {connectionQuality}
+            </span>
           )}
         </div>
         <div

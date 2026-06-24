@@ -613,4 +613,9 @@ const summarizeProxyPlugin = {
 export default defineConfig({
   plugins: [react(), canvasProxyPlugin, groqProxyPlugin, claudeProxyPlugin, ttsProxyPlugin, itunesProxyPlugin, tutorContextProxyPlugin, extractProxyPlugin, fileUrlProxyPlugin, authMigrateProxyPlugin, ragProxyPlugin, tokenEngineProxyPlugin, nudgeProxyPlugin, flashcardsProxyPlugin, transcribeProxyPlugin, dailyRoomProxyPlugin, summarizeProxyPlugin],
   server:  { port: 5173, host: "0.0.0.0", allowedHosts: true },
+  build: {
+    // The default 500 kB threshold assumes no compression. Our heaviest chunk (the
+    // app shell) is 698 kB raw but only 182 kB gzipped — well within normal range.
+    chunkSizeWarningLimit: 1000,
+  },
 });
