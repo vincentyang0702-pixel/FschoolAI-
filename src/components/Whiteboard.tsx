@@ -22,7 +22,9 @@ import type { Point, Stroke, PenStyle } from "../api/whiteboard";
 export const BOARD_W = 1000;
 export const BOARD_H = 600;
 
-export type Tool = "pen" | "stroke-erase" | "area-erase" | "laser" | "text";
+export type Tool = "pen" | "stroke-erase" | "area-erase" | "laser" | "text" | "select" | "rect" | "circle" | "line" | "arrow";
+
+const SHAPE_TOOLS: Tool[] = ["rect", "circle", "line", "arrow"];
 
 // ── Palettes ──────────────────────────────────────────────────────────────────
 export const BACKGROUNDS = [
@@ -132,6 +134,63 @@ function drawStroke(ctx: CanvasRenderingContext2D, s: { mode: "pen" | "erase"; s
       break;
     }
 
+    case "rect": {
+      if (pts.length < 2) break;
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width;
+      const rx = Math.min(pts[0].x, pts[1].x), ry = Math.min(pts[0].y, pts[1].y);
+      const rw = Math.abs(pts[1].x - pts[0].x), rh = Math.abs(pts[1].y - pts[0].y);
+      ctx.strokeRect(rx, ry, rw, rh);
+      break;
+    }
+
+    case "circle": {
+      if (pts.length < 2) break;
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width;
+      const ecx = (pts[0].x + pts[1].x) / 2, ecy = (pts[0].y + pts[1].y) / 2;
+      const erx = Math.abs(pts[1].x - pts[0].x) / 2, ery = Math.abs(pts[1].y - pts[0].y) / 2;
+      ctx.beginPath();
+      ctx.ellipse(ecx, ecy, Math.max(erx, 1), Math.max(ery, 1), 0, 0, Math.PI * 2);
+      ctx.stroke();
+      break;
+    }
+
+    case "line": {
+      if (pts.length < 2) break;
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = s.width;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      ctx.lineTo(pts[1].x, pts[1].y);
+      ctx.stroke();
+      break;
+    }
+
+    case "arrow": {
+      if (pts.length < 2) break;
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = s.color;
+      ctx.fillStyle = s.color;
+      ctx.lineWidth = s.width;
+      ctx.beginPath();
+      ctx.moveTo(pts[0].x, pts[0].y);
+      ctx.lineTo(pts[1].x, pts[1].y);
+      ctx.stroke();
+      const ang = Math.atan2(pts[1].y - pts[0].y, pts[1].x - pts[0].x);
+      const headLen = Math.max(12, s.width * 4);
+      ctx.beginPath();
+      ctx.moveTo(pts[1].x, pts[1].y);
+      ctx.lineTo(pts[1].x - headLen * Math.cos(ang - Math.PI / 6), pts[1].y - headLen * Math.sin(ang - Math.PI / 6));
+      ctx.lineTo(pts[1].x - headLen * Math.cos(ang + Math.PI / 6), pts[1].y - headLen * Math.sin(ang + Math.PI / 6));
+      ctx.closePath();
+      ctx.fill();
+      break;
+    }
+
     case "normal":
     default:
       ctx.globalAlpha = 1;
@@ -181,10 +240,36 @@ function hitStroke(p: Point, s: Stroke, tol: number): boolean {
   return false;
 }
 
+const SHAPE_STYLES = ["rect", "circle", "line", "arrow"];
+
+function strokeBounds(s: { style: PenStyle; points: Point[] }): { x1: number; y1: number; x2: number; y2: number } | null {
+  if (!s.points || s.points.length === 0) return null;
+  if (SHAPE_STYLES.includes(s.style) && s.points.length >= 2) {
+    const [p0, p1] = s.points;
+    return { x1: Math.min(p0.x, p1.x), y1: Math.min(p0.y, p1.y), x2: Math.max(p0.x, p1.x), y2: Math.max(p0.y, p1.y) };
+  }
+  let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
+  for (const p of s.points) {
+    if (p.x < x1) x1 = p.x; if (p.x > x2) x2 = p.x;
+    if (p.y < y1) y1 = p.y; if (p.y > y2) y2 = p.y;
+  }
+  return x1 === Infinity ? null : { x1, y1, x2, y2 };
+}
+
+function hitForSelect(p: Point, s: Stroke): boolean {
+  if (SHAPE_STYLES.includes(s.style)) {
+    const b = strokeBounds(s);
+    if (!b) return false;
+    const tol = Math.max(8, (s.width || 2) / 2 + 4);
+    return p.x >= b.x1 - tol && p.x <= b.x2 + tol && p.y >= b.y1 - tol && p.y <= b.y2 + tol;
+  }
+  return hitStroke(p, s, 12);
+}
+
 export default function Whiteboard({
   strokes, liveStrokes, tool, style, color, penWidth, eraserSize, bg,
   onToolChange, onStyleChange, onColorChange, onPenWidthChange, onEraserSizeChange, onBgChange,
-  onStrokeComplete, onEraseStroke, onLiveStroke, onClear,
+  onStrokeComplete, onEraseStroke, onMoveStroke, onLiveStroke, onClear,
   canUndo, canRedo, onUndo, onRedo,
   peerCursors, laserPositions, onCursorMove, onLaserMove,
   onClose,
@@ -200,6 +285,7 @@ export default function Whiteboard({
   onBgChange: (c: string) => void;
   onStrokeComplete: (s: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] }) => void;
   onEraseStroke: (strokeId: string) => void;
+  onMoveStroke?: (strokeId: string, dx: number, dy: number) => void;
   onLiveStroke?: (s: { mode: "pen" | "erase"; style: PenStyle; color: string; width: number; points: Point[] } | null) => void;
   onClear: () => void;
   canUndo?: boolean;
@@ -218,6 +304,9 @@ export default function Whiteboard({
   const [localLaser, setLocalLaser] = useState<{ x: number; y: number } | null>(null);
   const [textInput, setTextInput] = useState<{ x: number; y: number } | null>(null);
   const erasedThisDragRef = useRef<Set<string>>(new Set());
+  const selectedRef = useRef<string | null>(null);
+  const selectDragStartRef = useRef<Point | null>(null);
+  const selectDragDeltaRef = useRef<{ dx: number; dy: number }>({ dx: 0, dy: 0 });
   // Snapshot of the canvas at the start of each stroke. Restored on every
   // pointermove before drawing the in-progress stroke so committed strokes
   // are preserved regardless of React render timing.
@@ -243,7 +332,37 @@ export default function Whiteboard({
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, BOARD_W, BOARD_H);
 
-    for (const s of strokesRef.current) drawStroke(ctx, s, bg);
+    const selId = selectedRef.current;
+    const delta = selectDragDeltaRef.current;
+    const hasDelta = delta.dx !== 0 || delta.dy !== 0;
+
+    for (const s of strokesRef.current) {
+      if (selId && s.id === selId && hasDelta) {
+        const moved = { ...s, points: s.points.map(p => ({ ...p, x: p.x + delta.dx, y: p.y + delta.dy })) };
+        drawStroke(ctx, moved, bg);
+      } else {
+        drawStroke(ctx, s, bg);
+      }
+    }
+
+    // Selection bounding box overlay
+    if (selId && toolRef.current === "select") {
+      const s = strokesRef.current.find(s => s.id === selId);
+      if (s) {
+        const effPts = hasDelta ? s.points.map(p => ({ ...p, x: p.x + delta.dx, y: p.y + delta.dy })) : s.points;
+        const b = strokeBounds({ style: s.style, points: effPts });
+        if (b) {
+          ctx.save();
+          ctx.strokeStyle = "#4f86d9";
+          ctx.lineWidth = 1.5;
+          ctx.setLineDash([5, 4]);
+          ctx.globalAlpha = 0.85;
+          const pad = 6;
+          ctx.strokeRect(b.x1 - pad, b.y1 - pad, b.x2 - b.x1 + pad * 2, b.y2 - b.y1 + pad * 2);
+          ctx.restore();
+        }
+      }
+    }
 
     // Remote peers' in-progress strokes.
     for (const draft of Object.values(liveStrokesRef.current)) {
@@ -251,10 +370,13 @@ export default function Whiteboard({
     }
 
     // The local in-progress stroke, drawn last so it sits on top.
-    if (drawingRef.current && currentRef.current.length && toolRef.current !== "stroke-erase" && toolRef.current !== "laser" && toolRef.current !== "text") {
+    const isShapeTool = SHAPE_TOOLS.includes(toolRef.current);
+    if (drawingRef.current && currentRef.current.length &&
+        toolRef.current !== "stroke-erase" && toolRef.current !== "laser" &&
+        toolRef.current !== "text" && toolRef.current !== "select") {
       drawStroke(ctx, {
         mode: toolRef.current === "area-erase" ? "erase" : "pen",
-        style: styleRef.current,
+        style: isShapeTool ? toolRef.current as PenStyle : styleRef.current,
         color: colorRef.current,
         width: toolRef.current === "area-erase" ? eraserRef.current : penWRef.current,
         points: currentRef.current,
@@ -311,6 +433,19 @@ export default function Whiteboard({
       setTextInput({ x: pt.x, y: pt.y });
       return;
     }
+    if (toolRef.current === "select") {
+      const list = strokesRef.current;
+      let found: Stroke | null = null;
+      for (let i = list.length - 1; i >= 0; i--) {
+        if (hitForSelect(pt, list[i])) { found = list[i]; break; }
+      }
+      selectedRef.current = found?.id ?? null;
+      selectDragStartRef.current = found ? pt : null;
+      selectDragDeltaRef.current = { dx: 0, dy: 0 };
+      if (found) drawingRef.current = true;
+      render();
+      return;
+    }
     drawingRef.current = true;
     if (toolRef.current === "laser") {
       setLocalLaser(pt);
@@ -336,6 +471,16 @@ export default function Whiteboard({
     const pt = toBoard(e);
     // Always broadcast cursor position for live-cursor feature (throttled in parent).
     onCursorMove?.(pt.x, pt.y);
+
+    // Select tool: handle drag-to-move (before drawingRef guard)
+    if (toolRef.current === "select") {
+      if (drawingRef.current && selectedRef.current && selectDragStartRef.current) {
+        selectDragDeltaRef.current = { dx: pt.x - selectDragStartRef.current.x, dy: pt.y - selectDragStartRef.current.y };
+        render();
+      }
+      return;
+    }
+
     if (!drawingRef.current) return;
     if (toolRef.current === "laser") {
       setLocalLaser(pt);
@@ -343,6 +488,26 @@ export default function Whiteboard({
       return;
     }
     if (toolRef.current === "stroke-erase") { eraseAt(pt); return; }
+
+    // Shape tools: keep only [start, currentPt] for preview
+    if (SHAPE_TOOLS.includes(toolRef.current)) {
+      currentRef.current = [currentRef.current[0] ?? pt, pt];
+      const canvas = canvasRef.current;
+      if (canvas && snapshotRef.current) {
+        const ctx = canvas.getContext("2d")!;
+        ctx.putImageData(snapshotRef.current, 0, 0);
+        drawStroke(ctx, {
+          mode: "pen",
+          style: toolRef.current as PenStyle,
+          color: colorRef.current,
+          width: penWRef.current,
+          points: currentRef.current,
+        }, bg);
+      }
+      onLiveStroke?.({ mode: "pen", style: toolRef.current as PenStyle, color: colorRef.current, width: penWRef.current, points: currentRef.current });
+      return;
+    }
+
     currentRef.current.push(pt);
     // Restore snapshot (committed strokes) then draw in-progress stroke on top.
     // This never touches the strokes React prop so stale closures can't wipe work.
@@ -373,6 +538,17 @@ export default function Whiteboard({
     if (!drawingRef.current) return;
     drawingRef.current = false;
     snapshotRef.current = null;
+    if (toolRef.current === "select") {
+      const delta = selectDragDeltaRef.current;
+      if (selectedRef.current && (Math.abs(delta.dx) > 3 || Math.abs(delta.dy) > 3)) {
+        onMoveStroke?.(selectedRef.current, delta.dx, delta.dy);
+        selectedRef.current = null;
+      }
+      selectDragStartRef.current = null;
+      selectDragDeltaRef.current = { dx: 0, dy: 0 };
+      render();
+      return;
+    }
     if (toolRef.current === "laser") {
       setLocalLaser(null);
       onLaserMove?.(null);
@@ -383,6 +559,18 @@ export default function Whiteboard({
     currentRef.current = [];
     onLiveStroke?.(null);
     if (points.length === 0) return;
+    if (SHAPE_TOOLS.includes(toolRef.current)) {
+      if (points.length >= 2) {
+        onStrokeComplete({
+          mode: "pen",
+          style: toolRef.current as PenStyle,
+          color: colorRef.current,
+          width: penWRef.current,
+          points: [points[0], points[points.length - 1]],
+        });
+      }
+      return;
+    }
     const isErase = toolRef.current === "area-erase";
     const finished = {
       mode: (isErase ? "erase" : "pen") as "pen" | "erase",
@@ -412,7 +600,8 @@ export default function Whiteboard({
 
   const isPen = tool === "pen";
   const isText = tool === "text";
-  const cursor = tool === "stroke-erase" ? "pointer" : tool === "laser" ? "none" : tool === "text" ? "text" : "crosshair";
+  const isShape = SHAPE_TOOLS.includes(tool);
+  const cursor = tool === "stroke-erase" ? "pointer" : tool === "laser" ? "none" : tool === "text" ? "text" : tool === "select" ? "default" : "crosshair";
   const isCustomColor = !PEN_COLORS.includes(color);
 
   function handleTextCommit(text: string) {
@@ -462,6 +651,14 @@ export default function Whiteboard({
         <button style={chip(tool === "area-erase")} onClick={() => onToolChange("area-erase")} title="Drag to rub out an area">⭕ Area erase</button>
         <button style={chip(tool === "laser")} onClick={() => onToolChange("laser")} title="Laser pointer — point without drawing">🔴 Laser</button>
         <button style={chip(tool === "text")} onClick={() => onToolChange("text")} title="Text — click to place text">📝 Text</button>
+
+        <span style={{ width: "1px", height: "20px", background: "rgba(255,255,255,0.1)", margin: "0 2px" }} />
+
+        <button style={chip(tool === "select", "#4f86d9")} onClick={() => onToolChange("select")} title="Select and move a stroke">↖ Select</button>
+        <button style={chip(tool === "rect")} onClick={() => onToolChange("rect")} title="Rectangle">▭ Rect</button>
+        <button style={chip(tool === "circle")} onClick={() => onToolChange("circle")} title="Circle / Ellipse">○ Circle</button>
+        <button style={chip(tool === "line")} onClick={() => onToolChange("line")} title="Straight line">╱ Line</button>
+        <button style={chip(tool === "arrow")} onClick={() => onToolChange("arrow")} title="Arrow">→ Arrow</button>
 
         <span style={{ width: "1px", height: "20px", background: "rgba(255,255,255,0.1)", margin: "0 2px" }} />
 
@@ -586,6 +783,34 @@ export default function Whiteboard({
             }} />
           </label>
           <span style={{ fontSize: "11px", color: "var(--text-dim)", marginLeft: "4px" }}>Click canvas to place text · Enter to commit · Esc to cancel</span>
+        </div>
+      )}
+
+      {/* Shape tool options */}
+      {isShape && (
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", padding: "10px 16px", borderBottom: "1px solid rgba(196,154,60,0.08)" }}>
+          <span style={{ fontSize: "11px", color: "var(--text-dim)" }}>Size</span>
+          {PEN_WIDTHS.map((w, i) => (
+            <button key={w} onClick={() => onPenWidthChange(w)} title={`Thickness ${i + 1}`}
+              style={{ ...chip(penWidth === w), width: "30px", display: "flex", alignItems: "center", justifyContent: "center", padding: "6px 0" }}>
+              <span style={{ display: "block", width: `${Math.min(18, w + 2)}px`, height: `${Math.max(2, Math.round(w / 2))}px`, borderRadius: "99px", background: penWidth === w ? "#c49a3c" : "var(--text-dim)" }} />
+            </button>
+          ))}
+          <span style={{ width: "1px", height: "20px", background: "rgba(255,255,255,0.1)", margin: "0 2px" }} />
+          {PEN_COLORS.map(c => (
+            <button key={c} onClick={() => onColorChange(c)} title={c}
+              style={{ width: "20px", height: "20px", borderRadius: "50%", cursor: "pointer", padding: 0, background: c,
+                border: color === c ? "2px solid #fff" : "2px solid rgba(255,255,255,0.15)",
+                outline: color === c ? "1px solid rgba(196,154,60,0.6)" : "none" }} />
+          ))}
+          <label title="Custom color" style={{ position: "relative", width: "20px", height: "20px", cursor: "pointer", flexShrink: 0 }}>
+            <input type="color" value={isCustomColor ? color : "#000000"} onChange={e => onColorChange(e.target.value)}
+              style={{ position: "absolute", inset: 0, opacity: 0, width: "100%", height: "100%", cursor: "pointer" }} />
+            <div style={{ width: "20px", height: "20px", borderRadius: "50%",
+              background: "conic-gradient(red, yellow, lime, cyan, blue, magenta, red)",
+              border: isCustomColor ? "2px solid #fff" : "2px solid rgba(255,255,255,0.15)",
+              outline: isCustomColor ? "1px solid rgba(196,154,60,0.6)" : "none", pointerEvents: "none" }} />
+          </label>
         </div>
       )}
 

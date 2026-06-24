@@ -13,7 +13,7 @@ import {
   inviteToRoom, leaveRoom, setRoomAccess,
 } from "../api/rooms";
 import type { AccessFilters } from "../api/rooms";
-import { loadRecentMessages, postRoomMessage } from "../api/chat";
+import { loadRecentMessages, postRoomMessage, uploadChatImage } from "../api/chat";
 import type { ChatMessage } from "../api/chat";
 import type { Stroke, Point, PenStyle } from "../api/whiteboard";
 import * as Y from "yjs";
@@ -968,6 +968,13 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   // Voice chat (Daily.co)
   const [showVoice,          setShowVoice]          = useState(false);
   const [activeSpeakerName,  setActiveSpeakerName]  = useState<string | null>(null);
+  // Focus Sprint — configurable duration, no break phase
+  const [sprintDuration,     setSprintDuration]     = useState(25 * 60);
+  const sprintDurationRef = useRef(25 * 60);
+  // Raise hand
+  const [raisedHands,        setRaisedHands]        = useState<Record<string, boolean>>({});
+  const [myHandRaised,       setMyHandRaised]       = useState(false);
+  const handTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Room header overflow menu (admin actions)
   const [showRoomMenu,       setShowRoomMenu]       = useState(false);
   const roomMenuRef = useRef<HTMLDivElement>(null);
@@ -976,6 +983,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   const [chatMessages,       setChatMessages]       = useState<ChatMessage[]>([]);
   const [chatInput,          setChatInput]          = useState("");
   const [chatSending,        setChatSending]        = useState(false);
+  const [imageUploading,     setImageUploading]     = useState(false);
   const chatLoadedRef = useRef(false);
   // Phase 3 — Whiteboard
   const [showBoard,          setShowBoard]          = useState(false);
@@ -1056,6 +1064,9 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   // Keep pomoRef in sync for use in effects without stale closure
   useEffect(() => { pomoRef.current = pomo; }, [pomo]);
 
+  // Clear hand-raise timer on unmount to avoid state updates on an unmounted component.
+  useEffect(() => () => { if (handTimerRef.current) clearTimeout(handTimerRef.current); }, []);
+
   // Show goal prompt 500ms after entering, only once
   useEffect(() => {
     const t = setTimeout(() => setShowGoalPrompt(true), 500);
@@ -1070,9 +1081,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     const rem = getRemaining(p);
     if (rem !== null && rem <= 0 && pomoAutoAdvancedRef.current !== p.startedAt) {
       pomoAutoAdvancedRef.current = p.startedAt;
-      const nextPhase = p.phase === "focus" ? "break" : "focus";
-      const nextDur   = nextPhase === "focus" ? 25 * 60 : 5 * 60;
-      const next = { phase: nextPhase, paused: false, startedAt: Date.now(), durationSec: nextDur, pausedRemaining: null };
+      const next = { phase: "idle", paused: false, startedAt: null, durationSec: sprintDurationRef.current, pausedRemaining: null };
       setPomo(next);
       pomoRef.current = next;
       if (channelRef.current) {
@@ -1090,7 +1099,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       const rem = getRemaining(p);
       // If the phase expired while the user was navigating in, treat as idle
       if (p.phase !== "idle" && !p.paused && rem !== null && rem <= 0) {
-        setPomo({ phase: "idle", paused: false, startedAt: null, durationSec: 25 * 60, pausedRemaining: null });
+        setPomo({ phase: "idle", paused: false, startedAt: null, durationSec: sprintDurationRef.current, pausedRemaining: null });
       } else {
         setPomo(p);
       }
@@ -1107,7 +1116,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
   }
 
   function handlePomoStart() {
-    broadcastAndSavePomo({ phase: "focus", paused: false, startedAt: Date.now(), durationSec: 25 * 60, pausedRemaining: null });
+    broadcastAndSavePomo({ phase: "focus", paused: false, startedAt: Date.now(), durationSec: sprintDurationRef.current, pausedRemaining: null });
   }
   function handlePomoPause() {
     const p = pomoRef.current;
@@ -1120,14 +1129,45 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     broadcastAndSavePomo({ phase: p.phase, paused: false, startedAt: Date.now(), durationSec: p.pausedRemaining ?? p.durationSec, pausedRemaining: null });
   }
   function handlePomoReset() {
-    broadcastAndSavePomo({ phase: "idle", paused: false, startedAt: null, durationSec: 25 * 60, pausedRemaining: null });
+    broadcastAndSavePomo({ phase: "idle", paused: false, startedAt: null, durationSec: sprintDurationRef.current, pausedRemaining: null });
   }
   function handlePomoSkip() {
     const p = pomoRef.current;
     if (!p || p.phase === "idle") return;
-    const nextPhase = p.phase === "focus" ? "break" : "focus";
-    const nextDur   = nextPhase === "focus" ? 25 * 60 : 5 * 60;
-    broadcastAndSavePomo({ phase: nextPhase, paused: false, startedAt: Date.now(), durationSec: nextDur, pausedRemaining: null });
+    broadcastAndSavePomo({ phase: "idle", paused: false, startedAt: null, durationSec: sprintDurationRef.current, pausedRemaining: null });
+  }
+
+  function handleSprintDurationChange(secs: number) {
+    setSprintDuration(secs);
+    sprintDurationRef.current = secs;
+  }
+
+  function handleToggleHand() {
+    const raised = !myHandRaised;
+    setMyHandRaised(raised);
+    setRaisedHands(prev => raised ? { ...prev, [userId]: true } : (() => { const n = { ...prev }; delete n[userId]; return n; })());
+    channelRef.current?.send({ type: "broadcast", event: "raise_hand", payload: { userId, raised } }).catch(() => {});
+    if (raised) {
+      if (handTimerRef.current) clearTimeout(handTimerRef.current);
+      handTimerRef.current = setTimeout(() => {
+        setMyHandRaised(false);
+        setRaisedHands(prev => { const n = { ...prev }; delete n[userId]; return n; });
+        channelRef.current?.send({ type: "broadcast", event: "raise_hand", payload: { userId, raised: false } }).catch(() => {});
+      }, 90000);
+    } else {
+      if (handTimerRef.current) clearTimeout(handTimerRef.current);
+    }
+  }
+
+  function handleMoveStroke(strokeId: string, dx: number, dy: number) {
+    const arr = yjsStrokesRef.current;
+    if (!arr) return;
+    const list = arr.toArray() as any[];
+    const idx = list.findIndex((s: any) => s.id === strokeId);
+    if (idx === -1) return;
+    const s = list[idx];
+    const moved = { ...s, points: s.points.map((p: Point) => ({ ...p, x: p.x + dx, y: p.y + dy })) };
+    arr.doc?.transact(() => { arr.delete(idx, 1); arr.insert(idx, [moved]); });
   }
 
   async function startSession() {
@@ -1191,12 +1231,25 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         for (const id of Object.keys(next)) if (!presentIds.has(id)) delete next[id];
         return Object.keys(next).length === Object.keys(prev).length ? prev : next;
       });
+      // Clear raised-hand state for members who have left the room.
+      setRaisedHands(prev => {
+        const next = { ...prev };
+        let changed = false;
+        for (const id of Object.keys(next)) { if (!presentIds.has(id)) { delete next[id]; changed = true; } }
+        return changed ? next : prev;
+      });
     })
     .on("broadcast", { event: "room_closed" }, () => {
       if (!leftRef.current) endSession().then(() => onLeave());
     })
     .on("broadcast", { event: "pomodoro" }, ({ payload }) => {
       setPomo(payload);
+    })
+    .on("broadcast", { event: "raise_hand" }, ({ payload }) => {
+      setRaisedHands(prev => {
+        if (payload.raised) return { ...prev, [payload.userId]: true };
+        const next = { ...prev }; delete next[payload.userId]; return next;
+      });
     })
     .on("broadcast", { event: "access_changed" }, ({ payload }) => {
       setAccessFilters(payload?.filters || {});
@@ -1697,6 +1750,30 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
     }
   }
 
+  async function handleImageUpload(file: File) {
+    if (imageUploading) return;
+    const MAX_MB = 5;
+    if (file.size > MAX_MB * 1024 * 1024) {
+      alert(`Image must be under ${MAX_MB} MB.`);
+      return;
+    }
+    setImageUploading(true);
+    try {
+      const url = await uploadChatImage(room.id, file);
+      const body = `[img]${url}`;
+      const msg = await postRoomMessage(userId, room.id, userData?.name ?? "Anonymous", body);
+      setChatMessages(prev => prev.some(m => m.id === msg.id) ? prev : [...prev, msg]);
+      channelRef.current?.send({
+        type: "broadcast", event: "chat_message", payload: msg,
+      }).catch(() => {});
+    } catch (err) {
+      console.error("[chat] image upload:", (err as any)?.message);
+      alert("Image upload failed. Check that the Supabase media-uploads bucket allows uploads.");
+    } finally {
+      setImageUploading(false);
+    }
+  }
+
   const totalFocusMins = members.reduce((sum, m) => {
     return sum + Math.floor((Date.now() - m.joinedAt) / 60000);
   }, 0);
@@ -1779,16 +1856,18 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         speakingNames={activeSpeakerName ? [activeSpeakerName] : []}
       />
 
-      {/* Pomodoro Timer — centerpiece */}
-      <PomodoroPanel
+      {/* Focus Sprint — configurable duration, no break phase */}
+      <FocusSprintPanel
         pomo={pomo}
         remaining={remaining}
         isHost={isHost}
+        sprintDuration={sprintDuration}
+        onDurationChange={handleSprintDurationChange}
         onStart={handlePomoStart}
         onPause={handlePomoPause}
         onResume={handlePomoResume}
         onReset={handlePomoReset}
-        onSkip={handlePomoSkip}
+        onEnd={handlePomoSkip}
       />
 
       {/* Collective focus strip */}
@@ -1872,7 +1951,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
       ) : (
         <div style={{ display:"flex", flexDirection:"column", gap:"10px" }}>
           {members.map(m => (
-            <MemberCard key={m.userId} member={m} isMe={m.userId === userId} isSpeaking={activeSpeakerName === m.name} />
+            <MemberCard key={m.userId} member={m} isMe={m.userId === userId} isSpeaking={activeSpeakerName === m.name} handRaised={!!raisedHands[m.userId]} />
           ))}
         </div>
       )}
@@ -1895,6 +1974,8 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           userName={userData?.name ?? ""}
           onClose={() => { setShowVoice(false); setActiveSpeakerName(null); }}
           onSpeakingChange={setActiveSpeakerName}
+          handRaised={myHandRaised}
+          onToggleHand={handleToggleHand}
         />
       )}
 
@@ -1905,8 +1986,10 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           myUserId={userId}
           input={chatInput}
           sending={chatSending}
+          imageUploading={imageUploading}
           onInputChange={setChatInput}
           onSend={sendChatMessage}
+          onImageUpload={handleImageUpload}
           onClose={() => setShowChat(false)}
         />
       )}
@@ -1930,6 +2013,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           onBgChange={handleBgChange}
           onStrokeComplete={handleStrokeComplete}
           onEraseStroke={handleEraseStroke}
+          onMoveStroke={handleMoveStroke}
           onLiveStroke={handleLiveStroke}
           onClear={handleClearBoard}
           canUndo={canUndo}
@@ -1983,9 +2067,16 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PomodoroPanel — synced timer display + host controls
+// FocusSprintPanel — no break phase, configurable 15/25/45/60 min sprints
 // ─────────────────────────────────────────────────────────────────────────────
-function pomoCtrlStyle(variant) {
+const SPRINT_DURATIONS = [
+  { label: "15 min", secs: 15 * 60 },
+  { label: "25 min", secs: 25 * 60 },
+  { label: "45 min", secs: 45 * 60 },
+  { label: "60 min", secs: 60 * 60 },
+];
+
+function sprintCtrlStyle(variant) {
   const v = {
     dim:    { bg:"rgba(255,255,255,0.05)", color:"var(--text-dim)",      border:"rgba(255,255,255,0.09)" },
     accent: { bg:"rgba(196,154,60,0.12)", color:"#C49A3C",              border:"rgba(196,154,60,0.3)"   },
@@ -1998,31 +2089,26 @@ function pomoCtrlStyle(variant) {
   };
 }
 
-function PomodoroPanel({ pomo, remaining, isHost, onStart, onPause, onResume, onReset, onSkip }) {
-  const isIdle    = !pomo || pomo.phase === "idle";
+function FocusSprintPanel({ pomo, remaining, isHost, sprintDuration, onDurationChange, onStart, onPause, onResume, onReset, onEnd }) {
+  const isIdle    = !pomo || pomo.phase === "idle" || pomo.phase === "break";
   const isFocus   = pomo?.phase === "focus";
-  const isBreak   = pomo?.phase === "break";
   const isPaused  = !!pomo?.paused;
-  const isRunning = !isIdle && !isPaused;
-
-  const accentColor = isFocus ? "#C49A3C" : isBreak ? "#6fb3c4" : "var(--text-dim)";
-  const bgColor     = isFocus ? "rgba(196,154,60,0.05)" : isBreak ? "rgba(111,179,196,0.05)" : "rgba(255,255,255,0.02)";
-  const borderColor = isFocus ? "rgba(196,154,60,0.18)" : isBreak ? "rgba(111,179,196,0.18)" : "rgba(255,255,255,0.07)";
-  const phaseLabel  = isFocus ? "Focus" : isBreak ? "Break" : "Pomodoro";
-  const phaseEmoji  = isFocus ? "🍅" : isBreak ? "☕" : "⏱";
+  const isRunning = isFocus && !isPaused;
+  const defaultDurLabel = SPRINT_DURATIONS.find(d => d.secs === sprintDuration)?.label ?? "25 min";
 
   return (
     <div style={{
-      background:bgColor, border:`1px solid ${borderColor}`,
+      background: isFocus ? "rgba(196,154,60,0.05)" : "rgba(255,255,255,0.02)",
+      border: `1px solid ${isFocus ? "rgba(196,154,60,0.18)" : "rgba(255,255,255,0.07)"}`,
       borderRadius:"14px", padding:"20px 20px 16px", marginBottom:"18px",
       transition:"background 0.4s, border-color 0.4s",
     }}>
       <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"10px" }}>
-        <span style={{ fontSize:"11px", letterSpacing:"2px", textTransform:"uppercase", color:accentColor, fontWeight:"600" }}>
-          {phaseEmoji} {phaseLabel}{isPaused ? " · Paused" : ""}
+        <span style={{ fontSize:"11px", letterSpacing:"2px", textTransform:"uppercase", color: isFocus ? "#C49A3C" : "var(--text-dim)", fontWeight:"600" }}>
+          📚 Focus Sprint{isPaused ? " · Paused" : ""}
         </span>
         <span style={{ fontSize:"11px", color:"var(--text-dim)" }}>
-          {isIdle ? "25 min focus / 5 min break" : isFocus ? "Stay focused" : "Rest up ☕"}
+          {isFocus ? "Study, discuss, or go mute — together" : "Choose your sprint length"}
         </span>
       </div>
 
@@ -2031,46 +2117,59 @@ function PomodoroPanel({ pomo, remaining, isHost, onStart, onPause, onResume, on
         <span style={{
           fontSize:"56px", fontWeight:"700", letterSpacing:"-2px",
           fontVariantNumeric:"tabular-nums", display:"block", lineHeight:1,
-          color: isIdle ? "rgba(255,255,255,0.15)" : accentColor,
+          color: isIdle ? "rgba(255,255,255,0.15)" : "#C49A3C",
           opacity: isPaused ? 0.55 : 1,
           transition:"color 0.4s",
         }}>
-          {isIdle ? "25:00" : formatPomoTime(remaining)}
+          {isIdle ? formatPomoTime(sprintDuration) : formatPomoTime(remaining)}
         </span>
       </div>
 
       {/* Controls */}
       {isHost ? (
-        <div style={{ display:"flex", gap:"8px", justifyContent:"center", flexWrap:"wrap" }}>
+        <div style={{ display:"flex", gap:"8px", justifyContent:"center", flexWrap:"wrap", alignItems:"center" }}>
           {isIdle && (
-            <button onClick={onStart} style={{
-              background:"rgba(196,154,60,0.14)", color:"#C49A3C",
-              border:"1px solid rgba(196,154,60,0.35)", borderRadius:"9px",
-              padding:"9px 24px", fontSize:"13px", fontWeight:"600",
-              cursor:"pointer", fontFamily:"inherit",
-            }}>
-              Start Focus →
-            </button>
+            <>
+              {/* Duration selector */}
+              <div style={{ display:"flex", gap:"4px", marginRight:"8px" }}>
+                {SPRINT_DURATIONS.map(d => (
+                  <button key={d.secs} onClick={() => onDurationChange(d.secs)} style={{
+                    background: sprintDuration === d.secs ? "rgba(196,154,60,0.14)" : "rgba(255,255,255,0.04)",
+                    color: sprintDuration === d.secs ? "#C49A3C" : "var(--text-dim)",
+                    border: `1px solid ${sprintDuration === d.secs ? "rgba(196,154,60,0.35)" : "rgba(255,255,255,0.09)"}`,
+                    borderRadius:"7px", padding:"5px 10px", fontSize:"11px",
+                    cursor:"pointer", fontFamily:"inherit",
+                  }}>{d.label}</button>
+                ))}
+              </div>
+              <button onClick={onStart} style={{
+                background:"rgba(196,154,60,0.14)", color:"#C49A3C",
+                border:"1px solid rgba(196,154,60,0.35)", borderRadius:"9px",
+                padding:"9px 24px", fontSize:"13px", fontWeight:"600",
+                cursor:"pointer", fontFamily:"inherit",
+              }}>
+                Start Sprint →
+              </button>
+            </>
           )}
           {isRunning && (
             <>
-              <button onClick={onPause}  style={pomoCtrlStyle("dim")}>Pause</button>
-              <button onClick={onSkip}   style={pomoCtrlStyle("dim")}>Skip ›</button>
-              <button onClick={onReset}  style={pomoCtrlStyle("red")}>Reset</button>
+              <button onClick={onPause}  style={sprintCtrlStyle("dim")}>Pause</button>
+              <button onClick={onEnd}    style={sprintCtrlStyle("dim")}>End sprint</button>
+              <button onClick={onReset}  style={sprintCtrlStyle("red")}>Reset</button>
             </>
           )}
           {isPaused && (
             <>
-              <button onClick={onResume} style={pomoCtrlStyle("accent")}>Resume</button>
-              <button onClick={onReset}  style={pomoCtrlStyle("red")}>Reset</button>
+              <button onClick={onResume} style={sprintCtrlStyle("accent")}>Resume</button>
+              <button onClick={onReset}  style={sprintCtrlStyle("red")}>Reset</button>
             </>
           )}
         </div>
       ) : (
         <p style={{ textAlign:"center", fontSize:"12px", color:"var(--text-dim)", margin:0 }}>
-          {isIdle ? "Waiting for host to start the timer…" :
-           isFocus ? "Stay focused — you've got this." :
-           "Enjoy your break!"}
+          {isIdle ? `Waiting for host to start a ${defaultDurLabel} sprint…` :
+           "Focus up — sprint in progress."}
         </p>
       )}
     </div>
@@ -2461,17 +2560,21 @@ function InviteModal({ room, userId, userData, onlineIds = [], onClose }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // ChatPanel — persisted room chat, WhatsApp-style
 // ─────────────────────────────────────────────────────────────────────────────
-function ChatPanel({ messages, myUserId, input, sending, onInputChange, onSend, onClose }: {
+function ChatPanel({ messages, myUserId, input, sending, imageUploading, onInputChange, onSend, onImageUpload, onClose }: {
   messages: ChatMessage[]; myUserId: string;
-  input: string; sending: boolean;
-  onInputChange: (v: string) => void; onSend: () => void; onClose: () => void;
+  input: string; sending: boolean; imageUploading?: boolean;
+  onInputChange: (v: string) => void; onSend: () => void;
+  onImageUpload?: (file: File) => void; onClose: () => void;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
-  const S = styles;
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
+
+  function isImageMsg(body: string) { return body.startsWith("[img]"); }
+  function getImageUrl(body: string) { return body.slice(5); }
 
   return (
     <div style={{
@@ -2509,6 +2612,7 @@ function ChatPanel({ messages, myUserId, input, sending, onInputChange, onSend, 
         ) : (
           messages.map(msg => {
             const isMe = msg.user_id === myUserId;
+            const isImg = isImageMsg(msg.body);
             return (
               <div key={msg.id} style={{ display: "flex", flexDirection: "column", alignItems: isMe ? "flex-end" : "flex-start" }}>
                 {!isMe && (
@@ -2517,13 +2621,25 @@ function ChatPanel({ messages, myUserId, input, sending, onInputChange, onSend, 
                   </span>
                 )}
                 <div style={{
-                  maxWidth: "78%", padding: "8px 12px", wordBreak: "break-word",
+                  maxWidth: "78%",
+                  padding: isImg ? "4px" : "8px 12px",
+                  wordBreak: "break-word",
                   borderRadius: isMe ? "12px 12px 3px 12px" : "12px 12px 12px 3px",
                   background: isMe ? "rgba(196,154,60,0.14)" : "rgba(255,255,255,0.06)",
                   border: `1px solid ${isMe ? "rgba(196,154,60,0.22)" : "rgba(255,255,255,0.09)"}`,
                   fontSize: "13px", color: "var(--text-primary)", lineHeight: 1.5,
+                  overflow: "hidden",
                 }}>
-                  {msg.body}
+                  {isImg ? (
+                    <a href={getImageUrl(msg.body)} target="_blank" rel="noopener noreferrer">
+                      <img
+                        src={getImageUrl(msg.body)}
+                        alt="shared image"
+                        style={{ display: "block", maxWidth: "100%", maxHeight: "240px", borderRadius: "8px", cursor: "zoom-in" }}
+                        onError={e => { (e.currentTarget as HTMLImageElement).style.display = "none"; }}
+                      />
+                    </a>
+                  ) : msg.body}
                 </div>
                 <span style={{ fontSize: "10px", color: "var(--text-dim)", marginTop: "2px", paddingRight: isMe ? "2px" : 0, paddingLeft: isMe ? 0 : "4px" }}>
                   {new Date(msg.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -2537,6 +2653,32 @@ function ChatPanel({ messages, myUserId, input, sending, onInputChange, onSend, 
 
       {/* Input */}
       <div style={{ borderTop: "1px solid rgba(127,174,110,0.12)", padding: "10px 12px", display: "flex", gap: "8px", alignItems: "center" }}>
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="image/*"
+          style={{ display: "none" }}
+          onChange={e => {
+            const file = e.target.files?.[0];
+            if (file) onImageUpload?.(file);
+            e.target.value = "";
+          }}
+        />
+        {/* Image upload button */}
+        <button
+          onClick={() => fileInputRef.current?.click()}
+          disabled={imageUploading}
+          title="Send image"
+          style={{
+            background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
+            borderRadius: "9px", padding: "9px 11px", fontSize: "15px", lineHeight: 1,
+            cursor: imageUploading ? "default" : "pointer", flexShrink: 0,
+            opacity: imageUploading ? 0.5 : 0.8, transition: "opacity 0.15s",
+          }}
+        >
+          {imageUploading ? "⏳" : "🖼"}
+        </button>
         <input
           value={input}
           onChange={e => onInputChange(e.target.value)}
@@ -2574,7 +2716,7 @@ function ChatPanel({ messages, myUserId, input, sending, onInputChange, onSend, 
 // ─────────────────────────────────────────────────────────────────────────────
 // MemberCard
 // ─────────────────────────────────────────────────────────────────────────────
-function MemberCard({ member, isMe, isSpeaking = false }) {
+function MemberCard({ member, isMe, isSpeaking = false, handRaised = false }) {
   const elapsed = Math.max(0, Math.floor((Date.now() - member.joinedAt) / 1000));
   const h = Math.floor(elapsed / 3600);
   const m = Math.floor((elapsed % 3600) / 60);
@@ -2625,6 +2767,9 @@ function MemberCard({ member, isMe, isSpeaking = false }) {
                 }} />
               ))}
             </span>
+          )}
+          {handRaised && (
+            <span title="Hand raised" style={{ fontSize:"14px", marginLeft:"2px" }}>✋</span>
           )}
         </div>
         <p style={{
