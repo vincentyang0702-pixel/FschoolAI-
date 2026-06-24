@@ -1,6 +1,6 @@
 # FschoolAI — Product Requirements Document (PRD)
-**Version:** 1.0  
-**Date:** June 22, 2026  
+**Version:** 1.1  
+**Date:** June 23, 2026  
 **Author:** Vincent Yang, FschoolAI  
 **Audience:** Engineering team — Tencent engineer, Bytedance engineer, Aryan, Ryan, Vincent
 
@@ -50,12 +50,25 @@ StudentBrain {
 
 ### 3.2 Agent Architecture
 
-Every agent follows the same three-step pattern:
+There are two distinct agent patterns. Using the wrong pattern for a given agent is a design error.
+
+**Pattern A — Request/Response (interactive agents)**
+Used by: Reggie, Tutor, Canvas, Planner, Lecture, Library, Exam Mode, Audio, Office Hours, Calendar, Terminal.
 
 ```
 Step 1:  context = brain.read(student_id)
 Step 2:  result  = agent_logic(user_input, context)
 Step 3:  brain.write(student_id, signal)
+```
+
+**Pattern B — Watch/Arbitrate/Deliver (background/proactive agents)**
+Used by: Intervention Agent, Reflection Agent, Cohort Agent.
+These agents do NOT wait for user input. They watch for events or run on schedule, evaluate whether an intervention is worth sending, and deliver through the Signal Arbiter.
+
+```
+Step 1:  watch  — subscribe to brain_signals via Supabase Realtime OR run on cron schedule
+Step 2:  evaluate — compute whether an intervention candidate is worth creating
+Step 3:  arbitrate — write candidate to proactive_signals queue (Signal Arbiter decides delivery)
 ```
 
 Agents do not store state themselves. All state lives in the brain. This means any agent can be replaced or upgraded without losing the student's history.
@@ -89,6 +102,83 @@ await brain.write(student_id, signal)
 ```
 
 No other change to any agent is required.
+
+### 3.5 Proactivity Infrastructure
+
+This section defines the infrastructure that allows FschoolAI to act on behalf of the student without waiting for them to open the app. It is the backbone of all background and proactive agents.
+
+#### 3.5.1 Trigger / Event Runtime
+
+Two mechanisms fire background agents. Both must be implemented.
+
+**Event-driven (real-time):** Supabase Realtime listens for `INSERT` events on the `brain_signals` table via `pg_notify`. When a new signal is written (e.g., Canvas Agent writes a `stress_signal` after detecting 3 deadlines in 48 hours), the event runtime fires the relevant background agents immediately. A grade posted at 3pm cannot wait until the 2am Reflection run — it must trigger the Intervention Agent within minutes.
+
+**Scheduler (cron):** Time-based triggers for agents that need to run on a fixed schedule regardless of events. Examples: Reflection Agent at 2am nightly, Canvas sync every 6 hours, spaced-repetition reminders at the student's preferred study time.
+
+```typescript
+// Event-driven trigger (Supabase Realtime)
+supabase
+  .channel('brain_signals')
+  .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'brain_signals' }, 
+    (payload) => triggerRuntime.dispatch(payload))
+  .subscribe()
+
+// Cron trigger (example)
+cron.schedule('0 2 * * *', () => reflectionAgent.runForAllStudents())
+```
+
+#### 3.5.2 Signal Arbiter
+
+The Signal Arbiter is the most important missing piece in a naive proactive system. Without it, multiple background agents fire simultaneously and the student receives a flood of notifications that they immediately disable.
+
+**How it works:**
+1. Every background agent that wants to reach the student writes a **candidate signal** to the `proactive_signals` queue — it does NOT send a notification directly.
+2. The Arbiter runs every 5 minutes per student.
+3. For each student, it reads all pending candidates, then:
+   - **Deduplicates** — removes redundant candidates (e.g., two agents both flagging the same deadline)
+   - **Ranks** — scores each candidate by `urgency × value`. Urgency = time sensitivity. Value = estimated benefit to the student.
+   - **Enforces rate limits** — maximum 3 proactive messages per student per day. Maximum 1 per hour.
+   - **Enforces quiet hours** — no delivery between 11pm and 8am unless the student has overridden this.
+   - **Selects** — approves the top-ranked candidate(s) and writes them to `notification_queue`.
+4. Rejected candidates are discarded or deferred to the next cycle.
+
+The Arbiter is the confidence gate. Nothing reaches the student without passing through it.
+
+#### 3.5.3 Delivery Layer
+
+Approved notifications in `notification_queue` are delivered through one of four channels based on urgency and student preference:
+
+| Channel | When to use | Service |
+|---|---|---|
+| In-app banner | Student is active in the app | Supabase Realtime push to frontend |
+| Push notification | Student has app installed, not currently active | Firebase Cloud Messaging (FCM) |
+| SMS | High-urgency, student not reachable by push | Twilio SMS API |
+| Email | Low-urgency summaries, weekly reports | Resend or SendGrid |
+
+**Delivery tracking:** Every notification records `delivered_at`, `opened_at`, and `action_taken` (did the student act on it?). This data feeds the effectiveness feedback loop.
+
+**Quiet hours:** Configurable per student. Default: no delivery 11pm–8am. SMS is never sent during quiet hours regardless of urgency.
+
+#### 3.5.4 Effectiveness Feedback Loop
+
+The hard-coded thresholds in the Intervention Agent (stress > 0.8, 3+ sessions, etc.) are starting values only. They must be tuned per student over time.
+
+**Mechanism:**
+- Every `intervention_accepted` signal (student engaged with the notification) is a positive label.
+- Every `intervention_delivered` with no action within 2 hours is a negative label.
+- After 20 labelled examples per student, the system adjusts that student's thresholds: if they consistently ignore stress-level interventions but respond to deadline interventions, the stress threshold is raised and the deadline threshold is lowered.
+- Per-channel tuning: if a student never opens push notifications but always responds to SMS, the delivery layer learns to prefer SMS for that student.
+
+#### 3.5.5 Cold-Start Mode
+
+On Day 1, the brain is empty. Behavioural triggers (stress level, confusion patterns, session history) have no data to fire on. The system must not be silent on Day 1.
+
+**Degraded mode (Day 1 through Day 7):**
+- **Deadline-based proactivity is available immediately** — Canvas data is synced at signup. The Intervention Agent can fire deadline reminders from the first hour.
+- **Behavioural proactivity is gated** — stress level, confusion detection, and pattern-based triggers are disabled until a baseline exists (minimum: 5 sessions + 7 days of data).
+- **Learning style proactivity is gated** — adaptive explanation format is set to a neutral default until the learning style assessment is complete.
+
+The UI must not show empty states as errors. During cold-start, show: "I'm learning how you work. The more you use FschoolAI, the more personalised I become."
 
 ---
 
@@ -316,9 +406,11 @@ Tuesday June 24:
 **Environment:** Background monitor  
 **Priority:** P1
 
-**What it does:** Runs silently in the background. Monitors the student's stress signals, deadline proximity, and engagement patterns. When it detects a student who is overwhelmed, falling behind, or disengaged, it intervenes proactively — not with a generic notification, but with a specific, helpful action.
+**Agent pattern:** Pattern B (Watch/Arbitrate/Deliver). This agent does not respond to user input — it watches `brain_signals` and writes candidates to the Signal Arbiter.
 
-**Intervention triggers:**
+**What it does:** Runs silently in the background. Monitors the student's stress signals, deadline proximity, and engagement patterns. When it detects a student who is overwhelmed, falling behind, or disengaged, it intervenes proactively. It also fires on positive opportunity triggers — not just problems.
+
+**Negative intervention triggers (problems):**
 
 | Signal | Threshold | Intervention |
 |---|---|---|
@@ -328,8 +420,19 @@ Tuesday June 24:
 | Grade drop | > 10% below course average | "Your CHEM 201 grade dropped this week. Want to review what was covered?" |
 | Late night pattern | Study sessions after 1am for 3+ nights | "You've been studying late. A 20-minute review now is more effective than 2 hours at midnight." |
 
+**Positive opportunity triggers (advancement):**
+
+| Signal | Condition | Intervention |
+|---|---|---|
+| Free study block + quiz tomorrow | Calendar gap detected + assignment due < 24h | "You have 90 free minutes at 3pm and a quiz tomorrow. Want to do a quick review now?" |
+| Prerequisite mastered | Brain confidence score on prerequisite > 0.85 | "You've got the product rule down. Ready to tackle integration by parts?" |
+| Spaced-repetition due | Concept last reviewed > 7 days ago + exam within 14 days | "It's been 8 days since you reviewed stereochemistry. A 10-minute refresher now will stick better than cramming." |
+| Streak opportunity | Student studied 4 days in a row | "4-day streak. One more session today and you'll have your best week this semester." |
+
+**Important:** All triggers — positive and negative — write to the `proactive_signals` queue. The Signal Arbiter (§3.5.2) decides what actually reaches the student. This agent does not send notifications directly.
+
 **Brain signals written:**
-- `intervention_triggered`: type and trigger
+- `intervention_triggered`: type and trigger (positive or negative)
 - `intervention_accepted`: boolean — did the student engage with the intervention?
 
 ---
@@ -447,6 +550,76 @@ Tuesday June 24:
 
 **Brain signals written:**
 - `terminal_commands_used`: list of commands executed
+
+---
+
+### Agent 14 — Cohort / Collective Intelligence Agent
+
+**Owner:** Ryan (NeuroAGI) + Vincent (FschoolAI integration)  
+**Environment:** Background — runs on event trigger (new confusion signals) and nightly  
+**Priority:** P2 — requires canonical entity layer and k-anonymity minimum before activation
+
+**Agent pattern:** Pattern B (Watch/Arbitrate/Deliver). This agent is a **producer into the Signal Arbiter** — its outputs fan out to each cohort member's Intervention Agent and Planner Agent. It does not communicate with students directly.
+
+**What it does:** Aggregates anonymised, de-identified learning signals across students in the same course section. Identifies concept gaps that are widespread in the cohort. Surfaces targeted review recommendations to each individual student based on what their cohort is struggling with collectively.
+
+**The core insight:** If 15 students in one section hit confusion on the same concept this week, that is a *leading* signal available immediately — grades are lagging, sparse, and privacy-sensitive. Confusion clustering is the right signal to build on first.
+
+**What it does NOT do:**
+- It does not aggregate grades or grade distributions (privacy-hot, consent-gated, Phase 3 only)
+- It does not make claims about professor performance — never "your prof's test was unfair"
+- It does not show individual student data to other students — ever
+- It does not operate on cohorts smaller than 10 students (k-anonymity minimum)
+
+**Canonical entity layer (required prerequisite):**
+Today the `courses` table is keyed by `student_id`, so the same Canvas course is N separate rows with no way to aggregate across them. Before this agent can function, a canonical entity layer must be built:
+
+```sql
+-- Canonical course — shared across all students in the same Canvas instance
+canonical_courses (
+  id                uuid PRIMARY KEY,
+  institution_id    text,              -- e.g., "carleton.ca"
+  canvas_course_id  text,              -- Canvas's own course ID (shared across students)
+  course_name       text,
+  semester          text,
+  UNIQUE(institution_id, canvas_course_id)
+)
+
+-- Canonical assignment — shared across all students in the same course
+canonical_assignments (
+  id                    uuid PRIMARY KEY,
+  canonical_course_id   uuid REFERENCES canonical_courses(id),
+  canvas_assignment_id  text,
+  title                 text,
+  due_date              timestamp,
+  UNIQUE(canonical_course_id, canvas_assignment_id)
+)
+```
+
+Cohorts are grouped by `(institution_id, canvas_course_id)`. These IDs are shared across students in the same Canvas instance.
+
+**Confusion clustering algorithm:**
+1. Every time the Tutor Agent writes a `confusion_detected` signal, it includes `canonical_course_id` and `concept_tag`.
+2. The Cohort Agent aggregates these signals per `(canonical_course_id, concept_tag)` over a rolling 7-day window.
+3. If 10+ students in the same cohort show confusion on the same concept within 7 days, a cohort insight is generated.
+4. The insight is written to the `proactive_signals` queue for each cohort member: "15 students in your CHEM 201 section are struggling with stereochemistry this week. Here is a targeted 10-minute review."
+
+**Privacy architecture (non-negotiable):**
+- All cohort aggregation runs against a **de-identified aggregation store** — a separate table with RLS policies that prevent any per-student data from being exposed.
+- **k-anonymity minimum: 10 students.** If a cohort has fewer than 10 students, no insight is computed or shown. If a concept has fewer than 10 confused students, no insight is generated.
+- **Per-student consent flag:** Students must opt in to cohort intelligence. Default is opt-out. The consent flag is stored in `students.cohort_consent boolean DEFAULT false`.
+- **Legal review required:** This feature requires reconciling §9 (data belongs to student, never aggregated without consent) and §11 (social features deferred). Legal review for PIPEDA and FERPA compliance is required before this agent goes live. Do not ship without legal sign-off.
+
+**Framing rule:** Insights are always framed as concept-gap recommendations for the individual student, never as commentary on the professor or course quality.
+
+| Correct framing | Prohibited framing |
+|---|---|
+| "Many students in your section are finding stereochemistry difficult. Here's a targeted review." | "Your professor didn't explain this well." |
+| "This concept is commonly misunderstood in CHEM 201. Let me break it down differently." | "Your class average on this topic is low." |
+
+**Brain signals written (to de-identified aggregation store only):**
+- `cohort_insight_generated`: concept tag, cohort size, confusion count
+- `cohort_insight_delivered`: how many students received the insight
 
 ---
 
@@ -580,6 +753,64 @@ signal_data     jsonb
 created_at      timestamp
 ```
 
+**proactive_signals** (candidate interventions awaiting Signal Arbiter decision)
+```sql
+id              uuid PRIMARY KEY
+student_id      uuid REFERENCES students(id)
+agent_source    text              -- which agent wrote this candidate
+urgency_score   float             -- 0.0–1.0, time sensitivity
+value_score     float             -- 0.0–1.0, estimated benefit
+message_text    text              -- the message to deliver if approved
+channel_hint    text              -- preferred channel (push, sms, email, in_app)
+status          text DEFAULT 'pending'  -- pending | approved | rejected | delivered
+created_at      timestamp
+expires_at      timestamp         -- candidate is discarded after this time
+```
+
+**notification_queue** (approved interventions ready for delivery)
+```sql
+id                  uuid PRIMARY KEY
+student_id          uuid REFERENCES students(id)
+proactive_signal_id uuid REFERENCES proactive_signals(id)
+channel             text              -- actual delivery channel chosen by Arbiter
+message_text        text
+scheduled_for       timestamp         -- when to deliver (respects quiet hours)
+delivered_at        timestamp
+opened_at           timestamp
+action_taken        boolean           -- did the student act on it?
+created_at          timestamp
+```
+
+**canonical_courses** (shared across students in the same Canvas instance)
+```sql
+id                  uuid PRIMARY KEY
+institution_id      text              -- e.g., "carleton.ca"
+canvas_course_id    text              -- Canvas's own course ID
+course_name         text
+semester            text
+UNIQUE(institution_id, canvas_course_id)
+```
+
+**canonical_assignments** (shared across students in the same course)
+```sql
+id                      uuid PRIMARY KEY
+canonical_course_id     uuid REFERENCES canonical_courses(id)
+canvas_assignment_id    text
+title                   text
+due_date                timestamp
+UNIQUE(canonical_course_id, canvas_assignment_id)
+```
+
+**cohort_confusion_signals** (de-identified aggregation store — separate RLS, no per-student data)
+```sql
+id                      uuid PRIMARY KEY
+canonical_course_id     uuid REFERENCES canonical_courses(id)
+concept_tag             text
+confusion_count         int               -- number of students confused (never < 10 when shown)
+week_start              date
+updated_at              timestamp
+```
+
 ---
 
 ## 7. Technical Stack
@@ -608,18 +839,26 @@ The build order is designed so no engineer blocks another. Ryan's brain mock is 
 | Week 1 | Brain mock JSON + `brain.read()` / `brain.write()` stub | Ryan |
 | Week 1 | Canvas Agent — OAuth + sync | Aryan |
 | Week 1 | Reggie — basic routing | Vincent |
+| Week 1 | Supabase schema — all tables including `proactive_signals`, `notification_queue`, `canonical_courses` | Ryan |
 | Week 2 | Tutor Agent — core explanation logic | Tencent engineer |
 | Week 2 | Planner Agent — study schedule generation | Bytedance engineer |
 | Week 2 | Lecture Agent — transcription + summary | Aryan |
+| Week 2 | Trigger / Event Runtime — Supabase Realtime + cron scaffold | Ryan |
 | Week 3 | Exam Mode Agent | Vincent |
-| Week 3 | Intervention Agent | Vincent |
+| Week 3 | Intervention Agent (Pattern B, writes to Arbiter) | Vincent |
 | Week 3 | Library Agent | Bytedance engineer |
+| Week 3 | **Signal Arbiter** — dedup, rank, rate-limit, quiet hours | Ryan |
+| Week 3 | **Delivery Layer** — FCM push + Twilio SMS + email (Resend) + in-app | Aryan |
 | Week 4 | Audio Agent | Aryan |
 | Week 4 | Office Hours Agent | Tencent engineer |
 | Week 4 | Calendar Agent | Bytedance engineer |
+| Week 4 | Effectiveness feedback loop — per-student threshold tuning | Ryan |
 | Week 5 | Reflection Agent (NeuroAGI) | Ryan |
 | Week 5 | Terminal Agent | Vincent |
+| Week 5 | Cold-start mode — deadline-only proactivity until baseline exists | Vincent |
 | Week 6 | Replace mock brain with live NeuroAGI API | Ryan + all |
+| Week 7+ | **Cohort Agent** — requires canonical layer + 10+ students + legal sign-off | Ryan + Vincent |
+| Week 7+ | Canonical entity layer (`canonical_courses`, `canonical_assignments`) | Ryan |
 
 ---
 
