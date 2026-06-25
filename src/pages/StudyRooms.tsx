@@ -1967,7 +1967,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
         />
       )}
 
-      {/* Voice chat panel — Daily.co placeholder, audio-first */}
+      {/* Voice chat panel — collapses to slim bar when the whiteboard is open */}
       {showVoice && (
         <VoiceRoom
           roomId={room.id}
@@ -1976,6 +1976,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           onSpeakingChange={setActiveSpeakerName}
           handRaised={myHandRaised}
           onToggleHand={handleToggleHand}
+          forceMinimized={showBoard}
         />
       )}
 
@@ -2025,6 +2026,7 @@ function RoomView({ room, onLeave, roomCounts, onlineIds = [] }) {
           onCursorMove={handleCursorMove}
           onLaserMove={handleLaserMove}
           onClose={() => setShowBoard(false)}
+          activeSpeaker={activeSpeakerName}
         />
       )}
 

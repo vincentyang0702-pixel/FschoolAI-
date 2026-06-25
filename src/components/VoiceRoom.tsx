@@ -23,13 +23,16 @@ function clamp(left: number, top: number, popW: number, popH: number) {
   };
 }
 
-export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange, handRaised = false, onToggleHand }: {
+export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange, handRaised = false, onToggleHand, forceMinimized = false }: {
   roomId: string;
   userName?: string;
   onClose: () => void;
   onSpeakingChange?: (name: string | null) => void;
   handRaised?: boolean;
   onToggleHand?: () => void;
+  /** When true the panel collapses to the slim bar regardless of internal minimized state.
+   *  Used by the parent to keep voice alive but out of the way when the whiteboard is open. */
+  forceMinimized?: boolean;
 }) {
   const [status, setStatus]       = useState<Status>("loading");
   const [url, setUrl]             = useState<string | null>(null);
@@ -38,7 +41,7 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange,
   const [pos, setPos]             = useState(() =>
     defaultPos(window.innerWidth, window.innerHeight)
   );
-  const isMobile = window.innerWidth < 600;
+  const [isMobile, setIsMobile]   = useState(window.innerWidth < 600);
 
   const [pttActive, setPttActive] = useState(false);
   const [ncEnabled, setNcEnabled] = useState(true);
@@ -51,6 +54,8 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange,
   const popupRef   = useRef<HTMLDivElement>(null);
   const iframeRef  = useRef<HTMLIFrameElement>(null);
 
+  // Declared before effects so closures in the resize/drag effects can see it without TDZ errors.
+  const isMinimized = forceMinimized || minimized;
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -149,21 +154,22 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange,
 
   useEffect(() => {
     function onResize() {
+      setIsMobile(window.innerWidth < 600);
       setPos(p => {
-        const pw = minimized ? POPUP_W_SM : POPUP_W;
-        const ph = minimized ? POPUP_H_SM : POPUP_H;
+        const pw = isMinimized ? POPUP_W_SM : POPUP_W;
+        const ph = isMinimized ? POPUP_H_SM : POPUP_H;
         return clamp(p.left, p.top, pw, ph);
       });
     }
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-  }, [minimized]);
+  }, [isMinimized]);
 
   useEffect(() => {
     function onMove(e: MouseEvent) {
       if (!dragging.current) return;
-      const pw = popupRef.current?.offsetWidth  ?? (minimized ? POPUP_W_SM : POPUP_W);
-      const ph = popupRef.current?.offsetHeight ?? (minimized ? POPUP_H_SM : POPUP_H);
+      const pw = popupRef.current?.offsetWidth  ?? (isMinimized ? POPUP_W_SM : POPUP_W);
+      const ph = popupRef.current?.offsetHeight ?? (isMinimized ? POPUP_H_SM : POPUP_H);
       setPos(clamp(
         e.clientX - dragOffset.current.x,
         e.clientY - dragOffset.current.y,
@@ -177,7 +183,7 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange,
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup",   onUp);
     };
-  }, [minimized]);
+  }, [isMinimized]);
 
   function startDrag(e: React.MouseEvent) {
     dragging.current   = true;
@@ -196,7 +202,7 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange,
 
   const ACCENT = "#60a5fa";
 
-  const mobileCollapsed = isMobile && minimized;
+  const mobileCollapsed = isMobile && isMinimized;
 
   // ── Full popup (desktop) or expanded bottom sheet (mobile) ───────────────
   const popup = (
@@ -222,9 +228,9 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange,
         position:             "fixed",
         top:                  pos.top,
         left:                 pos.left,
-        width:                minimized ? POPUP_W_SM : POPUP_W,
+        width:                isMinimized ? POPUP_W_SM : POPUP_W,
         zIndex:               1200,
-        borderRadius:         minimized ? "32px" : "16px",
+        borderRadius:         isMinimized ? "32px" : "16px",
         border:               "1px solid rgba(96,165,250,0.25)",
         background:           "rgba(10,10,14,0.97)",
         backdropFilter:       "blur(20px)",
@@ -367,14 +373,14 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange,
           {!isMobile && (
             <button
               onClick={() => setMinimized(m => !m)}
-              title={minimized ? "Expand" : "Minimize"}
+              title={isMinimized ? "Expand" : "Minimize"}
               style={{
                 background: "none", border: "none", cursor: "pointer",
                 color: "var(--text-dim)", fontSize: "15px", lineHeight: 1,
                 padding: "2px 5px", borderRadius: "5px",
               }}
             >
-              {minimized ? "□" : "─"}
+              {isMinimized ? "□" : "─"}
             </button>
           )}
           <button
@@ -392,7 +398,7 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange,
       </div>
 
       {/* Body */}
-      <div style={{ height: (!isMobile && minimized) ? 0 : "auto", overflow: "hidden" }}>
+      <div style={{ height: (!isMobile && isMinimized) ? 0 : "auto", overflow: "hidden" }}>
 
         {/* iframe is mounted for both loading + ready so iframeRef is set when the
             wrap+join effect fires. A loading overlay covers it until join() resolves. */}
