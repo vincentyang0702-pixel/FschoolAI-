@@ -87,47 +87,35 @@ function loadEnvKey(key) {
     process.env.SUPABASE_SERVICE_KEY = loadEnvKey("VITE_SUPABASE_ANON_KEY") ?? "";
 })();
 
+// Inject the Anthropic/Groq secrets + optional model overrides for the gateway, then
+// run the REAL handler under the dev server (so the LLM gateway in api/_gateway.ts is
+// exercised in dev exactly as in prod — no inline-divergent proxy logic). Mirrors the
+// summarize/rag proxies. Only sets a var when present (assigning undefined would
+// coerce to the truthy string "undefined" and defeat the gateway's key check).
+function injectGatewayEnv(provider) {
+  const set = (k) => { const v = loadEnvKey(k); if (v) process.env[k] = v; };
+  if (provider === "anthropic") { set("ANTHROPIC_API_KEY"); set("ANTHROPIC_MODEL"); set("ANTHROPIC_MODEL_CHEAP"); set("ANTHROPIC_MODEL_DEEP"); }
+  set("GROQ_KEY"); set("GROQ_MODEL");  // gateway fallbacks can cross providers
+}
+
 const groqProxyPlugin = {
   name: "groq-proxy",
   configureServer(server) {
     server.middlewares.use("/api/groq", async (req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
       if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
-
+      injectGatewayEnv("groq");
       let body = "";
       req.on("data", c => { body += c; });
       req.on("end", async () => {
-        const GROQ_KEY = loadEnvKey("GROQ_KEY");
-        if (!GROQ_KEY) {
-          res.statusCode = 500;
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ error: "GROQ_KEY not set in .env" }));
-          return;
-        }
-
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
         try {
-          const { messages, system } = JSON.parse(body);
-          const msgs = system
-            ? [{ role: "system", content: system }, ...messages]
-            : messages;
-
-          const upstream = await fetch("https://api.groq.com/openai/v1/chat/completions", {
-            method:  "POST",
-            headers: { Authorization: `Bearer ${GROQ_KEY}`, "Content-Type": "application/json" },
-            body:    JSON.stringify({ model: "llama-3.1-8b-instant", messages: msgs, max_tokens: 1500 }),
-          });
-
-          const data = await upstream.json();
-          res.statusCode = upstream.ok ? 200 : upstream.status;
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify(
-            upstream.ok
-              ? { content: data.choices?.[0]?.message?.content ?? "" }
-              : { error: data.error?.message ?? `Groq error ${upstream.status}` }
-          ));
+          const { default: handler } = await import("./api/groq.js");
+          await handler(req, res);
         } catch (err) {
-          res.statusCode = 502;
-          res.setHeader("Content-Type", "application/json");
+          res.statusCode = 502; res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: err.message }));
         }
       });
@@ -135,65 +123,25 @@ const groqProxyPlugin = {
   },
 };
 
-// Claude proxy plugin — forwards /api/claude POST to Anthropic from dev server.
-// Supports both streaming (stream:true for AI buddy) and non-streaming responses.
+// Claude proxy plugin — runs the real api/claude.ts handler (gateway-backed) under the
+// dev server. Streaming (stream:true) works because the handler writes SSE directly to
+// the Node res via res.write()/res.end(), which we leave intact (we only add status/json).
 const claudeProxyPlugin = {
   name: "claude-proxy",
   configureServer(server) {
     server.middlewares.use("/api/claude", async (req, res) => {
       res.setHeader("Access-Control-Allow-Origin", "*");
       if (req.method === "OPTIONS") { res.statusCode = 200; res.end(); return; }
+      injectGatewayEnv("anthropic");
       let body = "";
       req.on("data", c => { body += c; });
       req.on("end", async () => {
-        const ANTHROPIC_KEY = loadEnvKey("ANTHROPIC_API_KEY");
-        if (!ANTHROPIC_KEY) {
-          res.statusCode = 500; res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify({ error: "ANTHROPIC_API_KEY not set in .env" })); return;
-        }
+        try { req.body = body ? JSON.parse(body) : {}; } catch { req.body = {}; }
+        res.status = (code) => { res.statusCode = code; return res; };
+        res.json   = (obj)  => { res.setHeader("Content-Type", "application/json"); res.end(JSON.stringify(obj)); };
         try {
-          const { messages, system, max_tokens = 1024, tools, stream } = JSON.parse(body);
-          const model = loadEnvKey("ANTHROPIC_MODEL") || "claude-haiku-4-5-20251001";
-          const upstreamBody = { model, max_tokens, ...(system ? { system } : {}), ...(Array.isArray(tools) && tools.length ? { tools } : {}), messages };
-
-          // ── Streaming path (AI buddy uses stream:true) ──────────────────────
-          if (stream) {
-            upstreamBody.stream = true;
-            const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-              method: "POST",
-              headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-              body: JSON.stringify(upstreamBody),
-            });
-            if (!upstream.ok) {
-              const errText = await upstream.text();
-              res.statusCode = 502; res.setHeader("Content-Type", "application/json");
-              res.end(JSON.stringify({ error: `Anthropic ${upstream.status}`, detail: errText.slice(0, 200) })); return;
-            }
-            res.setHeader("Content-Type", "text/event-stream");
-            res.setHeader("Cache-Control", "no-cache");
-            res.setHeader("Connection", "keep-alive");
-            res.setHeader("X-Accel-Buffering", "no");
-            const reader = upstream.body.getReader();
-            try {
-              while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-                res.write(value);
-              }
-            } finally { res.end(); }
-            return;
-          }
-
-          // ── Non-streaming path ──────────────────────────────────────────────
-          const upstream = await fetch("https://api.anthropic.com/v1/messages", {
-            method: "POST",
-            headers: { "x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-            body: JSON.stringify(upstreamBody),
-          });
-          const data = await upstream.json();
-          res.statusCode = upstream.ok ? 200 : upstream.status;
-          res.setHeader("Content-Type", "application/json");
-          res.end(JSON.stringify(upstream.ok ? { content: (data.content ?? []).map(b => b.text ?? "").join(""), contentBlocks: data.content ?? [], stop_reason: data.stop_reason ?? null, usage: data.usage ?? null } : { error: data.error?.message }));
+          const { default: handler } = await import("./api/claude.js");
+          await handler(req, res);
         } catch (err) {
           res.statusCode = 502; res.setHeader("Content-Type", "application/json");
           res.end(JSON.stringify({ error: err.message }));
