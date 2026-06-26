@@ -22,8 +22,8 @@
  * Env: BRAIN_SUPABASE_URL, BRAIN_SUPABASE_KEY, SUPABASE_URL, SUPABASE_SERVICE_KEY,
  *      CRON_SECRET (fail-closed). Optional: CAMPUS_WELLBEING_URL.
  */
-import { proposeProactive } from "./_notify";
-import { computeTuning, labelOf, type Tuning } from "./_tuning";
+import { proposeProactive } from "./_notify.js";
+import { computeTuning, labelOf, type Tuning } from "./_tuning.js";
 
 const BRAIN_URL  = process.env.BRAIN_SUPABASE_URL;
 const BRAIN_KEY  = process.env.BRAIN_SUPABASE_KEY;

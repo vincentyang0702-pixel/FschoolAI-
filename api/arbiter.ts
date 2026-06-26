@@ -26,7 +26,7 @@
  *      QUIET_HOURS_TZ (optional, default America/Toronto).
  */
 import { createClient } from "@supabase/supabase-js";
-import { deliverInApp, deliverDiscord } from "./_notify";
+import { deliverInApp, deliverDiscord } from "./_notify.js";
 
 // Cap runtime so a slow run cannot bleed past the */5 cadence and overlap the next.
 export const config = { maxDuration: 60 };
