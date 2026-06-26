@@ -4,7 +4,7 @@
 // GET  ?action=summary&userId=X
 
 import { createClient } from "@supabase/supabase-js";
-import { notify } from "./_notify";
+import { notify } from "./_notify.js";
 
 const supabase = createClient(
   process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "",

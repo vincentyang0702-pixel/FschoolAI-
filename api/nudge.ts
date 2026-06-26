@@ -9,7 +9,7 @@
 
 import { createClient } from "@supabase/supabase-js";
 import { Resend } from "resend";
-import { notify } from "./_notify";
+import { notify } from "./_notify.js";
 
 const supabase = createClient(
   process.env.SUPABASE_URL ?? process.env.VITE_SUPABASE_URL ?? "",
