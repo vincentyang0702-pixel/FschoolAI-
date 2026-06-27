@@ -447,19 +447,28 @@ export default async function handler(req, res) {
     // Auto-ingest into RAG tables if userId provided — enables hybrid search for flashcards.
     // Fire-and-forget: never blocks the response or fails the extraction.
     if (userId && combined.trim()) {
-      (async () => {
-        try {
-          const { ingest, embedBatch } = await import("./rag");
-          const result = await ingest({ userId, courseId: courseId ?? null, title: name ?? "Document", kind: "document", pages });
-          if (result.status === 200 && result.json?.documentId) {
-            // Embed up to 3 batches inline (covers most PDFs); larger docs embed lazily on next query
-            for (let i = 0; i < 3; i++) {
-              const eb = await embedBatch({ userId, documentId: result.json.documentId });
-              if (eb.json?.done) break;
-            }
+      // MUST be awaited before responding. On serverless, work started after the
+      // response is sent is frozen/killed — so the previous fire-and-forget ingest
+      // silently never completed in production, which is why uploaded files never
+      // reached the tutor. Awaiting keeps it inside the request so it actually runs.
+      // (The document insert is the load-bearing part: even before embeddings land,
+      // chunks are immediately keyword-searchable via full-text in hybrid search.)
+      try {
+        const { ingest, embedBatch } = await import("./rag");
+        const result = await ingest({ userId, courseId: courseId ?? null, title: name ?? "Document", kind: "document", pages, text: combined });
+        if (result.status === 200 && result.json?.documentId) {
+          // Embed a few bounded batches inline (covers typical docs); kept small so a
+          // huge file can't hit the function time limit. Any tail stays FTS-searchable.
+          for (let i = 0; i < 3; i++) {
+            const eb = await embedBatch({ userId, documentId: result.json.documentId });
+            if (eb.json?.done) break;
           }
-        } catch { /* never break extraction */ }
-      })();
+        } else if (result.status !== 200) {
+          console.error("[extract] RAG ingest failed:", result.json?.error);
+        }
+      } catch (e: any) {
+        console.error("[extract] RAG ingest error:", e?.message ?? e);
+      }
     }
 
     return res.status(200).json({ text: combined, pages, chars: combined.length, pageCount: pages.length, truncated });

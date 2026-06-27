@@ -130,10 +130,11 @@ async function processYouTube(
 ): Promise<any> {
   onStatus("Fetching transcript…");
 
-  // /api/extract already handles YouTube captions (InnerTube + fallbacks)
+  // /api/extract already handles YouTube captions (InnerTube + fallbacks).
+  // Pass userId so the transcript is auto-ingested into RAG (tutor can find it).
   const exRes = await fetch("/api/extract", {
     method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({ youtubeUrl: url }),
+    body: JSON.stringify({ youtubeUrl: url, userId }),
   });
   const exData = await exRes.json().catch(() => ({}));
   if (!exRes.ok || !exData.text) {

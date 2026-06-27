@@ -410,7 +410,7 @@ RULES:
 - NEVER read out course codes (e.g. GGRC25H3, MDSB11H3) — use the course name only.
 - You DO have access to their courses, assignments, grades, and scores (listed above) — answer confidently and specifically when asked. Never say you can't see them.
 - Don't dump the full lists unprompted, but when asked about assignments/grades/a course, give the real specifics from the data above.
-- The summary above is NOT complete — it does NOT contain the student's course files/PDFs, full assignment instructions, or older/detailed records. For ANY question about files, what a specific assignment actually requires, or details not shown above, you MUST call the \`recall\` tool first. NEVER tell the student a file or record "isn't synced" or "doesn't exist" without calling \`recall\` to check — its absence here does not mean it doesn't exist.
+- The summary above is NOT complete — it does NOT contain the student's course files/PDFs, full assignment instructions, or older/detailed records. Answer from what IS in context (including any SOURCE MATERIAL section below). If a specific file or detail isn't present, say you don't have that one in front of you and offer to have them upload it or open the relevant page. NEVER claim a record "isn't synced" or "doesn't exist" just because it's not shown here. CRITICAL: reply only in plain conversational language — never output JSON, function calls, or tool-call syntax like {"name": ...} in your response.
 - Only mention GPA/streak/stats when relevant or asked.
 - If asked something personal (name, age, city) — answer from STUDENT DATA or say you don't have it. Do not pivot to courses.
 - Match the student's energy — casual when they're casual, focused when they need help.
@@ -583,8 +583,27 @@ function getAudioContext() {
 // Sanitize text before sending to TTS.
 // Course codes like "GGRC25H3 F LEC01" sound terrible when read aloud.
 // We strip them and replace with a natural phrase where possible.
+// Strip stray tool-call JSON the model sometimes emits as text — e.g.
+// {"name":"recall","arguments":{"query":"…"}} — when it thinks a tool is wired.
+// The system prompt also forbids it; this is the defensive backstop on the final text.
+function stripAgentJSON(text) {
+  if (typeof text !== "string") return text;
+  return text
+    .replace(/\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"arguments"\s*:\s*\{[^{}]*\}\s*\}/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function sanitizeForTTS(text) {
   return text
+    // Strip markdown so TTS never reads symbols aloud ("asterisk", "one dot", etc.).
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")   // [link](url) → link text
+    .replace(/^\s{0,3}#{1,6}\s+/gm, "")        // # headings
+    .replace(/^\s*[-*•+]\s+/gm, "")            // - / * / • bullet markers
+    .replace(/^\s*\d+\.\s+/gm, "")             // 1. numbered-list markers
+    .replace(/\*\*([^*]+)\*\*/g, "$1")         // **bold**
+    .replace(/\*([^*]+)\*/g, "$1")             // *italic*
+    .replace(/`([^`]+)`/g, "$1")               // `code`
     // Remove raw Canvas course codes: e.g. GGRC25H3, VPAC16H3, MDSB11H3
     .replace(/\b[A-Z]{2,6}\d{2,4}[A-Z0-9]*\s*(F|W|S)?\s*(LEC|TUT|PRA|LAB)\d{2,3}\b/g, "that course")
     // Remove section labels like "LEC01", "TUT02"
@@ -1020,7 +1039,7 @@ export default function NeuralRing() {
 
   // Refs — always hold latest prefs without stale closure in speakAndType
   const voiceIdRef     = useRef(userData?.preferred_voice_id ?? null);
-  const speedRef       = useRef(userData?.preferred_speed ?? 1.0);
+  const speedRef       = useRef(userData?.preferred_speed ?? 1.1);
   const toneRef        = useRef(userData?.preferred_tone  ?? "neutral");
 
   // Voice mode state
@@ -1087,6 +1106,7 @@ export default function NeuralRing() {
   const [reactions,    setReactions]    = useState({});   // { msgIndex: "up"|"down" }
   const [reasonPicker, setReasonPicker] = useState(null); // msgIndex | null
   const messagesEndRef          = useRef(null);
+  const inputRef                = useRef(null);
 
   // Voice intelligence state
   const [activeVoiceId,      setActiveVoiceId]      = useState(null); // drives instant chip highlight
@@ -1136,7 +1156,7 @@ export default function NeuralRing() {
 
   // Keep preference + mode refs current
   useEffect(() => { voiceIdRef.current   = userData?.preferred_voice_id ?? null;      }, [userData?.preferred_voice_id]);
-  useEffect(() => { speedRef.current     = userData?.preferred_speed    ?? 1.0;       }, [userData?.preferred_speed]);
+  useEffect(() => { speedRef.current     = userData?.preferred_speed    ?? 1.1;       }, [userData?.preferred_speed]);
   useEffect(() => { toneRef.current      = userData?.preferred_tone     ?? "neutral"; }, [userData?.preferred_tone]);
   useEffect(() => {
     // Secondary sync — fires after paint. Direct assignments below are the primary.
@@ -1482,9 +1502,18 @@ export default function NeuralRing() {
     return () => cancelAnimationFrame(voiceRafRef.current);
   }, [voiceMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-grow the chat input to a 2nd line (capped) as the user types; shrink on clear.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
+    const el = inputRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = Math.min(el.scrollHeight, 120) + "px";
+  }, [input]);
+
+  // Keep the latest message in view — including while a reply streams in token-by-token.
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: streamingMsg ? "auto" : "smooth" });
+  }, [messages, loading, streamingMsg]);
 
   const commitRingName = useCallback(async () => {
     setEditingName(false);
@@ -1840,7 +1869,9 @@ export default function NeuralRing() {
     micStreamRef.current = null;
     analyserRef.current  = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
       micStreamRef.current    = stream;
       speechDetectedRef.current = false;
       audioChunksRef.current  = [];
@@ -2209,8 +2240,12 @@ export default function NeuralRing() {
         })
         .catch(() => {});
 
-      // Wait briefly so retrieval can ground the reply, but never block the chat for long.
-      await Promise.race([ragFetch, new Promise(r => setTimeout(r, 3000))]);
+      // Voice mode prioritizes responsiveness — NEVER block a spoken turn on retrieval.
+      // (This wait was adding up to 3s of dead air before the first audio.) RAG still
+      // fires in the background; text chat keeps the brief grounding wait.
+      if (!voiceModeRef.current) {
+        await Promise.race([ragFetch, new Promise(r => setTimeout(r, 3000))]);
+      }
 
       const system = voiceModeRef.current
         ? buildVoiceSystem(courseOptions, userData, assignments, flashcardMap, syllabus, impressions, lastSession, livingMind, availableVoices, leaderboardRank)
@@ -2353,6 +2388,8 @@ export default function NeuralRing() {
         }
       }
 
+      // Strip any stray tool-call JSON the model emitted as text before parsing/display.
+      raw = stripAgentJSON(raw);
       // ── Voice intent tag extraction (strip before display/quiz/nav parsing) ──
       const { tags: voiceTags, cleaned: rawNoVoice } = parseVoiceTags(raw);
 
@@ -2990,7 +3027,7 @@ export default function NeuralRing() {
 
             {/* Input row (text mode) */}
             {!voiceMode && (
-              <div style={{ display: "flex", gap: "10px", padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0 }}>
+              <div style={{ display: "flex", gap: "10px", padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0, alignItems: "flex-end" }}>
                 {/* Subtle waveform glyph — enters voice mode */}
                 <button
                   onClick={() => { getAudioContext(); voiceModeRef.current = true; setVoiceMode(true); startAutoListen(); }}
@@ -3011,15 +3048,18 @@ export default function NeuralRing() {
                     <rect x="13.5" y="5" width="2.5" height="4" rx="1.25"/>
                   </svg>
                 </button>
-                <input
+                <textarea
+                  ref={inputRef}
                   value={input}
                   onChange={e => setInput(e.target.value)}
                   onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); getAudioContext(); sendMessage(); } }}
                   placeholder="Ask about assignments, navigate…"
+                  rows={1}
                   style={{
                     flex: 1, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)",
                     borderRadius: "var(--radius-btn)", padding: "11px 14px", color: "var(--text-primary)",
                     fontSize: "14px", outline: "none", fontFamily: "inherit",
+                    lineHeight: "1.4", resize: "none", maxHeight: "120px", overflowY: "auto",
                     transition: "border-color var(--dur-base) var(--ease-apple)",
                   }}
                   onFocus={e => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.22)")}
