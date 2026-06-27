@@ -433,7 +433,7 @@ export default function Work() {
               className="work-search-input"
               placeholder="Search curriculum, papers, notes..."
               style={{
-                flex: 1, background: "transparent", border: "none", outline: "none",
+                flex: 1, minWidth: 0, background: "transparent", border: "none", outline: "none",
                 fontFamily: "Inter, sans-serif", fontSize: "14px", color: "#E3E2E2",
                 caretColor: "#C8C5CB",
               }}
@@ -446,7 +446,7 @@ export default function Work() {
           className="work-grid"
           style={{
             display: "grid",
-            gridTemplateColumns: isMobile ? "1fr" : "1fr 418.67px",
+            gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : "minmax(0, 1fr) 418.67px",
             width: "100%",
             gap: "24px",
             animation: "workRise 0.6s ease both", animationDelay: "160ms",
@@ -454,7 +454,7 @@ export default function Work() {
         >
 
           {/* ════ LEFT COLUMN ════ */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "24px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: "24px", minWidth: 0 }}>
 
             {/* Hero card */}
             {showHero && (
@@ -466,7 +466,8 @@ export default function Work() {
                   padding: isMobile ? "24px" : "40px",
                   borderRadius: isMobile ? "12px" : "32px",
                   position: "relative", overflow: "hidden",
-                  ...(isMobile ? { width: "100%", maxWidth: "100%", overflowX: "hidden", boxSizing: "border-box" as const } : {}),
+                  width: "100%", maxWidth: "100%", boxSizing: "border-box" as const,
+                  ...(isMobile ? {} : {}),
                 }}
               >
 
@@ -706,7 +707,7 @@ export default function Work() {
                         flexShrink: 0,
                       }} />
                       <p style={{
-                        flex: 1, margin: 0,
+                        flex: 1, minWidth: 0, margin: 0,
                         fontFamily: "Inter, sans-serif", fontSize: "14px",
                         color: item.recent ? "#E3E2E2" : "#C8C5CB",
                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
@@ -714,7 +715,7 @@ export default function Work() {
                         {item.text}
                       </p>
                       <p style={{
-                        margin: 0, whiteSpace: "nowrap",
+                        margin: 0, whiteSpace: "nowrap", flexShrink: 0,
                         fontFamily: "Inter, sans-serif", fontSize: "10px",
                         color: "rgba(200,197,203,0.4)",
                       }}>
@@ -898,7 +899,7 @@ export default function Work() {
                         flexShrink: 0,
                       }} />
                       <p style={{
-                        flex: 1, margin: 0,
+                        flex: 1, minWidth: 0, margin: 0,
                         fontFamily: "Inter, sans-serif", fontSize: "14px",
                         color: item.recent ? "#E3E2E2" : "#C8C5CB",
                         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
@@ -906,7 +907,7 @@ export default function Work() {
                         {item.text}
                       </p>
                       <p style={{
-                        margin: 0, whiteSpace: "nowrap",
+                        margin: 0, whiteSpace: "nowrap", flexShrink: 0,
                         fontFamily: "Inter, sans-serif", fontSize: "10px",
                         color: "rgba(200,197,203,0.4)",
                       }}>
