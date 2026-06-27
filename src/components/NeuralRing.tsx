@@ -1285,6 +1285,9 @@ export default function NeuralRing() {
           if (!r.ok) break;
           const d = await r.json().catch(() => ({}));
           if (d.done || !d.indexed) break; // finished, or no progress this pass → stop
+          // Be gentle between batches so background indexing doesn't contend with a live
+          // chat query's embedding call (contention there slows/drops its grounding).
+          await new Promise(res => setTimeout(res, 1500));
         }
       } catch { /* non-fatal — files still index on their next upload */ }
     })();
@@ -2263,11 +2266,14 @@ export default function NeuralRing() {
         })
         .catch(() => {});
 
-      // Never block a spoken turn on retrieval. For text chat, wait only briefly so the
-      // reply isn't gated on RAG — retrieval is fast now (reranker disabled above), so a
-      // short cap usually still lands grounding while cutting most of the dead air.
+      // Never block a spoken turn on retrieval. For text chat, this is a Promise.race —
+      // it resolves the INSTANT RAG returns (~1s now that the reranker is disabled), NOT
+      // after the full cap. The cap is only a safety ceiling for a stalled request, so
+      // keeping it generous costs nothing in the normal (fast) case but stops a
+      // slightly-slow query from dropping the file's grounding (the "no SOURCE MATERIAL"
+      // bug). Lower caps trade reliable grounding for a worst-case bound that rarely helps.
       if (!voiceModeRef.current) {
-        await Promise.race([ragFetch, new Promise(r => setTimeout(r, 1500))]);
+        await Promise.race([ragFetch, new Promise(r => setTimeout(r, 4000))]);
       }
 
       const system = voiceModeRef.current
