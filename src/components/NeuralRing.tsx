@@ -1107,6 +1107,8 @@ export default function NeuralRing() {
   const [reasonPicker, setReasonPicker] = useState(null); // msgIndex | null
   const messagesEndRef          = useRef(null);
   const inputRef                = useRef(null);
+  const attachInputRef          = useRef(null);
+  const [attachStatus, setAttachStatus] = useState<string | null>(null);
 
   // Voice intelligence state
   const [activeVoiceId,      setActiveVoiceId]      = useState(null); // drives instant chip highlight
@@ -2160,6 +2162,40 @@ export default function NeuralRing() {
   }
 
   // ── Chat ──────────────────────────────────────────────────────────────────────────
+  // Attach a file from the chat: extract its text and ingest it into RAG (api/extract
+  // auto-ingests when given userId), so the tutor can answer about it — same pipeline as
+  // "Add study material", no re-upload. Stays in rag_* (searchable), not the Files library.
+  const handleAttachFile = async (file) => {
+    if (!file) return;
+    if (!userId) { setAttachStatus("Sign in to attach files."); setTimeout(() => setAttachStatus(null), 3000); return; }
+    if (file.size > 4 * 1024 * 1024) {
+      setAttachStatus(`"${file.name}" is too large here — add big files via Study materials.`);
+      setTimeout(() => setAttachStatus(null), 5000);
+      return;
+    }
+    setAttachStatus(`Reading ${file.name}…`);
+    try {
+      const base64 = await new Promise<string>((res, rej) => {
+        const fr = new FileReader();
+        fr.onload  = () => res(String(fr.result).split(",")[1] ?? "");
+        fr.onerror = () => rej(fr.error);
+        fr.readAsDataURL(file);
+      });
+      setAttachStatus(`Indexing ${file.name}…`);
+      const r = await fetch("/api/extract", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ base64, file_type: file.type, name: file.name, userId }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok || !d.text) throw new Error(d.error || "Couldn't read that file.");
+      setAttachStatus(null);
+      setMessages(m => [...m, { role: "assistant", content: `📎 Indexed **${file.name}** — ask me anything about it.` }]);
+    } catch {
+      setAttachStatus(`Couldn't attach ${file.name}.`);
+      setTimeout(() => setAttachStatus(null), 5000);
+    }
+  };
+
   const sendMessage = async (overrideText?) => {
     const text = overrideText ?? input.trim();
     if (!text || loading) return;
@@ -3058,7 +3094,28 @@ export default function NeuralRing() {
 
             {/* Input row (text mode) */}
             {!voiceMode && (
+              <>
+                {attachStatus && (
+                  <div style={{ padding: "0 16px 6px", fontSize: "12px", color: "rgba(255,255,255,0.55)", flexShrink: 0 }}>{attachStatus}</div>
+                )}
               <div style={{ display: "flex", gap: "10px", padding: "12px 14px 28px", borderTop: "1px solid rgba(255,255,255,0.07)", flexShrink: 0, alignItems: "flex-end" }}>
+                {/* Hidden file input + "+" attach button — ingests the file so the tutor can use it */}
+                <input
+                  ref={attachInputRef} type="file" style={{ display: "none" }}
+                  accept=".pdf,.txt,.md,.docx,.pptx,.png,.jpg,.jpeg,.webp"
+                  onChange={e => { const f = e.target.files?.[0]; e.currentTarget.value = ""; handleAttachFile(f); }}
+                />
+                <button
+                  onClick={() => attachInputRef.current?.click()}
+                  title="Attach a file"
+                  style={{
+                    background: "none", border: "none", padding: "6px 4px",
+                    cursor: "pointer", flexShrink: 0, color: "rgba(255,255,255,0.4)",
+                    fontSize: "24px", lineHeight: 1, outline: "none", transition: "color 0.15s",
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.color = "#C49A3C"}
+                  onMouseLeave={e => e.currentTarget.style.color = "rgba(255,255,255,0.4)"}
+                >+</button>
                 {/* Subtle waveform glyph — enters voice mode */}
                 <button
                   onClick={() => { getAudioContext(); voiceModeRef.current = true; setVoiceMode(true); startAutoListen(); }}
@@ -3097,16 +3154,17 @@ export default function NeuralRing() {
                   onBlur={e  => (e.currentTarget.style.borderColor = "rgba(255,255,255,0.09)")}
                 />
                 {(loading || speaking) ? (
-                  <button onClick={stopResponse} style={{ background: "rgba(255,80,80,0.15)", color: "rgba(255,120,100,0.9)", border: "1px solid rgba(255,80,80,0.25)", borderRadius: "var(--radius-btn)", padding: "11px 16px", fontSize: "14px", fontWeight: "600", cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
-                    Stop
+                  <button onClick={stopResponse} title="Stop" aria-label="Stop" style={{ background: "rgba(255,80,80,0.15)", border: "1px solid rgba(255,80,80,0.25)", borderRadius: "var(--radius-btn)", padding: "8px 13px", fontSize: "19px", lineHeight: 1, cursor: "pointer", fontFamily: "inherit", flexShrink: 0 }}>
+                    ⏹️
                   </button>
                 ) : (
-                  <button onClick={() => { getAudioContext(); sendMessage(); }} disabled={!input.trim()}
-                    style={{ background: !input.trim() ? "rgba(255,255,255,0.18)" : "var(--color-accent)", color: "#111", border: "none", borderRadius: "var(--radius-btn)", padding: "11px 18px", fontSize: "14px", fontWeight: "600", cursor: !input.trim() ? "not-allowed" : "pointer", fontFamily: "inherit", flexShrink: 0, transition: "background var(--dur-base) var(--ease-apple)" }}>
-                    Send
+                  <button onClick={() => { getAudioContext(); sendMessage(); }} disabled={!input.trim()} title="Send" aria-label="Send"
+                    style={{ background: !input.trim() ? "rgba(255,255,255,0.18)" : "var(--color-accent)", border: "none", borderRadius: "var(--radius-btn)", padding: "8px 13px", fontSize: "19px", lineHeight: 1, cursor: !input.trim() ? "not-allowed" : "pointer", fontFamily: "inherit", flexShrink: 0, opacity: !input.trim() ? 0.5 : 1, transition: "background var(--dur-base) var(--ease-apple)" }}>
+                    ✉️
                   </button>
                 )}
               </div>
+              </>
             )}
 
             {/* ── Voice mode overlay: centered sphere hero ── */}
