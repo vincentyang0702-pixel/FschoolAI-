@@ -1284,7 +1284,7 @@ export default function NeuralRing() {
           });
           if (!r.ok) break;
           const d = await r.json().catch(() => ({}));
-          if (d.done || !d.indexed) break; // finished, or no progress this pass → stop
+          if (d.done || !d.progressed) break; // finished, or no progress this pass → stop
           // Be gentle between batches so background indexing doesn't contend with a live
           // chat query's embedding call (contention there slows/drops its grounding).
           await new Promise(res => setTimeout(res, 1500));
