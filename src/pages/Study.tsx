@@ -7,6 +7,7 @@ import { useApp }        from "../context/AppContext";
 import { supabase }      from "../api/supabase";
 import { awardTokens }   from "../api/tokens";
 import { Check, X, AlertTriangle, Sparkles } from "lucide-react";
+import { groundingToast } from "../lib/studyGrounding";
 
 
 const SYSTEM =
@@ -888,6 +889,11 @@ export default function Study() {
         if (courseContext) contextBlock = `\n\nHere is real content from the student's course:\n${courseContext}`;
       }
 
+      // Did we find ANY real course material (RAG / files / Canvas)? If not, the model is
+      // generating from the course name alone — convincing but ungrounded, and the student
+      // could end up studying the wrong topics. We still generate, but flag it clearly below.
+      const grounded = contextBlock.length > 0;
+
       const cardCount = 8;
 
       const prompt =
@@ -952,7 +958,8 @@ export default function Study() {
               body: JSON.stringify({ action: "load", userId, courseId: dbId }),
             }).then(r => r.json()).catch(() => ({ cards: [] }));
             setFlashcards(reloaded?.cards?.length > 0 ? reloaded.cards : [...cards, ...existingCards]);
-            showToast(`${cards.length} new flashcards added!`, "ok");
+            const t = groundingToast("flashcards", grounded, cards.length);
+            showToast(t.message, t.kind);
             awardTokens("flashcards_generated", { courseId: String(dbId) }).catch(() => {});
           }
         }
@@ -968,7 +975,8 @@ export default function Study() {
           if (saveErr) {
             showToast("Guide generated but couldn't save: " + saveErr.message, "warn");
           } else {
-            showToast("Study guide saved!", "ok");
+            const t = groundingToast("guide", grounded);
+            showToast(t.message, t.kind);
           }
         }
       }
