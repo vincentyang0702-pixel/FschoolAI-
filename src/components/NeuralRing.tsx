@@ -19,7 +19,7 @@ import { useApp }      from "../context/AppContext";
 import { supabase }    from "../api/supabase";
 import { awardTokens } from "../api/tokens";
 import { sanitizeApiMessages } from "../lib/chatMessages";
-import { Mail, Square, Plus } from "lucide-react";
+import { Mail, Square, Plus, ThumbsUp, ThumbsDown } from "lucide-react";
 import ArtifactPanel   from "./ArtifactPanel";
 
 // ── Claude proxy helper (tutor brain — better quality than Groq for conversation) ──
@@ -747,7 +747,7 @@ function buildSmartChips(assignments, courses, userData) {
 
   if ((userData?.streak || 0) >= 3) {
     chips.push({
-      label:   `${userData.streak}🔥 Keep streak`,
+      label:   `Keep your ${userData.streak}-day streak`,
       message: "What should I study today to keep my streak going?",
     });
   }
@@ -2982,8 +2982,9 @@ export default function NeuralRing() {
                               borderRadius: "6px", fontSize: "13px", cursor: reactions[i] === "up" ? "default" : "pointer",
                               padding: "2px 5px", transition: "all 0.15s",
                               transform: reactions[i] === "up" ? "scale(1.2)" : "scale(1)",
+                              display: "inline-flex", alignItems: "center", color: reactions[i] === "up" ? "rgba(72,210,110,0.95)" : "rgba(255,255,255,0.4)",
                             }}
-                          >👍</button>
+                          ><ThumbsUp size={14} /></button>
 
                           {/* Thumbs down */}
                           <button
@@ -2997,8 +2998,9 @@ export default function NeuralRing() {
                               borderRadius: "6px", fontSize: "13px", cursor: "pointer",
                               padding: "2px 5px", transition: "all 0.15s",
                               transform: reactions[i] === "down" ? "scale(1.1)" : "scale(1)",
+                              display: "inline-flex", alignItems: "center", color: reactions[i] === "down" ? "rgba(255,120,100,0.95)" : "rgba(255,255,255,0.4)",
                             }}
-                          >👎</button>
+                          ><ThumbsDown size={14} /></button>
                         </div>
 
                         {/* Reason picker — slides in below thumbs down */}

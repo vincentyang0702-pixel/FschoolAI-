@@ -3,6 +3,7 @@
 // BUG FIX: accept/decline persists via data.actioned field in DB (survives reopen).
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence, useReducedMotion } from "framer-motion";
+import { UserPlus, Check, MessageCircle, DoorOpen, ClipboardList, Trophy, TrendingUp, Brain, Bell } from "lucide-react";
 import {
   AppNotification,
   fetchNotifications,
@@ -40,15 +41,15 @@ function avatarColor(key: string) {
 }
 
 // ── Type config ───────────────────────────────────────────────────────────────
-const TYPE_CFG: Record<string, { icon: string; defaultTitle: string; useAvatar: boolean }> = {
-  friend_request:   { icon: "👤", defaultTitle: "Friend request",     useAvatar: true  },
-  request_accepted: { icon: "✓",  defaultTitle: "Now connected",       useAvatar: true  },
-  nudge:            { icon: "💬", defaultTitle: "Study nudge",         useAvatar: false },
-  room_invite:      { icon: "🚪", defaultTitle: "Room invite",         useAvatar: false },
-  assignment_due:   { icon: "📋", defaultTitle: "Assignment due soon", useAvatar: false },
-  milestone:        { icon: "🏆", defaultTitle: "Milestone reached",   useAvatar: false },
-  ranking:          { icon: "📈", defaultTitle: "Leaderboard update",  useAvatar: false },
-  intervention:     { icon: "🧠", defaultTitle: "A nudge from Reggie",  useAvatar: false },
+const TYPE_CFG: Record<string, { icon: any; defaultTitle: string; useAvatar: boolean }> = {
+  friend_request:   { icon: UserPlus,       defaultTitle: "Friend request",     useAvatar: true  },
+  request_accepted: { icon: Check,          defaultTitle: "Now connected",       useAvatar: true  },
+  nudge:            { icon: MessageCircle,  defaultTitle: "Study nudge",         useAvatar: false },
+  room_invite:      { icon: DoorOpen,       defaultTitle: "Room invite",         useAvatar: false },
+  assignment_due:   { icon: ClipboardList,  defaultTitle: "Assignment due soon", useAvatar: false },
+  milestone:        { icon: Trophy,         defaultTitle: "Milestone reached",   useAvatar: false },
+  ranking:          { icon: TrendingUp,     defaultTitle: "Leaderboard update",  useAvatar: false },
+  intervention:     { icon: Brain,          defaultTitle: "A nudge from Reggie",  useAvatar: false },
 };
 
 // ── Friends API adapter ───────────────────────────────────────────────────────
@@ -96,7 +97,7 @@ function NotificationItem({
 }) {
   const reduced = useReducedMotion();
   const itemRef = useRef<HTMLDivElement>(null);
-  const cfg = TYPE_CFG[n.type] ?? { icon: "🔔", defaultTitle: "Notification", useAvatar: false };
+  const cfg = TYPE_CFG[n.type] ?? { icon: Bell, defaultTitle: "Notification", useAvatar: false };
   const title = n.title ?? cfg.defaultTitle;
   const isUnread = !n.read;
   const fromName = n.data?.from_name as string | undefined;
@@ -152,7 +153,7 @@ function NotificationItem({
         boxShadow: isUnread ? `0 0 0 1.5px rgba(196,154,60,0.45)` : "none",
         transition: "box-shadow 0.2s",
       }}>
-        {cfg.useAvatar && fromName ? initial : cfg.icon}
+        {cfg.useAvatar && fromName ? initial : <cfg.icon size={17} />}
       </div>
 
       {/* Content */}
