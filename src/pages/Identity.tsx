@@ -7,6 +7,7 @@ import GradeGraph, { COURSE_COLORS } from "../components/GradeGraph";
 import ShareCard                     from "../components/ShareCard";
 import FriendsSection                from "../components/FriendsSection";
 import { LogIn, RefreshCw, Layers, CircleDot, Sparkles, Check, Hexagon, ArrowUp, Star, ChevronUp, ChevronDown, ArrowUpRight } from "lucide-react";
+import { coursesToGpa } from "../lib/gpa";
 
 // Deterministic fallback grade (72–97) derived from the course code string.
 function fallbackGrade(seed) {
@@ -109,7 +110,8 @@ export default function Identity() {
     await updateUserField("name", trimmed);
   }, [nameInput, currentName, updateUserField]);
 
-  const gpa         = userData?.gpa        != null ? userData.gpa.toFixed(2) : "—";
+  const gpaVal      = userData?.gpa ?? coursesToGpa(courses);
+  const gpa         = gpaVal != null ? Number(gpaVal).toFixed(2) : "—";
   const streak      = `${userData?.streak     ?? 0}d`;
   const studyTime   = `${userData?.study_time ?? 0}h`;
   const totalDone   = assignments.filter(a => a.submission?.submittedAt).length || 0;

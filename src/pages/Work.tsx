@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../context/AppContext";
 import { Flame } from "lucide-react";
+import { coursesToGpa } from "../lib/gpa";
 
 
 function formatDue(dateStr) {
@@ -225,7 +226,7 @@ function EmptyState({ syncStatus, hasToken }) {
 }
 
 export default function Work() {
-  const { userData, assignments, canvasToken, syncStatus, announcements } = useApp();
+  const { userData, courses, assignments, canvasToken, syncStatus, announcements } = useApp();
 
   const [isMobile, setIsMobile] = useState(window.innerWidth < 768);
   useEffect(() => {
@@ -280,7 +281,10 @@ export default function Work() {
   const hasToken = Boolean(canvasToken) || assignments.length > 0;
 
   // ── Real data ──
-  const gpaRaw = userData?.gpa ?? null;
+  // Prefer the persisted users.gpa, but fall back to computing it from loaded course
+  // scores — covers users whose gpa was never written (extension sync) or dropped by a
+  // load/sync race in AppContext, so the widget never shows a blank "/4.0".
+  const gpaRaw = userData?.gpa ?? coursesToGpa(courses);
   const streakRaw = userData?.streak ?? 0;
 
   const STATS = [
