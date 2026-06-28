@@ -19,7 +19,7 @@ import { useApp }      from "../context/AppContext";
 import { supabase }    from "../api/supabase";
 import { awardTokens } from "../api/tokens";
 import { sanitizeApiMessages } from "../lib/chatMessages";
-import { Mail, Square, Plus, ThumbsUp, ThumbsDown, Check } from "lucide-react";
+import { Mail, Square, Plus, ThumbsUp, ThumbsDown, Check, RotateCcw, Play } from "lucide-react";
 import ArtifactPanel   from "./ArtifactPanel";
 
 // ── Claude proxy helper (tutor brain — better quality than Groq for conversation) ──
@@ -3064,7 +3064,7 @@ export default function NeuralRing() {
                               }}
                               onMouseEnter={e => { e.currentTarget.style.background = "rgba(255,255,255,0.1)"; e.currentTarget.style.color = "rgba(255,255,255,0.85)"; }}
                               onMouseLeave={e => { e.currentTarget.style.background = "rgba(255,255,255,0.06)"; e.currentTarget.style.color = "rgba(255,255,255,0.5)"; }}
-                            >↺ Try again</button>
+                            ><span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><RotateCcw size={12} />Try again</span></button>
                           </div>
                         )}
                       </div>
@@ -3303,7 +3303,7 @@ export default function NeuralRing() {
                             }}
                             style={{ opacity: 0.45, cursor: "pointer", fontSize: "10px" }}
                             title="Preview"
-                          >▶</span>
+                          ><Play size={10} fill="currentColor" strokeWidth={0} /></span>
                         </button>
                       );
                     })}

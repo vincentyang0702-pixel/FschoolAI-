@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useApp } from "../context/AppContext";
 import { groq }   from "../api/groq";
-import { Sparkles, Check, ArrowUp } from "lucide-react";
+import { Sparkles, Check, ArrowUp, Hourglass, ChevronUp, ChevronDown, Circle } from "lucide-react";
 
 // FALLBACK_NODES removed — real data or empty state only. No fake courses shown.
 const NODE_POSITIONS = [
@@ -295,7 +295,7 @@ Generate a concise rubric to evaluate current student progress. Return ONLY JSON
                 >
                   + Upload
                 </button>
-                <span style={{ color: "var(--text-dim)", fontSize: "16px" }}>{open ? "↑" : "↓"}</span>
+                <span style={{ color: "var(--text-dim)", display: "flex" }}>{open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
               </div>
             </div>
 
@@ -445,7 +445,7 @@ function RecordingsTab() {
           <p style={{ color: "rgba(100,180,255,0.85)", fontSize: "12px", fontWeight: "500", marginBottom: "2px" }}>Wisprflow not connected</p>
           <p style={{ color: "var(--text-dim)", fontSize: "11px" }}>Audio recording + auto-transcription pending Vincent's API access</p>
         </div>
-        <span style={{ fontSize: "18px", color: "rgba(100,180,255,0.4)" }}>⏳</span>
+        <span style={{ color: "rgba(100,180,255,0.4)", display: "flex" }}><Hourglass size={18} /></span>
       </div>
 
       {courses.map((course) => {
@@ -468,7 +468,7 @@ function RecordingsTab() {
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: "10px", flexShrink: 0 }}>
                 <span style={{ fontSize: "10px", color: "var(--text-dim)" }}>{items.length} transcript{items.length !== 1 ? "s" : ""}</span>
-                <span style={{ color: "var(--text-dim)", fontSize: "16px" }}>{open ? "↑" : "↓"}</span>
+                <span style={{ color: "var(--text-dim)", display: "flex" }}>{open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
               </div>
             </div>
 
@@ -476,7 +476,7 @@ function RecordingsTab() {
               <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)", padding: "14px 18px 18px" }}>
                 {/* Record button — placeholder until Wisprflow */}
                 <button style={{ width: "100%", background: "rgba(255,100,90,0.08)", border: "1px solid rgba(255,100,90,0.2)", borderRadius: "10px", padding: "12px", color: "rgba(255,100,90,0.6)", fontSize: "13px", cursor: "not-allowed", fontFamily: "inherit", marginBottom: "14px" }}>
-                  ⏺ Record Lecture — requires Wisprflow
+                  <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}><Circle size={12} fill="currentColor" strokeWidth={0} />Record Lecture — requires Wisprflow</span>
                 </button>
 
                 {/* Manual transcript add */}

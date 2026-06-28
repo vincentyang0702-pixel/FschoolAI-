@@ -6,7 +6,7 @@ import { supabase }                  from "../api/supabase";
 import GradeGraph, { COURSE_COLORS } from "../components/GradeGraph";
 import ShareCard                     from "../components/ShareCard";
 import FriendsSection                from "../components/FriendsSection";
-import { LogIn, RefreshCw, Layers, CircleDot, Sparkles, Check, Hexagon, ArrowUp, Star } from "lucide-react";
+import { LogIn, RefreshCw, Layers, CircleDot, Sparkles, Check, Hexagon, ArrowUp, Star, ChevronUp, ChevronDown, ArrowUpRight } from "lucide-react";
 
 // Deterministic fallback grade (72–97) derived from the course code string.
 function fallbackGrade(seed) {
@@ -325,7 +325,9 @@ export default function Identity() {
                     letterSpacing: "0.3px",
                   }}
                 >
-                  {tokenExpanded ? "Show less ↑" : `View all ${tokenSummary.recentEvents.length} ↓`}
+                  {tokenExpanded
+                    ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>Show less<ChevronUp size={13} /></span>
+                    : <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>View all {tokenSummary.recentEvents.length}<ChevronDown size={13} /></span>}
                 </button>
               )}
             </>
@@ -393,7 +395,7 @@ export default function Identity() {
           >
             <img src="/discord-logo.svg" alt="Discord" style={{ width: "18px", height: "18px", opacity: 0.6, flexShrink: 0 }} />
             <span style={{ color: "rgba(166,176,255,0.75)", fontSize: "13px" }}>Join our Discord</span>
-            <span style={{ color: "rgba(88,101,242,0.5)", fontSize: "12px", marginLeft: "auto" }}>↗</span>
+            <span style={{ color: "rgba(88,101,242,0.5)", marginLeft: "auto", display: "flex" }}><ArrowUpRight size={14} /></span>
           </a>
         </div>
       )}

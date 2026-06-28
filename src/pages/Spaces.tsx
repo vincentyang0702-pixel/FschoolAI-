@@ -8,7 +8,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { supabase } from "../api/supabase";
 import { useApp }   from "../context/AppContext";
 import DocReader    from "../components/DocReader";
-import { FileText, Image as ImageIcon, StickyNote, FolderOpen, FolderArchive, Sparkles, Hexagon } from "lucide-react";
+import { FileText, Image as ImageIcon, StickyNote, FolderOpen, FolderArchive, Sparkles, Hexagon, ArrowUp } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import SpaceExams   from "../components/SpaceExams";
 
@@ -667,7 +667,7 @@ function SpaceChat({
             display: "flex", alignItems: "center", justifyContent: "center",
             fontSize: 15, transition: "all 0.15s",
           }}
-        >↑</button>
+        ><ArrowUp size={16} /></button>
       </div>
     </div>
   );

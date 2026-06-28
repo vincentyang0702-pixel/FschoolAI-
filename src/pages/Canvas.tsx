@@ -2,7 +2,7 @@
 // All data logic (fetchAssignments, fetchModules, addManualCourse, etc.) unchanged.
 
 import { useState, useEffect } from "react";
-import { Check } from "lucide-react";
+import { Check, RefreshCw, ChevronUp, ChevronDown } from "lucide-react";
 import { useApp } from "../context/AppContext";
 import ManualUploadSheet from "../components/ManualUploadSheet";
 import { fetchAssignments, fetchModules } from "../../canvas-module/canvasApi";
@@ -84,7 +84,7 @@ function RefreshButton({ syncStatus, onClick, style }: any) {
       onMouseEnter={e => { if (!busy) e.currentTarget.style.borderColor = "rgba(255,255,255,0.25)"; }}
       onMouseLeave={e => { e.currentTarget.style.borderColor = "rgba(255,255,255,0.1)"; }}
     >
-      {busy ? "Syncing…" : "↻ Refresh"}
+      {busy ? "Syncing…" : <span style={{ display: "inline-flex", alignItems: "center", gap: 5 }}><RefreshCw size={13} />Refresh</span>}
     </button>
   );
 }
@@ -503,7 +503,7 @@ function AnnouncementsSection({ announcements }) {
           Announcements
         </span>
         <span style={{ color: "rgba(200,197,203,0.4)", fontSize: "12px" }}>
-          {announcements.length} · {open ? "▲" : "▼"}
+          {announcements.length} · {open ? <ChevronUp size={12} style={{ verticalAlign: "-2px" }} /> : <ChevronDown size={12} style={{ verticalAlign: "-2px" }} />}
         </span>
       </button>
 
@@ -572,7 +572,7 @@ function PastCoursesSection({ pastCourses, addedIds, adding, onAdd, onAddManual 
             Past Courses
           </span>
           <span style={{ color: "rgba(200,197,203,0.4)", fontSize: "12px" }}>
-            {pastCourses.length} {open ? "▲" : "▼"}
+            {pastCourses.length} {open ? <ChevronUp size={12} style={{ verticalAlign: "-2px" }} /> : <ChevronDown size={12} style={{ verticalAlign: "-2px" }} />}
           </span>
         </button>
         <button onClick={() => { setShowForm(f => !f); setOpen(true); }}

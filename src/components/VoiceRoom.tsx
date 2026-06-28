@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import DailyIframe from "@daily-co/daily-js";
-import { Mic, Headphones, Hand, Lightbulb, Circle } from "lucide-react";
+import { Mic, Headphones, Hand, Lightbulb, Circle, Square, Minus } from "lucide-react";
 
 type Status = "loading" | "ready" | "unavailable" | "error";
 
@@ -403,7 +403,7 @@ export default function VoiceRoom({ roomId, userName, onClose, onSpeakingChange,
                 padding: "2px 5px", borderRadius: "5px",
               }}
             >
-              {isMinimized ? "□" : "─"}
+              {isMinimized ? <Square size={13} /> : <Minus size={15} />}
             </button>
           )}
           <button
