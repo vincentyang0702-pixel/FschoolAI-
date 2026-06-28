@@ -888,6 +888,11 @@ export default function Study() {
         if (courseContext) contextBlock = `\n\nHere is real content from the student's course:\n${courseContext}`;
       }
 
+      // Did we find ANY real course material (RAG / files / Canvas)? If not, the model is
+      // generating from the course name alone — convincing but ungrounded, and the student
+      // could end up studying the wrong topics. We still generate, but flag it clearly below.
+      const grounded = contextBlock.length > 0;
+
       const cardCount = 8;
 
       const prompt =
@@ -952,7 +957,12 @@ export default function Study() {
               body: JSON.stringify({ action: "load", userId, courseId: dbId }),
             }).then(r => r.json()).catch(() => ({ cards: [] }));
             setFlashcards(reloaded?.cards?.length > 0 ? reloaded.cards : [...cards, ...existingCards]);
-            showToast(`${cards.length} new flashcards added!`, "ok");
+            showToast(
+              grounded
+                ? `${cards.length} new flashcards added!`
+                : `Added ${cards.length} cards from general knowledge — upload this course's notes or slides for cards based on your actual material.`,
+              grounded ? "ok" : "warn"
+            );
             awardTokens("flashcards_generated", { courseId: String(dbId) }).catch(() => {});
           }
         }
@@ -968,7 +978,12 @@ export default function Study() {
           if (saveErr) {
             showToast("Guide generated but couldn't save: " + saveErr.message, "warn");
           } else {
-            showToast("Study guide saved!", "ok");
+            showToast(
+              grounded
+                ? "Study guide saved!"
+                : "Heads up — this guide is from general knowledge, not your uploaded materials. Upload notes or slides for a guide tied to your actual course.",
+              grounded ? "ok" : "warn"
+            );
           }
         }
       }

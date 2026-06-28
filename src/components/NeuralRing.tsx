@@ -2528,7 +2528,22 @@ export default function NeuralRing() {
       }
 
       const { cmd, text: displayText } = parseNav(rawClean);
-      const cleanText = displayText.replace(/<[^>]+>/g, "").trim();
+      let cleanText = displayText.replace(/<[^>]+>/g, "").trim();
+
+      // ── Empty / filler-only guard ───────────────────────────────────────────
+      // When grounding comes back empty the model sometimes stalls — emitting a
+      // filler like "One sec." (often followed by tool-call JSON that stripAgentJSON
+      // removes), which left the chat showing a blank bubble or a dangling "One sec."
+      // and going silent. Never ship an empty/filler-only reply; substitute a useful
+      // one instead. Skipped when the model is navigating (empty text is intentional).
+      if (!cmd?.page) {
+        const fillerOnly = /^(one\s*sec(ond)?|just a sec(ond)?|hold on|let me (check|see|look)( that up)?|give me (a|one) (sec(ond)?|moment)|sure|okay|ok)[\s.,!…]*$/i;
+        if (!cleanText || fillerOnly.test(cleanText)) {
+          cleanText = ragContext
+            ? "Sorry — I couldn't pull that together just now. Try rephrasing, or ask about a specific topic and I'll dig in."
+            : "I don't have any of your course materials loaded yet, so I can't give you a grounded answer. Upload your notes or a PDF (or sync Canvas) and I'll work from those.";
+        }
+      }
 
       if (cmd?.page) {
         if (cmd.course || cmd.mode) setStudyConfig({ course: cmd.course ?? null, mode: cmd.mode ?? "flashcards" });
