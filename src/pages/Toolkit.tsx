@@ -590,7 +590,7 @@ function TwilioTab() {
       <div style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius-card)", padding: "18px" }}>
         <p style={{ fontSize: "10px", color: "var(--text-dim)", letterSpacing: "1.5px", textTransform: "uppercase", marginBottom: "12px" }}>Due in 48 hours</p>
         {urgent.length === 0 ? (
-          <p style={{ color: "var(--text-dim)", fontSize: "12px" }}>Nothing urgent right now 🎉</p>
+          <p style={{ color: "var(--text-dim)", fontSize: "12px" }}>Nothing urgent right now</p>
         ) : (
           <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginBottom: "4px" }}>
             {urgent.map((a, i) => (

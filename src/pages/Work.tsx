@@ -214,7 +214,7 @@ function EmptyState({ syncStatus, hasToken }) {
   return (
     <div style={glass}>
       <p style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: "18px", color: "#E3E2E2", margin: "0 0 4px" }}>
-        You're all caught up 🎉
+        You're all caught up
       </p>
       <p style={{ fontFamily: "Inter, sans-serif", fontSize: "14px", color: "rgba(200,197,203,0.6)", margin: 0 }}>
         No upcoming assignments

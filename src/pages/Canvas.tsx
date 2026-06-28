@@ -499,7 +499,7 @@ function AnnouncementsSection({ announcements }) {
         style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center",
           padding: "14px 18px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit" }}>
         <span style={{ color: "#E3E2E2", fontSize: "13px", fontWeight: 600, letterSpacing: "0.04em", textTransform: "uppercase" }}>
-          📢 Announcements
+          Announcements
         </span>
         <span style={{ color: "rgba(200,197,203,0.4)", fontSize: "12px" }}>
           {announcements.length} · {open ? "▲" : "▼"}

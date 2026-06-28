@@ -38,7 +38,7 @@ function NoCanvasState() {
 function AllDoneState() {
   return (
     <div style={{ ...card, padding: "24px", textAlign: "center" }}>
-      <p style={{ color: "var(--text-secondary)", fontSize: "14px" }}>No pending assignments 🎉</p>
+      <p style={{ color: "var(--text-secondary)", fontSize: "14px" }}>No pending assignments</p>
     </div>
   );
 }

@@ -61,7 +61,7 @@ export default function DocQuiz({ questions, onDone }: Props) {
             {pct}% correct
           </p>
           <p style={{ fontSize: "13px", color: pct >= 70 ? "#7fae6e" : "rgba(255,255,255,0.4)", margin: 0 }}>
-            {pct >= 90 ? "Excellent! 🏆" : pct >= 70 ? "Good work! 🎉" : pct >= 50 ? "Keep studying 📚" : "Review this section"}
+            {pct >= 90 ? "Excellent!" : pct >= 70 ? "Good work!" : pct >= 50 ? "Keep studying" : "Review this section"}
           </p>
         </div>
 
