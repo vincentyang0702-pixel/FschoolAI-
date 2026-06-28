@@ -19,7 +19,7 @@ import { useApp }      from "../context/AppContext";
 import { supabase }    from "../api/supabase";
 import { awardTokens } from "../api/tokens";
 import { sanitizeApiMessages } from "../lib/chatMessages";
-import { Mail, Square, Plus, ThumbsUp, ThumbsDown, Check, RotateCcw, Play } from "lucide-react";
+import { ArrowRight, Square, Plus, ThumbsUp, ThumbsDown, Check, RotateCcw, Play } from "lucide-react";
 import ArtifactPanel   from "./ArtifactPanel";
 
 // ── Claude proxy helper (tutor brain — better quality than Groq for conversation) ──
@@ -3163,7 +3163,7 @@ export default function NeuralRing() {
                 ) : (
                   <button onClick={() => { getAudioContext(); sendMessage(); }} disabled={!input.trim()} title="Send" aria-label="Send"
                     style={{ display: "flex", alignItems: "center", justifyContent: "center", background: !input.trim() ? "rgba(255,255,255,0.18)" : "var(--color-accent)", color: "#111", border: "none", borderRadius: "var(--radius-btn)", padding: "10px 13px", cursor: !input.trim() ? "not-allowed" : "pointer", fontFamily: "inherit", flexShrink: 0, opacity: !input.trim() ? 0.5 : 1, transition: "background var(--dur-base) var(--ease-apple)" }}>
-                    <Mail size={18} />
+                    <ArrowRight size={18} />
                   </button>
                 )}
               </div>
