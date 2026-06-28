@@ -9,7 +9,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useApp }    from "../context/AppContext";
 import { supabase }  from "../api/supabase";
 import DocReader     from "../components/DocReader";
-import { FileText, Presentation, Music, Film, Youtube, Image as ImageIcon, StickyNote, Paperclip, BookOpen } from "lucide-react";
+import { FileText, Presentation, Music, Film, Play, Image as ImageIcon, StickyNote, Paperclip, BookOpen } from "lucide-react";
 
 // ── Design tokens ─────────────────────────────────────────────────────────
 
@@ -465,7 +465,7 @@ function DocCard({ file, color, onOpen, userId }: {
   const hasReader = !!file.processedAt && (isPdf || isYoutube);
   const ago       = timeAgo(file.processedAt);
 
-  const TypeIcon = isYoutube       ? Youtube
+  const TypeIcon = isYoutube       ? Play
                  : isPdf           ? FileText
                  : ["pptx","ppt"].includes(file.fileType ?? "") ? Presentation
                  : ["png","jpg","jpeg","webp"].includes(file.fileType ?? "") ? ImageIcon
