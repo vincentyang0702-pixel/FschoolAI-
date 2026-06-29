@@ -1,6 +1,6 @@
 # FschoolAI — Product Requirements Document (PRD)
-**Version:** 1.9  
-**Date:** June 25, 2026  
+**Version:** 2.0  
+**Date:** June 29, 2026  
 **Author:** Vincent Yang, FschoolAI  
 **Audience:** Engineering team — Tencent engineer, Bytedance engineer, Aryan, Ryan, Vincent
 
@@ -9,6 +9,8 @@
 > **v1.6 addition (§18):** defines NeuroAGI as the **parent brain platform** (FschoolAI is one branch product of many) and the **merged brain architecture** — all technical decisions follow `neuroagi-core` **v2** (the minimal memory-log + bus + cortex kernel), while **v1** contributes only feature *concepts* (skill verification/credentials, learning style, brain health dashboard) re-implemented as v2 derived layers. §18 then **connects** this brain to the FschoolAI PRD via an explicit primitive-mapping table. Where §18 and §12 differ, §18 (v2 target) governs; §12 describes the current transitional Supabase deployment. The six conflicts this surfaced are reconciled **inline** at their source (look for "Merged-brain note" callouts in §3.1, §3.4, §3.5.2, §3.6, §6, §7, and §15), not only here.
 
 > **v1.7 addition:** §18.1 now states the **topology and division of responsibility** (per engineering direction) — `neuro-agi ↔ fschool (main agent) ↔ subagents`: internal scenarios stay closed-loop inside FschoolAI, and NeuroAGI's role is narrowed to exactly three jobs (route intent, augment context, facilitate bidirectional interaction). Reinforced at Agent 1 (Reggie = the main-agent node) and in the §18.4 mapping.
+
+> **v2.0 — architecture-review merge (§19):** folds in the four documents produced after v1.9 (June 27–28). **NeuroAGI / CTO side:** `en-final-backend-technical-architecture.md` (the target *product-backend* architecture — LangGraph **Agent Server** + DeepAgents + FastAPI + A2A, an Application Control Plane over an Agent Execution Plane) and `readthis.md` (the **built** FschoolAI_v2 acceptance — Python / LangGraph / FastAPI / sqlite on `neuroagi-core` **v2**, all 17 scenarios end-to-end, 56/56 harness checks). **FschoolAI Step-1 side:** `fschoolai_step1_scenario_plan.md` (the 17-scenario catalog + C0–C4 latency model + edge taxonomy + eval-fixture contract) and `fschoolai_step1_tools_breakdown.md` (the capability / tool surface). §19 records **build status**, the **target backend architecture and its phasing** (doc1 = target; the built v2 = Phase 1), the **scenario catalog**, the **capability surface**, and this review's **resolved decisions**. The §18 brain contract is **unchanged and still governs**; §19 only refines §3.5.2 (arbiter), §7 (stack), §9 (latency), §12.3 (retrieval boundary), and §15 (contract) where noted.
 
 > **v1.8 — conflict resolutions:** each merged-brain conflict was decided in favour of the optimal approach and applied to the source text (not left as a side-note): **data model** → single `memory` log (§6); **Signal Arbiter** → `cortex.policy`, don't reinvent (§3.5.2); **proactive queues** → outbox memories + channel (§3.5.2/§6); **decay** → core day-one mechanism (§3.6 table); **knowledge graph** → derived layer gated on *data sufficiency*, not infrastructure (§3.6 retitled + reframed); **brain API** → canonical product contract is `/api/agent-manager`, canonical brain interface is the v2 primitives, granular `/api/brain/*` RPC deprecated as a public contract (§15.2); **person bridge** → brain uses a text `subject`, no FK into product tables (§12.4); **§18.4** Intervention/agent rows rewritten so NeuroAGI routes+arbitrates and FschoolAI runs the closed loop. The **Social / Leaderboard / Study-Rooms** scope contradiction (§11) is **resolved as in-scope** (they are already coded on `frontend/dev`); the deferral was removed, with the §14 cohort/leaderboard privacy review retained as the only gate.
 
@@ -1981,6 +1983,122 @@ Because many products are coming, the onboarding contract for any new product is
 5. **Optionally subscribe** a `channel` for proactive delivery, gated by `cortex.policy`.
 
 Governance constants across all products: per-`source` attribution on every memory, consent/trust gating, `subject` isolation by default, and cross-product/cross-person sharing **only** via explicit `audience` / `memory_grant` / `space_member`. The brain never imports a product's domain concepts — that boundary is what lets product N+1 benefit, on day one, from everything products 1…N have learned.
+
+---
+
+## 19. Architecture Review Merge (v2.0)
+
+This section folds the **four** documents produced after v1.9 into the PRD. Two are NeuroAGI/CTO-side, two are the FschoolAI Step-1 work. The §18 brain contract is unchanged and governs; §19 records build status, the target product-backend, the formalized scenario/latency/tool surfaces, and the decisions this review settled. Where §19 refines an earlier section the pointer says so.
+
+### 19.1 Provenance — the four merged documents
+
+| Doc | What it is | Owner | Role |
+|---|---|---|---|
+| `readthis.md` | FschoolAI_v2 × NeuroAGI technical + acceptance doc | NeuroAGI/CTO (Pony) | **What's built** (Phase 1) |
+| `en-final-backend-technical-architecture.md` | Next-gen product-backend technical architecture | NeuroAGI/CTO (Pony) | **Target** architecture |
+| `fschoolai_step1_scenario_plan.md` | Scenario catalog: 17 scenarios + latency model + edges + eval contract | FschoolAI (Step 1, Pt 1) | **Contract** (what the system must do) |
+| `fschoolai_step1_tools_breakdown.md` | Tool / API / MCP capability surface | FschoolAI (Step 1, Pt 2) | **Capability inventory** |
+
+### 19.2 Build status — FschoolAI_v2 is built and accepted (Phase 1)
+
+Per `readthis.md`, the v2 product is **built and passing**, not just specced. The stack actually used: **Python · LangGraph graphs · FastAPI (`POST /api/agent-manager`) · sqlite (product) · `neuroagi-core` v2 brain over HTTP/token**. All **17 scenarios** (G1.1–G4.3 + S1–S3 + Terminal) run end-to-end; **4 self-contained harnesses, 56/56 checks pass** (NL→front-door→product→brain, all-agents coverage, the four collaboration patterns A/B/C/D, and the product API smoke).
+
+Two caveats this PRD records honestly:
+- **The 56/56 are mostly stub/deterministic (CI) mode.** Real-model runs are opt-in (`FSCHOOL_LLM=claude`); real-LLM quality and load are **not yet validated** (see §19.10).
+- **Two-track reality.** The current **TS / Vercel** app (this PRD's §7 stack) remains the **funding version**; the **Python v2** is the rebuild. §19.4 defines how they phase. The brain (`neuroagi-core` v2) is shared by both and is still §18.
+
+### 19.3 Target product-backend architecture (FschoolAI side, not the brain)
+
+From `en-final-backend-technical-architecture.md`. This governs the **FschoolAI product backend runtime**; it does **not** change §18 (the brain is `neuroagi-core` v2). The product's single external contract stays **`POST /api/agent-manager`** (§15).
+
+- **Two planes.** An **Application Control Plane** (decides *what/whether/how*: business orchestration, security governance, context engineering, observability + eval) over an **Agent Execution Plane** (the runtime: assistants, threads, runs, state, checkpoints, streaming, queue, cron, store).
+- **Runtime = LangGraph Agent Server**; orchestrated agents = **LangGraph graphs**; autonomous agents = **DeepAgents** (bounded by goal / max-steps / token + time budget / tool allow-list / approval policy); product APIs + the NeuroAGI facade + A2A = **FastAPI/Starlette Custom Routes**.
+- **Boundaries (Protocols), not direct calls:** `AgentExecutionGateway` (Control Plane → runtime), `PolicyGuard` (auth, data/tool/memory-report permission, token/time budgets, approval), `ToolGateway` (all external tool calls), `NeuronContextProvider` / `NeuronMemoryReporter` (the brain seam). Graph nodes never touch SQLAlchemy / external APIs / the brain directly.
+- **Data:** PostgreSQL for both business data **and** Agent Server persistence, **logically isolated** (separate DB/schema + repositories); Redis for queue / pub-sub. (`Fschool business DB ≠ Agent Server persistence`.)
+- **Observability / eval:** OpenTelemetry (system trace) · Langfuse (LLM trace/dataset/score) · LangSmith (LangGraph native) · DeepEval (CI regression). Trace spans the full chain `route → recall → tool → LLM → write → deliver` and doubles as the eval-fixture source.
+
+### 19.4 Phasing — target vs what's built (these are phases, not conflicts)
+
+`readthis.md` itself frames `en-final` as the target and the built v2 as its Phase 1 ("Phase 1 allows mocks"). The apparent disagreements are a roadmap:
+
+| Concern | Target (doc1) | Built v2 / Phase 1 (readthis) |
+|---|---|---|
+| Runtime | LangGraph **Agent Server** (+ Redis) | **plain LangGraph** + `POST /api/agent-manager` |
+| Transport (brain ↔ product) | **A2A** | **HTTP** (front-door / agent-manager) |
+| Autonomous agents | **DeepAgents** | plain graphs |
+| Observability/eval | OTel + Langfuse + LangSmith + DeepEval | 4 lightweight harnesses (56 checks) |
+| Product store | PostgreSQL | sqlite |
+
+**Deferred to later phases (not dropped):** Agent Server runtime, A2A, DeepAgents, Redis, the full observability stack, Postgres. **Open confirmation owed by the CTO side:** that doc1 is the committed target with the built v2 as Phase 1 (one sentence settles the table above).
+
+### 19.5 The scenario catalog (formalizes §5 flows + §4/§14 agents)
+
+The 17 scenarios as one graded catalog. `lat` = latency class (§19.6); `v2` = end-to-end status in the built v2.
+
+| id | scenario | pattern | lat | key gate | v2 | action |
+|---|---|---|---|---|---|---|
+| G1.1 | Daily Briefing | reactive | C1/C0 | cold-start | ✅ | `daily_briefing` |
+| G1.2 | Ask on the fly | reactive | C1/C2 | integrity (Socratic) | ✅ | `ask` |
+| G1.3 | Grades + What-if | reactive | C0/C1 | cold-start (≥1 graded) | ✅ | `what_if` |
+| G2.1 | Negative / risk nudge | proactive | C4 | arbiter + quiet hours | ✅ | `intervene` |
+| G2.2 | Positive / opportunity nudge | proactive | C4 | same arbiter | ✅ | `review_opportunity` |
+| G3.1 | Exam prep | reactive | C2 | cold-start | ✅ | `exam_prep` |
+| G3.2 | Start assignment / essay | reactive | C1/C2 | integrity (feedback only) | ✅ | `start_assignment` |
+| G3.3 | Weekly plan | reactive | C1/C2 | silent reschedule | ✅ | `weekly_plan` |
+| G3.4 | Digest lecture | reactive/async | C2/C3 | — | ✅ | `digest_lecture` |
+| G3.5 | Office Hours | reactive | C1 | feedback framing | ✅ | `office_hours` |
+| G3.6 | Find resources / Studio | reactive/async | C3 | tier + media non-submittable | ✅ (gates) | `find_resources` |
+| G4.1 | Study room | reactive | C1 | no individual leak | ✅ | `study_room` |
+| G4.2 | Class status (cohort) | reactive | C1 | **k-anon ≥10** | ✅ | `class_status` |
+| G4.3 | Leaderboard | reactive | C0/C1 | healthy comparison | ✅ | `leaderboard` |
+| S1 | Onboarding / first login | system | C1/C3 | cold-start; no-Canvas branch | ◐ design | (OAuth + 5-Q pending) |
+| S2 | Nightly consolidation | nightly | C4 | — | ✅ | `scheduler` consolidate |
+| S3 | Canvas sync | system | C4 | idempotent upsert | ◐ partial | (raw data wired; real OAuth/syllabus later) |
+| — | Terminal | reactive | C1 | — | ✅ | `terminal` |
+
+### 19.6 Latency model — C0–C4 (makes §9's "3s" precise)
+
+§9 states a 3s NFR with a 10s exception; this is its formalization. **Default is C1 = 3s** unless a scenario is explicitly exempted.
+
+| Class | Bound | UX | Applies to |
+|---|---|---|---|
+| **C0** | ≤300ms, no server LLM | no spinner | what-if calc, leaderboard render, offline-cached briefing |
+| **C1** | **≤3s** (default) | inline | briefing / ask / grades / routing / tutor / office-hours / cohort |
+| **C2** | **≤10s + loading** | loading | the only sync exception: lecture transcription, exam-plan gen |
+| **C3** | video<5min / podcast<3min | progress → notify-when-ready | Studio generation, full lecture pack |
+| **C4** | delivery SLA (not response) | none | proactive nudges, nightly consolidation, Canvas sync, context pre-compute |
+
+**C1 per-stage budget:** `route ≤200ms + recall ≤800ms (warm snapshot) + LLM ≤1.8s (streaming) + write 0 (fire-and-forget) + deliver ≤200ms = 3000ms`. The budget only closes if `recall` hits a **warm `context_window`** (the cortex pre-compute, §13/§18.4) and the LLM **streams** — the two audit landmines (cold-context rebuild 3–8s; a fixed RAG race) are exactly what blow it.
+
+### 19.7 Capability / tool surface (formalizes the agents into callable tools)
+
+From `fschoolai_step1_tools_breakdown.md`. Three load-bearing invariants (these are the §13 stateful-brain/stateless-agents rule, made operational):
+
+1. **State lives in the brain, never in a tool.** Every tool is a near-pure function of `(args, brain-context)`; if it needs memory it `recall`s and `remember`s.
+2. **Gates are pre-steps in code, not optional tools the model may skip** — integrity (Socratic / feedback-only / non-submittable), tier, k-anon, cold-start fire *before* the tool body. On Canvas-match uncertainty for graded work → **fail closed to Socratic**.
+3. **Anything slower than its ceiling becomes async** (C3 notify-when-ready), never a synchronous hang.
+
+**Transport classes:** `brain-bus` (recall/remember/propose — ~600ms cross-project hop, degrade to flat-mock if the brain is unreachable) · `MCP` (the brain tool set, for cross-product reuse) · `http` (the product's own `api/*`) · `provider-SDK` (Anthropic/Groq/OpenAI/ElevenLabs/Daily — server-only keys, 429-backoff) · `client-pure` (what-if, deterministic, offline, **no LLM**).
+
+**Statefulness ledger:** *pure* (what_if, sanitize, embed) · *stateless-read* (recall, rag.query, canvas.reads, tutor_llm, summarize, extract) · *brain-write* (remember, session-summary, context_window.warm — **append-only/merge, never overwrite**) · *product-write* (canvas.sync, flashcards, token.award, arbiter, deliver_* — **idempotent**) · *external-send* (discord/sms/email/nudge — rate-limited, arbiter-gated). **Do the LLM gateway first** (LiteLLM-style): centralizes model routing, prompt-cache of the brain-context prefix (40–60% multi-turn saving), provider fallback, cost accounting, and the trace/eval span emitter.
+
+### 19.8 Cross-cutting edges & the eval contract
+
+The catalog ships with an exhaustive edge taxonomy used as the eval-fixture source: **X1–X15** (scenario edges: cold-start, no-Canvas, stale context, brain-down, quiet-hours, integrity, k-anon, multilingual routing, offline, unbuilt-capability, double-delivery, partial-failure, tier denial, multimodal, oversized) and **T1–T18** (tool-layer edges: tool-loop hygiene, gates-as-presteps, idempotency, timeouts, 429, secrets/ESM, cross-project hop, schema cache, cold-start tools, streaming, append-only, modality routing, privacy/redaction, provider drift, MCP, tier/quota, partial-chain, observability). Each catalog row → `{input, expected_output_assertions, expected_tool_sequence, latency_budget}`. **The 3 integrity red lines + k-anonymity are HARD pass/fail trajectory assertions** (each with a positive and a negative fixture, to catch both fail-open and fail-closed) — not rubric-scored.
+
+### 19.9 Resolved decisions & boundary clarifications (this review)
+
+- **Proactive arbitration → the brain, and domain-agnostic.** Confirms §3.5.2/§18.4: arbitration (dedup / rank / rate-limit / quiet-hours / cooldown / effectiveness-learning) is `cortex.policy` because the budget is **per-person across all products** and only the brain has that view. Guardrail added: the brain extension that carries it (`integrations/fschool_notify_ext.py`) must hold **no education semantics** — the split is **detect = product → propose → brain arbitrates whether/when → product composes & delivers → brain learns the effect**.
+- **Retrieval boundary clarified (refines §12.3).** **Course-material RAG = product** (`rag.*` over the student's uploads); **global / profile retrieval = brain** (`recall`). Raw course content **never** enters the brain — only derived signals (gaps, mastery). doc1's "retrieval belongs to NeuronAGI" means *global* retrieval, not course RAG.
+- **Naming.** **NeuroAGI / `neuroagi-core` v2** is canonical (matches the code); the backend doc's "NeuronAGI" is a typo to correct.
+- **Brain-side changes are minimal & generic:** `/tick` optional `t`; `integrations/fschool_notify_ext.py` (`notify` + `consolidate`) loaded via `BRAIN_EXTENSIONS`. These two brain commits are **awaiting go-ahead to push**.
+
+### 19.10 Open items (tracked, not blocking)
+
+- **CTO-side validation (doc1 §14):** Agent Server fit / license / cost / ops; A2A semantics for capability/task/error/trace identity; Postgres-vs-Agent-Server isolation; LangSmith↔Langfuse↔OTel trace correlation; PolicyGuard injection points.
+- **doc1 under-specifies the proactive / background (C4) plane** — Group 2, S2, S3 are ~⅓ of the catalog; the target architecture owes a section for the detect→propose→arbiter→deliver→track pipeline.
+- **SLO measurement spike:** the C1 per-stage budget, the ~600ms cross-project brain hop, and RAG latency are **not yet load-tested** — measure before treating §19.6 as final; `recall` has the least margin.
+- **Unbuilt product-side capabilities:** voice / multilingual STT routing (X8/X14), async media generation (G3.6 video/podcast), Canvas **OAuth** + syllabus ingest (S1/S3), and the long-tail not-built agents (`agents/remaining-agents.md`).
 
 ---
 
