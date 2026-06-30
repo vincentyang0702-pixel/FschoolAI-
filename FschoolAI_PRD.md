@@ -193,7 +193,7 @@ The hard-coded thresholds in the Intervention Agent (stress > 0.8, 3+ sessions, 
 On Day 1, the brain is empty. Behavioural triggers (stress level, confusion patterns, session history) have no data to fire on. The system must not be silent on Day 1.
 
 **Degraded mode (Day 1 through Day 7):**
-- **Deadline-based proactivity is available immediately** — Canvas data is synced at signup. The Intervention Agent can fire deadline reminders from the first hour.
+- **Deadline-based proactivity is available as soon as an LMS is connected.** On the Canvas OAuth path, data is synced at signup and the Intervention Agent can fire deadline reminders from the first hour. On the extension path (any LMS, §16.8), deadlines arrive as the student browses their LMS during onboarding (auto-crawl), so reminders begin once the first crawl completes rather than being guaranteed within the first hour. If no LMS is connected yet, deadline proactivity is inactive until one is.
 - **Behavioural proactivity is gated** — stress level, confusion detection, and pattern-based triggers are disabled until a baseline exists (minimum: 5 sessions + 7 days of data).
 - **Learning style proactivity is gated** — adaptive explanation format is set to a neutral default until the learning style assessment is complete.
 
@@ -263,6 +263,8 @@ The UI must not show empty states as errors. During cold-start, show: "I'm learn
 **Priority:** P0 — foundational data source for all other agents
 
 **What it does:** Connects to the student's Canvas account via OAuth. Syncs all courses, assignments, due dates, grades, and syllabus documents. Stores this data in FschoolAI's Supabase database. Alerts the student about upcoming deadlines and missing work.
+
+> **Scope note (per §16.8):** the Canvas Agent is the *fast path* for Canvas specifically, not the only ingestion route. In the universal ingestion model it is one **accelerator**: it pulls clean structured data via the Canvas API, while the browser extension (§16.8) is the universal substrate that covers other LMS, behavioral signals, and attached-file capture. Where both are present, the API supplies structured deadlines/grades and the extension supplies behavior, content, and files.
 
 **Canvas data pulled:**
 - All enrolled courses (current semester)
@@ -887,8 +889,8 @@ The onboarding is the "identity card" session — a one-on-one setup with Fschoo
 **Step 1 — Account creation**
 Student signs up with email or Google. A blank brain object is created with their student_id.
 
-**Step 2 — Canvas connection**
-Student connects their Canvas account via OAuth. Canvas Agent syncs all courses, assignments, and grades. The brain is populated with course context and upcoming deadlines.
+**Step 2 — Connect your LMS**
+The student connects their LMS. Two mechanisms, generalized in §16.8. Installing the **browser extension** is the universal path: it works on any LMS (Canvas, D2L, Moodle, Blackboard, Schoology) and also captures content and attached files. **Canvas OAuth** (the §4 Canvas Agent) is the fast path that pulls structured courses, assignments, and grades instantly where Canvas is available. Either way the brain is populated with course context and upcoming deadlines. **No-LMS branch:** if the student connects nothing yet, onboarding still completes on the learning-style profile alone, and the daily brief degrades to a generic prompt until an LMS is connected (eval edge X2).
 
 **Step 3 — Learning style assessment**
 Reggie asks 5 quick questions to determine the student's learning style. These are conversational, not a formal test. Example: "When you are trying to understand something new, do you prefer to see a diagram, hear an explanation, read about it, or try it yourself?"
@@ -1219,7 +1221,7 @@ The build order is designed so no engineer blocks another. Ryan's brain mock is 
 |---|---|
 | Daily active users | 500+ |
 | Session length | > 8 minutes average |
-| Canvas connections | > 70% of users connect Canvas |
+| LMS connections | > 70% of users connect an LMS (Canvas OAuth or the extension, §16.8) |
 | Agent interactions per session | > 2 agents used per session |
 | Student-reported grade improvement | > 40% of users report improvement |
 | Retention (Day 30) | > 45% |
@@ -1755,7 +1757,7 @@ The extension captures full page **content**, not just metadata (v1 captured onl
 
 Shared content lands in `course_content` (Production DB) via `POST /api/extension/content`; the backend dedups and stores only new items. Key columns: `university_id`, `course_id`, `canvas_course_id`, `content_type`, `content_hash`, `text` (≤~50,000 chars), `summary`/`concepts` (populated by Library Organizer), `week_number`, `module_name`, `professor_name`, `source_url`, `first_seen_at`/`last_seen_at`, `seen_by_count` (source: LIBRARY_ARCHITECTURE.md).
 
-**PDFs/PPTs rendered on-page:** the extension extracts on-page *rendered text* of slides/module pages (shadow-DOM-piercing handles component renderers). Handling of natively-downloaded binary PDF/PPT files is **TBD** — docs describe on-page text extraction only (source: EXTENSION_ARCHITECTURE.md).
+**PDFs/PPTs rendered on-page:** the extension extracts on-page *rendered text* of slides/module pages (shadow-DOM-piercing handles component renderers). **Natively-downloaded binary PDF/PPT/DOCX files are handled by the Layer 2–3 session-fetch plus backend-extraction pipeline in §16.8** (this resolves the earlier on-page-text-only limitation) (source: EXTENSION_ARCHITECTURE.md, §16.8).
 
 ### 16.4 Behavioral Signal Emission
 
@@ -1817,6 +1819,69 @@ All extension traffic must route through the FschoolAI backend (never directly t
 | M4 | Medium | Missing indexes + nullable ownership FKs | Add indexes; `NOT NULL` on ownership FKs during the auth migration |
 
 The audit places the **Auth + RLS overhaul (C2/C3/C4)** as #1 priority and says to "treat all current data (esp. every `canvas_token`) as exposed" until it lands (source: extension/AUDIT.md).
+
+### 16.8 Universal File & Multi-LMS Ingestion
+
+> Supersedes the §16.3 "binary PDF/PPT handling is TBD" note and generalizes ingestion from Canvas-only to any LMS. This is the ratified ingestion architecture; §5.1 onboarding and §3.5.5 cold-start are written against it.
+
+**Core principle: the authenticated browser session is the only universal substrate.** Every LMS renders an authenticated web session in the student's browser, and that session already carries the exact permissions the student has. APIs differ per LMS and most students cannot obtain institutional keys; the rendered session does not differ and is always permission-correct. So the universal ingestion path is the extension acting *as the student*, with LMS APIs, LTI, and Drive/OneDrive OAuth layered on as optional accelerators. The "owned by someone" attached-file problem is resolved by inheritance: the extension can fetch anything the logged-in student can open, and nothing they cannot. That permission ceiling is intentional and is the FERPA/PIPEDA line, so no accelerator is allowed to exceed it.
+
+**Five-layer model:**
+
+| Layer | Job | Coverage |
+|---|---|---|
+| 0. Identity & routing | LMS-type detection (DOM/URL fingerprint) + `university_id` from host | All LMS |
+| 1. HTML capture | Universal content script: page-type detection, deep text extraction, shadow-DOM piercing, auto-crawl (existing §16.1–16.3) | All rendered pages |
+| 2. File discovery & session-fetch | Find every file/embed URL on the page; fetch bytes with the student's session | Attached PDF/PPT/DOCX, viewer embeds, Drive/OneDrive links, external files |
+| 3. Backend extraction | Bytes + MIME → normalized text, format-based and LMS-agnostic | Every file format |
+| 4. Accelerators | LMS API, LTI 1.3, Drive/OneDrive OAuth, email | Structured metadata, institutional installs, cloud-hosted docs |
+
+Universality lives in Layers 1 to 3; Layer 4 buys extra quality for specific sources.
+
+**Layer 2, file discovery & session-fetch.** Files arrive in four flavors, all handled by one path: (a) LMS-native binaries served from LMS/blob storage, often via signed/expiring URLs (Canvas uses temporary download tokens); (b) files inside an LMS viewer (Canvadocs/DocViewer, Office Online, Google viewer), which usually still expose a download endpoint, with render-capture plus OCR as the fallback; (c) Drive/OneDrive/SharePoint-hosted files; (d) external public links. Mechanism: the **content script discovers** URLs in the DOM (links, download buttons, iframe/embed `src`, viewer payloads) and the **MV3 background service worker fetches** the bytes. With declared `host_permissions`, the background worker can make cross-origin requests and read the response body without CORS blocking it (a page content script alone is CORS-limited; the background worker is not). Signed URLs authorize themselves, so a cross-origin fetch of the underlying object succeeds while the token is live. Per file: discover URL, send a fingerprint (URL + size) to the backend for a hash pre-check, and only download plus ship bytes when the hash is new. This reuses the §16.5 content-hash dedup, so the first student to open a file pays the cost and everyone after inherits it, and it is the idempotency guard that prevents the storage-overfill failure mode.
+
+**Layer 3, format-based extraction (LMS-agnostic).** Once you hold bytes plus MIME, the source is irrelevant:
+
+| Format | Tool |
+|---|---|
+| PDF (text) | pdf-parse / pdf.js |
+| PDF (scanned) | OCR (Tesseract or cloud OCR) |
+| DOCX | mammoth |
+| PPTX | pptx text/notes extractor |
+| XLSX/CSV | SheetJS |
+| Legacy .doc/.ppt | LibreOffice headless, then extract |
+| Images | OCR |
+| HTML/text | direct |
+
+Output normalizes into the existing `course_content` shape (content_type, week, hashes) and dedups by `content_hash`.
+
+**Layer 4, accelerators ranked by value.**
+- **LTI 1.3** is the best institutional path and is standards-based across Canvas, D2L, Moodle, Blackboard, and Schoology. With AGS (grades), NRPS (roster), and Deep Linking (content) it gives official server-to-server data with no scraping and covers the mobile/app usage the extension cannot reach. It requires the institution to install the tool, so it is the enterprise track, not the base layer; where adopted it strictly dominates scraping for that institution.
+- **LMS REST API where self-serve** (Canvas PAT) gives clean structured deadlines/grades without scraping; per-LMS and admins can disable it, so it stays an accelerator. This is the existing §4 Canvas Agent path.
+- **Drive/OneDrive OAuth** is a supplement for the student's own documents and for Workspace/365 schools that share materials to the student account (Microsoft Graph `sharedWithMe`, Google Drive `files.list`). Use a **file-picker scope**, not full-drive read. It does not reach LMS-native files, so it is additive, never primary.
+- **Email ingestion** (Gmail/Outlook), optional, backfills deadlines/feedback that arrive by mail.
+
+All sources normalize through one **provider interface** (`authorize`, `listCourses`, `listAssignments`, `listGrades`, `getContent`) emitting the same internal Course/Assignment/Grade/ContentItem records, so adding a source is additive. Build the interface from day one even with a single provider.
+
+**Coverage matrix:**
+
+| Source type | Extension session-fetch | LMS API | LTI 1.3 | Drive/OneDrive OAuth |
+|---|---|---|---|---|
+| LMS-native files (Canvas/D2L/Moodle/Bb) | ✅ primary | partial (metadata) | ✅ if installed | ✗ |
+| Behavioral signals | ✅ only source | ✗ | ✗ | ✗ |
+| Structured deadlines/grades | ✅ | ✅ | ✅ | ✗ |
+| Drive/OneDrive file shared to student | ✅ if signed in | ✗ | ✗ | ✅ |
+| Student's own docs | ✗ | ✗ | ✗ | ✅ |
+| Mobile / native-app usage | ✗ | ✅ | ✅ | n/a |
+
+**Hard limits (by design):** the permission ceiling is permanent and correct (nothing reads what the student cannot see); viewer-only content needs render-capture plus OCR; scanned-PDF OCR is real latency and cost, amortized by hash dedup; scraper selectors rot (mitigate with a generic fallback, thin per-LMS adapters, and per-LMS extraction-success telemetry); mobile/native-app usage bypasses the extension (the strongest argument for the LTI track); ToS and institutional policy may restrict automated access (LTI is the clean answer there); and anything pulled from a student's Drive or from feedback pages is personal by default and must pass course-vs-personal classification (§16.5) before it can enter the shared `course_content` table.
+
+**Phasing:**
+1. Extension session-fetch + backend extractor for PDF/DOCX/PPTX + hash dedup (closes the §16.3 gap for LMS-native files on any LMS).
+2. Viewer-specific handlers + OCR for embedded/scanned content.
+3. Drive/OneDrive OAuth via file picker.
+4. LTI 1.3 (AGS/NRPS/Deep Linking) for institutional installs; also fixes the mobile gap.
+5. Cross-cutting from day one: the provider/normalization interface and content-hash dedup.
 
 ---
 
@@ -2051,7 +2116,7 @@ The 17 scenarios as one graded catalog. `lat` = latency class (§19.6); `v2` = e
 | G4.1 | Study room | reactive | C1 | no individual leak | ✅ | `study_room` |
 | G4.2 | Class status (cohort) | reactive | C1 | **k-anon ≥10** | ✅ | `class_status` |
 | G4.3 | Leaderboard | reactive | C0/C1 | healthy comparison | ✅ | `leaderboard` |
-| S1 | Onboarding / first login | system | C1/C3 | cold-start; no-Canvas branch | ◐ design | (OAuth + 5-Q pending) |
+| S1 | Onboarding / first login | system | C1/C3 | cold-start; no-LMS branch | ◐ design | (connect-LMS + 5-Q pending) |
 | S2 | Nightly consolidation | nightly | C4 | — | ✅ | `scheduler` consolidate |
 | S3 | Canvas sync | system | C4 | idempotent upsert | ◐ partial | (raw data wired; real OAuth/syllabus later) |
 | — | Terminal | reactive | C1 | — | ✅ | `terminal` |
@@ -2084,7 +2149,7 @@ From `fschoolai_step1_tools_breakdown.md`. Three load-bearing invariants (these 
 
 ### 19.8 Cross-cutting edges & the eval contract
 
-The catalog ships with an exhaustive edge taxonomy used as the eval-fixture source: **X1–X15** (scenario edges: cold-start, no-Canvas, stale context, brain-down, quiet-hours, integrity, k-anon, multilingual routing, offline, unbuilt-capability, double-delivery, partial-failure, tier denial, multimodal, oversized) and **T1–T18** (tool-layer edges: tool-loop hygiene, gates-as-presteps, idempotency, timeouts, 429, secrets/ESM, cross-project hop, schema cache, cold-start tools, streaming, append-only, modality routing, privacy/redaction, provider drift, MCP, tier/quota, partial-chain, observability). Each catalog row → `{input, expected_output_assertions, expected_tool_sequence, latency_budget}`. **The 3 integrity red lines + k-anonymity are HARD pass/fail trajectory assertions** (each with a positive and a negative fixture, to catch both fail-open and fail-closed) — not rubric-scored.
+The catalog ships with an exhaustive edge taxonomy used as the eval-fixture source: **X1–X15** (scenario edges: cold-start, no-LMS (any LMS, §16.8; formerly no-Canvas), stale context, brain-down, quiet-hours, integrity, k-anon, multilingual routing, offline, unbuilt-capability, double-delivery, partial-failure, tier denial, multimodal, oversized) and **T1–T18** (tool-layer edges: tool-loop hygiene, gates-as-presteps, idempotency, timeouts, 429, secrets/ESM, cross-project hop, schema cache, cold-start tools, streaming, append-only, modality routing, privacy/redaction, provider drift, MCP, tier/quota, partial-chain, observability). Each catalog row → `{input, expected_output_assertions, expected_tool_sequence, latency_budget}`. **The 3 integrity red lines + k-anonymity are HARD pass/fail trajectory assertions** (each with a positive and a negative fixture, to catch both fail-open and fail-closed) — not rubric-scored.
 
 ### 19.9 Resolved decisions & boundary clarifications (this review)
 
@@ -2117,8 +2182,8 @@ The catalog ships with an exhaustive edge taxonomy used as the eval-fixture sour
 | G3.2 Start assignment | ○ | X | blank scaffold + **hard** integrity gate (feedback-only) |
 | G3.4 Digest lecture | ◑ | FS | professor-emphasis detection; async long-audio path |
 | G3.5 Office Hours | ◑ | FS | gap-targeted question-gen (`monitor-agent` is a page nudge) |
-| S1 Onboarding | ◑ | X | Canvas **OAuth** + 5-Q → brain-create (PAT today) |
-| S3 Canvas sync | ◑ | X | real OAuth + syllabus ingest (client-side PAT today) |
+| S1 Onboarding | ◑ | X | connect-LMS (extension = universal path §16.8, Canvas **OAuth** = fast path) + 5-Q → brain-create (PAT today) |
+| S3 LMS sync | ◑ | X | real OAuth + syllabus ingest (client-side PAT today); multi-LMS + attached-file capture via the §16.8 extension pipeline |
 
 **Cross-cutting structural gaps (not scenario-specific):**
 
@@ -2132,7 +2197,7 @@ The catalog ships with an exhaustive edge taxonomy used as the eval-fixture sour
 
 **Specialist sub-agents not built (§14.3):** Situation Synthesizer, Motivation Engine, Professor Intelligence, Social Intelligence, Knowledge Graph Builder, Focus Agent, Library Organizer, UI Preference Agent, Pattern Recognition. **Partial:** Assignment Agent, Voice Preference (close).
 
-**Highest-leverage `frontend/dev` next steps (cheap, no v2 dependency):** What-if calculator (G1.3) → Daily Briefing (G1.1) → Positive nudges (G2.2) → finish Voice Preference + the Assignment scaffold. The **X** items (Canvas OAuth, brain pipeline, integrity guards) gate downstream work and apply regardless of track.
+**Highest-leverage `frontend/dev` next steps (cheap, no v2 dependency):** What-if calculator (G1.3) → Daily Briefing (G1.1) → Positive nudges (G2.2) → finish Voice Preference + the Assignment scaffold. The **X** items (LMS connect: the §16.8 extension pipeline + Canvas OAuth, brain pipeline, integrity guards) gate downstream work and apply regardless of track.
 
 ---
 
