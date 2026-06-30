@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useApp } from "../context/AppContext";
 import { groq }   from "../api/groq";
+import WhatIfPanel from "../components/WhatIfPanel";
 import { Sparkles, Check, ArrowUp, Hourglass, ChevronUp, ChevronDown, Circle } from "lucide-react";
 
 // FALLBACK_NODES removed — real data or empty state only. No fake courses shown.
@@ -668,6 +669,7 @@ function SavedDraftsTab() {
 const TABS = [
   { id: "notes",      label: "Notes"      },
   { id: "recordings", label: "Recordings" },
+  { id: "grades",     label: "Grades"     },
   { id: "reminders",  label: "Reminders"  },
   { id: "previous",   label: "Submitted"  },
 ];
@@ -697,6 +699,7 @@ export default function Toolkit() {
 
       {activeTab === "notes"      && <ClassNotesTab />}
       {activeTab === "recordings" && <RecordingsTab />}
+      {activeTab === "grades"     && <WhatIfPanel />}
       {activeTab === "reminders"  && <TwilioTab />}
       {activeTab === "previous"   && <PreviousWorkTab />}
     </div>
