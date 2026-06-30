@@ -61,10 +61,11 @@ begin
   ] loop
     perform public.reset_policies(t);
     execute format('alter table public.%I enable row level security;', t);
+    -- cast user_id::text so this works whether the column is uuid or text (current_profile_id() is text)
     execute format(
       'create policy %I on public.%I for all '
-      'using (user_id = public.current_profile_id()) '
-      'with check (user_id = public.current_profile_id());', t || '_self', t);
+      'using (user_id::text = public.current_profile_id()) '
+      'with check (user_id::text = public.current_profile_id());', t || '_self', t);
   end loop;
 end $$;
 
