@@ -1482,7 +1482,7 @@ Each below has a spec in `/agents` but no slot in the 15. Owner is **TBD** unles
 - **Outputs:** `brain.reflections` (`professor_insight`), `brain.signals` (`professor_profile_updated`).
 
 #### Voice Preference Agent
-- **Status:** NOT BUILT, Sprint 1. **Lives inside the Agent Manager**, not standalone (source: `agents/voice-preference-agent.md`).
+- **Status:** PARTIAL (`detectVoiceChangeIntent` exists; ElevenLabs Voice-Design generation not finished — see §19.11). **Lives inside the Agent Manager**, not standalone (source: `agents/voice-preference-agent.md`).
 - **Purpose:** Detects voice-change intent in any message and generates a custom voice via ElevenLabs Voice Design.
 - **Trigger:** `detectVoiceChangeIntent()` runs on every message before routing.
 - **Inputs:** `neuro.voice` (current voice_id), `neuro.memory` (tutor name).
@@ -1510,13 +1510,13 @@ Each below has a spec in `/agents` but no slot in the 15. Owner is **TBD** unles
 - **Outputs:** `brain.signals`, `brain.reflections` (social insights), `neuro.patterns` (social effectiveness).
 
 #### Content Connector
-- **Status:** NOT BUILT, Sprint 4 (source: `agents/remaining-agents.md`).
+- **Status:** BUILT — `feat/content-connector` (PR open). *(Originally NOT BUILT, Sprint 4; source: `agents/remaining-agents.md`.)*
 - **Purpose:** Links outside content (videos/articles/links) to current coursework.
 - **Trigger:** Student shares a link, or brain detects from integrations.
 - **Inputs:** shared content + `fschool.courses` / current-course context. **Outputs:** `brain.signals` (`content_connection`).
 
 #### Writing Evolution Tracker
-- **Status:** NOT BUILT, Sprint 4 (source: `agents/remaining-agents.md`). *(= the "Writing Intelligence Agent" flagged HIGH in FEATURE_AND_AGENT_MAP Page 4.)*
+- **Status:** BUILT — `feat/writing-tracker` (PR open). *(Originally NOT BUILT, Sprint 4; = the "Writing Intelligence Agent" flagged HIGH in FEATURE_AND_AGENT_MAP Page 4.)*
 - **Purpose:** Analyzes every submission for complexity, vocabulary, clarity, citation accuracy; tracks growth over time.
 - **Trigger:** Every assignment submission; monthly report.
 - **Inputs:** submitted writing, prior `brain.signals` (`writing_metrics`). **Outputs:** `brain.signals` (`writing_metrics`), `brain.reflections` (`writing_evolution_report`).
@@ -1546,7 +1546,7 @@ Each below has a spec in `/agents` but no slot in the 15. Owner is **TBD** unles
 - **Purpose:** Identifies learning style and behavioral patterns from signal history.
 - **Trigger:** Background. **Inputs:** `brain.signals` history. **Outputs:** `neuro.patterns`.
 
-> Also referenced but folded elsewhere: **Token Engine** (in-app gamification, surfaced on every page — source: `agents/PAGE_AI_MAP.md`, `agents/token-engine.md`) and **Leaderboard Agent** (source: `agents/remaining-agents.md`). These are infrastructure/gamification rather than tutoring sub-agents — and note they conflict with the §11 out-of-scope deferral of Social/Leaderboard; that contradiction must be resolved.
+> Also referenced but folded elsewhere: **Token Engine** (in-app gamification, surfaced on every page — source: `agents/PAGE_AI_MAP.md`, `agents/token-engine.md`) and **Leaderboard Agent** (source: `agents/remaining-agents.md`). These are infrastructure/gamification rather than tutoring sub-agents. **Both are now in Phase-1 scope** (§11, resolved v1.8 — the old Social/Leaderboard deferral was removed), and the **Leaderboard Agent is built** (G4.3, server-side ranking, merged). The cohort/leaderboard aggregation surfaces still owe the PIPEDA/FERPA + k-anonymity gate in §14 before exposing any cross-student data.
 
 ### 14.4 Which agent owns what — and overlaps to resolve
 
@@ -2104,7 +2104,7 @@ The catalog ships with an exhaustive edge taxonomy used as the eval-fixture sour
 
 `frontend/dev` is the **TS / Vercel funding version**; the full PRD scenario set is **built in the Python v2** (§19.2). This table lists only what's **actionable on `frontend/dev`** now; the heavier gaps owned by the Python v2 rebuild are summarized in a single note below, not tracked as rows here. **Track:** **FS** = build on `frontend/dev`; **X** = cross-cutting / structural (needed regardless of track). **Status on `frontend/dev`:** ✅ shipped · ◑ partial (exists, doesn't meet the contract) · ○ spec (not built).
 
-**Recently shipped (closed since the docs were written):** Leaderboard Agent (server-side ranking, merged), Content Connector and Writing Evolution Tracker (§14.3 Sprint-4 agents, PRs open).
+**Recently shipped (closed since the docs were written):** Leaderboard Agent (server-side ranking, merged), Content Connector and Writing Evolution Tracker (§14.3 Sprint-4 agents, PRs open), and the **Weekly Plan agent (G3.3)** — deadline + difficulty planner with Google Calendar free/busy and `.ics` export (`feat/weekly-planner`, PR open).
 
 **Scenario catalog — outstanding `frontend/dev` items (the live ones G1.2 / G4.3 omitted):**
 
@@ -2115,7 +2115,6 @@ The catalog ships with an exhaustive edge taxonomy used as the eval-fixture sour
 | G2.1 Negative nudge | ◑ | X | broaden triggers beyond stress/momentum |
 | G2.2 Positive nudge | ○ | **FS** | opportunity-nudge path (absent in `brain-intervention`) |
 | G3.2 Start assignment | ○ | X | blank scaffold + **hard** integrity gate (feedback-only) |
-| G3.3 Weekly plan | ○ | FS | Planner over deadlines + difficulty (Agent 4); calendar write-back is a stretch |
 | G3.4 Digest lecture | ◑ | FS | professor-emphasis detection; async long-audio path |
 | G3.5 Office Hours | ◑ | FS | gap-targeted question-gen (`monitor-agent` is a page nudge) |
 | S1 Onboarding | ◑ | X | Canvas **OAuth** + 5-Q → brain-create (PAT today) |
