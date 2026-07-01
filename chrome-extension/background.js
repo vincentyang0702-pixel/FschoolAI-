@@ -3,7 +3,7 @@
 // We call /api/lms-ingest directly — no cookie relay, no allowlist, any website.
 
 // Dev vs prod: change to "http://localhost:5173" for local testing
-const FSCHOOLAI_ORIGIN = "https://fschoolai.vercel.app";
+const FSCHOOLAI_ORIGIN = "https://fschoolai.com";
 const API_BASE         = FSCHOOLAI_ORIGIN;
 
 // ── Auth state ─────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 // popup.js — FschoolAI extension popup controller
 
 // Dev vs prod: change to "http://localhost:5173" for local testing
-const FSCHOOLAI_URL = "https://fschoolai.vercel.app";
+const FSCHOOLAI_URL = "https://fschoolai.com";
 
 const $ = id => document.getElementById(id);
 
