@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FschoolAI Importer</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 300px;
+      min-height: 240px;
+      background: #0f0f12;
+      color: #f0f0f0;
+      font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', sans-serif;
+      font-size: 13px;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 14px 16px;
+      border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .logo {
+      width: 28px; height: 28px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, #4285F4, #30d158);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 15px; font-weight: 700; color: #fff;
+      flex-shrink: 0;
+    }
+    .header-title { font-size: 14px; font-weight: 700; color: #f0f0f0; }
+    .header-sub   { font-size: 11px; color: rgba(255,255,255,0.35); }
+
+    #status-section, #signed-out-section, #pending-section { padding: 16px; }
+
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 12px; border-radius: 20px;
+      font-size: 12px; font-weight: 600; margin-bottom: 12px;
+    }
+    .status-pill.on  { background: rgba(48,209,88,0.12); color: #30d158; border: 1px solid rgba(48,209,88,0.2); }
+    .status-pill.off { background: rgba(255,255,255,0.06); color: rgba(255,255,255,0.4); border: 1px solid rgba(255,255,255,0.08); }
+    .dot { width: 6px; height: 6px; border-radius: 50%; }
+    .dot.on  { background: #30d158; }
+    .dot.off { background: rgba(255,255,255,0.2); }
+
+    .btn {
+      display: block; width: 100%;
+      padding: 10px; border-radius: 10px; border: none;
+      font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+      transition: opacity 0.15s;
+    }
+    .btn:active { opacity: 0.8; }
+    .btn-primary  { background: #4285F4; color: #fff; margin-bottom: 8px; }
+    .btn-danger   { background: rgba(255,69,58,0.12); color: #ff6961; }
+    .btn-open     { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.7); }
+
+    .uid { font-size: 11px; color: rgba(255,255,255,0.3); margin-bottom: 12px; word-break: break-all; }
+
+    .pending-title { font-size: 12px; font-weight: 700; color: rgba(255,255,255,0.55); margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .pending-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px; border-radius: 8px;
+      background: rgba(255,255,255,0.03); margin-bottom: 6px;
+    }
+    .pending-name { flex: 1; font-size: 12px; color: rgba(255,255,255,0.7); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pending-btn {
+      padding: 4px 10px; border-radius: 6px; border: none;
+      background: rgba(66,133,244,0.18); color: #4285F4;
+      font-size: 11px; font-weight: 600; cursor: pointer; font-family: inherit; flex-shrink: 0;
+    }
+
+    .empty { color: rgba(255,255,255,0.3); font-size: 12px; text-align: center; padding: 12px 0; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="logo">F</div>
+    <div>
+      <div class="header-title">FschoolAI</div>
+      <div class="header-sub">LMS File Importer</div>
+    </div>
+  </div>
+
+  <!-- Signed in -->
+  <div id="status-section" style="display:none">
+    <div id="status-pill" class="status-pill on">
+      <span class="dot on"></span>
+      <span id="status-label">Connected</span>
+    </div>
+    <div class="uid" id="uid-label"></div>
+    <button class="btn btn-open" id="btn-open-app">Open FschoolAI →</button>
+    <button class="btn btn-danger" id="btn-sign-out" style="margin-top:8px">Sign out</button>
+  </div>
+
+  <!-- Signed out -->
+  <div id="signed-out-section" style="display:none">
+    <div style="color:rgba(255,255,255,0.45); font-size:13px; margin-bottom:16px; line-height:1.6">
+      Sign in to FschoolAI to start importing LMS files into your AI tutor.
+    </div>
+    <button class="btn btn-primary" id="btn-sign-in">Sign in to FschoolAI</button>
+  </div>
+
+  <!-- Pending downloads (Mode B) -->
+  <div id="pending-section" style="display:none; border-top:1px solid rgba(255,255,255,0.06)">
+    <div style="padding:12px 16px 0">
+      <div class="pending-title">Captured downloads</div>
+      <div id="pending-list"></div>
+      <button class="btn btn-open" id="btn-clear-pending" style="margin-top:6px;font-size:11px;padding:6px">
+        Clear all
+      </button>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
