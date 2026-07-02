@@ -828,7 +828,23 @@ async function runFullSync(tabId, host, { force = false } = {}) {
       if (await isBlockedByFailures(key)) { skipped++; return; }                            // respect the 3-strike backoff
       inFlight.add(key);
       try {
-        const r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
+        // Fetch bytes in the TAB (same-origin, first-party session cookie) — the
+        // SW's own fetch is cross-site and 403s / gets a login page on the LMS.
+        const fetched = await new Promise((resolve) => {
+          chrome.tabs.sendMessage(tabId, { type: "FETCH_FILE", url: f.url }, { frameId: 0 },
+            (r) => resolve(chrome.runtime.lastError ? { error: "content script gone" } : r));
+        });
+        let r;
+        if (fetched && fetched.bytes) {
+          // Import the bytes the tab fetched (importFile won't re-fetch when bytes present).
+          r = await importFile({ url: f.url, filename: f.filename, bytes: fetched.bytes, mimeType: fetched.mimeType, courseId: f.courseId ?? null, platform: res.lms });
+        } else if (fetched && fetched.corsOrNetwork) {
+          // Cross-origin CDN (e.g. Canvas inst-fs) — the tab can't fetch it (CORS),
+          // but the SW can (verifier/signed URL needs no cookie).
+          r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
+        } else {
+          r = { error: fetched?.error || "fetch failed" };
+        }
         if (r?.ok) { if (r.skipped) skipped++; else imported++; }
         else { failed++; lastError = r?.error || lastError; if (!r?.transient) await recordFailure(key); }
       } finally {

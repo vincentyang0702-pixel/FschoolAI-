@@ -327,14 +327,45 @@
     return { lms: null, files: [] };
   }
 
-  // Background asks the top frame to enumerate (it has same-origin fetch + tokens).
+  // Fetch a file's bytes HERE (same-origin, first-party session cookie) — the
+  // background SW's fetch is cross-site, so Canvas/D2L/Moodle reject it (403 /
+  // HTML login page). Cross-origin CDN URLs (Canvas inst-fs) CORS-fail here and
+  // are reported so the background can fall back to its own fetch (those carry a
+  // verifier/signed token and don't need the cookie).
+  async function fetchFileInPage(url) {
+    let res;
+    try {
+      res = await fetch(url, { credentials: "include", redirect: "follow" });
+    } catch (e) {
+      return { error: String((e && e.message) || e) || "fetch failed", corsOrNetwork: true };
+    }
+    if (!res.ok) return { error: `HTTP ${res.status}` };
+    const ct = (res.headers.get("content-type") || "").split(";")[0].trim() || "application/octet-stream";
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength === 0) return { error: "Empty response" };
+    if (buf.byteLength > 45 * 1024 * 1024) return { error: "File too large for auto-sync (import it manually)" };
+    if (ct.includes("text/html")) return { error: "Got a login/HTML page — are you logged into the LMS?" };
+    return { bytes: bufferToBase64(buf), mimeType: ct };
+  }
+
+  // Background asks the top frame to enumerate + fetch (it has the same-origin
+  // session; the SW does not). All heavy work stays in the background otherwise.
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg?.type !== "ENUMERATE_LMS") return;   // ignore other messages
-    if (window !== window.top) { sendResponse({ lms: null, files: [] }); return; }   // top frame only
-    enumerateLmsFiles()
-      .then((r) => sendResponse(r || { lms: null, files: [] }))
-      .catch((e) => sendResponse({ lms: null, files: [], error: true, detail: String((e && e.message) || e) }));
-    return true;   // async response
+    if (msg?.type === "ENUMERATE_LMS") {
+      if (window !== window.top) { sendResponse({ lms: null, files: [] }); return; }   // top frame only
+      enumerateLmsFiles()
+        .then((r) => sendResponse(r || { lms: null, files: [] }))
+        .catch((e) => sendResponse({ lms: null, files: [], error: true, detail: String((e && e.message) || e) }));
+      return true;   // async response
+    }
+    if (msg?.type === "FETCH_FILE") {
+      if (window !== window.top) { sendResponse({ error: "not top frame" }); return; }
+      fetchFileInPage(String(msg.url || ""))
+        .then(sendResponse)
+        .catch((e) => sendResponse({ error: String((e && e.message) || e) }));
+      return true;   // async response
+    }
+    // other message types: ignore
   });
 
   // Per-site consent: heuristics alone must never grant a random website the power
