@@ -495,6 +495,11 @@
         if (!chrome?.runtime?.sendMessage) return;             // orphaned script
         if (AUTO_EXCLUDED_HOSTS.test(location.hostname)) return;
         if (!looksLikeLms()) return;
+        // On Canvas/D2L/Moodle the full-course API sync (maybeEngageLms → runFullSync)
+        // owns file import and fetches in-page (same-origin cookie). DOM auto-capture
+        // here would only duplicate that work AND fail with cross-site 403s in the
+        // background — so defer to full-sync on supported LMSs.
+        if (isSupportedLmsPage()) return;
         // Consent FIRST — before collectAutoCandidates marks any hrefs into
         // autoSeen. If a full-sync prompt is mid-flight (consentBusy), this
         // returns "off" and we retry on the next scan, without permanently

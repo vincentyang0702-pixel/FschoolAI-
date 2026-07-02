@@ -844,6 +844,9 @@ async function runFullSync(tabId, host, { force = false } = {}) {
           r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
         } else {
           r = { error: fetched?.error || "fetch failed" };
+          // No importFile call on a fetch failure → record the outcome in the
+          // activity feed ourselves, with the clean per-file error message.
+          pushActivity(String(f.filename || "file").split(/[/\\]/).pop() || "file", "failed", r.error);
         }
         if (r?.ok) { if (r.skipped) skipped++; else imported++; }
         else { failed++; lastError = r?.error || lastError; if (!r?.transient) await recordFailure(key); }
