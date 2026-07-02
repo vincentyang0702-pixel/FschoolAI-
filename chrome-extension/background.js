@@ -10,8 +10,6 @@
 //   • Tracks per-URL capture history so auto-capture never re-imports
 //   • Captures completed downloads from academic sites (pending list / opt-in auto)
 
-import { lmsFileSync } from "./lms-api-sync.js";
-
 // Dev vs prod: change to "http://localhost:5173" for local testing
 const FSCHOOLAI_ORIGIN = "https://fschoolai.com";
 const API_BASE         = FSCHOOLAI_ORIGIN;
@@ -757,52 +755,73 @@ async function siteMode(host) {
     r(autoSites[host])));
 }
 
+// Human-readable summary of a runFullSync result (shown by the popup's Sync button).
+function summarizeSync(r) {
+  if (!r) return "Sync failed.";
+  switch (r.reason) {
+    case "no-content-script": return "Couldn't reach the page — reload the LMS tab, then Sync.";
+    case "no-lms":            return "No supported LMS on this tab. Open your Canvas / D2L / Moodle course area and try again.";
+    case "enum-error":        return `Couldn't read your courses${r.detail ? ` (${String(r.detail).slice(0, 60)})` : ""}. Are you logged into the LMS?`;
+    case "signed-out":        return "Sign into the extension first.";
+    case "autocapture-off":   return "Auto-capture is turned off (see the toggle below).";
+    case "already-running":   return "A sync is already running…";
+    case "throttled":         return "Already synced recently — files are up to date.";
+    case "done":
+      if (r.total === 0)                        return `${r.lms}: no files found in your courses.`;
+      if (r.imported > 0)                       return `Importing ${r.imported} file(s)${r.failed ? `, ${r.failed} failed` : ""}…`;
+      if (r.skipped > 0 && r.failed === 0)      return `Up to date (${r.skipped} already imported).`;
+      return `${r.total} file(s) found but all failed${r.lastError ? ` — ${String(r.lastError).slice(0, 80)}` : ""}.`;
+    default: return "Sync started.";
+  }
+}
+
 async function runFullSync(tabId, host, { force = false } = {}) {
   // Atomic re-entry guard: claim the host SYNCHRONOUSLY before any await, so two
   // near-simultaneous triggers (two tabs, or consent racing an onUpdated) can't
   // both pass a check-then-act gate and double-enumerate the whole library.
-  if (!host || fullSyncHosts.has(host)) return;
+  if (!host || fullSyncHosts.has(host)) return { ok: false, reason: "already-running" };
   fullSyncHosts.add(host);
   let started = false;
   try {
     const auth = await getAuth();
-    if (!auth) return;
-    if (await siteMode(host) !== "on") return;            // consent required
-    if (!(await getSettings()).autoCapture) return;       // respect the master toggle
+    if (!auth) return { ok: false, reason: "signed-out" };
+    if (await siteMode(host) !== "on") return { ok: false, reason: "no-consent" };
+    if (!(await getSettings()).autoCapture) return { ok: false, reason: "autocapture-off" };
     if (!force) {
       const times = await getSyncTimes();
-      if (times[host] && Date.now() - times[host] < FULL_SYNC_TTL_MS) return;      // 6h success throttle
+      if (times[host] && Date.now() - times[host] < FULL_SYNC_TTL_MS) return { ok: true, reason: "throttled" };
       const eAt = syncErrorAt.get(host);
-      if (eAt && Date.now() - eAt < SYNC_ERROR_COOLDOWN_MS) return;                 // don't hammer during an outage
+      if (eAt && Date.now() - eAt < SYNC_ERROR_COOLDOWN_MS) return { ok: false, reason: "cooldown" };
     }
 
     started = true;
     fullSyncActive = true;
     writeLiveState();
 
-    let res;
+    // Ask the top-frame content script to enumerate the library. It runs in the
+    // isolated world with same-origin authenticated fetch (first-party cookie
+    // sent), so strict LMS CSP can't block it (unlike MAIN-world injection) and
+    // there's no cross-site SameSite problem.
+    let res = null;
     try {
-      const [inj] = await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", func: lmsFileSync });
-      res = inj?.result;
-    } catch {
-      return;   // restricted page / tab navigated away — not marked, a real page retries
-    }
+      res = await new Promise((resolve) => {
+        chrome.tabs.sendMessage(tabId, { type: "ENUMERATE_LMS" }, { frameId: 0 }, (r) => {
+          resolve(chrome.runtime.lastError ? null : r);   // no content script / not ready
+        });
+      });
+    } catch { res = null; }
 
-    // Detected a supported LMS but enumeration errored (429/5xx) → do NOT mark
-    // synced (that would blacklist a working host for 6h); brief in-memory cooldown.
-    if (res && res.error) { syncErrorAt.set(host, Date.now()); return; }
-    // No supported LMS on this page (dashboard, login redirect, js-only portal) →
-    // don't mark: a later course page on the same host must still get its shot.
-    // lmsFileSync returns immediately here (no API calls), so re-injection is cheap.
-    if (!res || !res.lms) return;
+    if (!res) return { ok: false, reason: "no-content-script" };
+    if (res.error) { syncErrorAt.set(host, Date.now()); return { ok: false, reason: "enum-error", lms: res.lms, detail: res.detail }; }
+    if (!res.lms) return { ok: false, reason: "no-lms" };
     syncErrorAt.delete(host);
 
     const files = Array.isArray(res.files) ? res.files : [];
-    let imported = 0, skipped = 0, failed = 0, blocked = 0;
+    let imported = 0, skipped = 0, failed = 0, blocked = 0, lastError = null;
     await runPool(files, 6, async (f) => {
       if (!f || !f.url) return;
       // isPrivateTarget blocks internal hosts; isAllowedSyncFileUrl blocks
-      // MAIN-world-supplied third-party URLs (credentialed-fetch SSRF / RAG poison).
+      // content-supplied third-party URLs (credentialed-fetch SSRF / RAG poison).
       if (isPrivateTarget(f.url) || !isAllowedSyncFileUrl(f.url, host)) { blocked++; return; }
       const key = canonicalizeUrl(f.url);
       if ((await getCaptured()).includes(key) || inFlight.has(key)) { skipped++; return; }  // dedup vs history + concurrent captures
@@ -811,7 +830,7 @@ async function runFullSync(tabId, host, { force = false } = {}) {
       try {
         const r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
         if (r?.ok) { if (r.skipped) skipped++; else imported++; }
-        else { failed++; if (!r?.transient) await recordFailure(key); }   // permanent-only strike (login walls/network are transient)
+        else { failed++; lastError = r?.error || lastError; if (!r?.transient) await recordFailure(key); }
       } finally {
         inFlight.delete(key);
       }
@@ -820,11 +839,11 @@ async function runFullSync(tabId, host, { force = false } = {}) {
     if (imported > 0) bumpStat("autoImported", imported);
     // Throttle only when something actually worked (or there was nothing to do).
     // A non-empty enumeration that imported/skipped NOTHING (every file failed)
-    // smells transient — ingest endpoint down, expired session — so leave the host
-    // un-throttled and a refresh retries. The per-file 3-strike/7-day backoff still
-    // prevents infinite hammering of genuinely-bad files.
+    // smells transient — ingest down, expired session — so leave the host
+    // un-throttled and a refresh retries. Per-file 3-strike backoff still bounds it.
     if (files.length === 0 || imported > 0 || skipped > 0) await markSynced(host);
-    else console.warn(`[FschoolAI] full-sync on ${host}: all ${failed} file(s) failed, 0 imported — not throttling; refresh to retry (check errors in the popup).`);
+    console.log(`[FschoolAI] full-sync ${res.lms} on ${host}: ${files.length} files → ${imported} imported, ${skipped} skipped, ${failed} failed, ${blocked} blocked${lastError ? ` (last error: ${lastError})` : ""}`);
+    return { ok: true, reason: "done", lms: res.lms, total: files.length, imported, skipped, failed, blocked, lastError };
   } finally {
     fullSyncHosts.delete(host);
     // Only touch the live flag if we actually started work — gate-bail
@@ -932,9 +951,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         consentedHosts.add(host);
         const keys = Object.keys(autoSites);
         if (keys.length > 200) delete autoSites[keys[0]];
-        chrome.storage.local.set({ autoSites }, () => {
-          runFullSync(tab.id, host, { force: true });
-          sendResponse({ ok: true, host });
+        chrome.storage.local.set({ autoSites }, async () => {
+          const r = await runFullSync(tab.id, host, { force: true });
+          sendResponse({ ok: !!r?.ok, host, message: summarizeSync(r) });
         });
       });
     });
