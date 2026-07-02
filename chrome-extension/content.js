@@ -233,6 +233,110 @@
     return out;
   }
 
+  // ── LMS file enumeration (runs HERE, in the isolated content script) ───────
+  // Same-origin authenticated fetch: the page's first-party session cookie is
+  // sent, so we need NO MAIN-world injection (blocked by strict LMS CSP, e.g.
+  // Instructure/Canvas) and hit NO cross-site SameSite problem. Canvas needs no
+  // token (cookie only); D2L's XSRF token is in localStorage and Moodle's sesskey
+  // is in the DOM — both readable from the isolated world.
+  async function enumerateLmsFiles() {
+    const origin = location.origin;
+    const CAP = 3000;
+    const getJSON = async (url, opts = {}) => {
+      const r = await fetch(url, { credentials: "same-origin", headers: { Accept: "application/json", ...(opts.headers || {}) }, method: opts.method || "GET", body: opts.body });
+      if (!r.ok) throw new Error(url + " -> " + r.status);
+      return { r, data: await r.json() };
+    };
+    const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+
+    // CANVAS — detect by DOM (window.ENV is invisible here), enumerate via /api/v1.
+    if (document.querySelector("body.ic-app, #application.ic-app, #wrapper.ic-Layout-wrapper")) {
+      try {
+        const pageAll = async (path) => {
+          let url = origin + "/api/v1" + path + (path.includes("?") ? "&" : "?") + "per_page=100";
+          const out = [];
+          for (let i = 0; i < 40 && url; i++) {
+            const { r, data } = await getJSON(url);
+            if (Array.isArray(data)) out.push(...data); else break;
+            const m = (r.headers.get("Link") || "").match(/<([^>]+)>;\s*rel="next"/);
+            url = m ? m[1] : null;
+          }
+          return out;
+        };
+        let courses = await pageAll("/courses?enrollment_state=active&enrollment_type=student");
+        if (!courses.length) courses = await pageAll("/courses");
+        courses = courses.filter((c) => c.id && c.name && !c.access_restricted_by_date);
+        const files = [];
+        await Promise.all(courses.map(async (c) => {
+          try { for (const f of await pageAll(`/courses/${c.id}/files`)) { if (f.url) files.push({ url: f.url, filename: f.display_name || f.filename || ("file_" + f.id), courseId: String(c.id) }); } } catch { /* files tab off */ }
+        }));
+        return { lms: "canvas", files: files.slice(0, CAP), courses: courses.length };
+      } catch (e) { return { lms: "canvas", error: true, files: [], detail: String((e && e.message) || e) }; }
+    }
+
+    // D2L — XSRF token from localStorage; enumerate TOC → DirectFileTopicDownload.
+    const xsrf = lsGet("XSRF.Token") || "";
+    if (location.pathname.startsWith("/d2l/") || document.querySelector("d2l-navigation, #d2l_body") || (xsrf && /(^|\.)(brightspace|desire2learn)\.com$/i.test(location.hostname))) {
+      try {
+        const dget = async (p) => (await getJSON(origin + p, { headers: { "X-Csrf-Token": xsrf } })).data;
+        let lpV = "1.30", leV = "1.50";
+        try { const vers = await dget("/d2l/api/versions/"); const pick = (c) => (vers.find((v) => v.ProductCode === c) || {}).LatestVersion; lpV = pick("lp") || lpV; leV = pick("le") || leV; } catch { /* defaults */ }
+        const courses = [];
+        let bm = "";
+        for (let i = 0; i < 25; i++) {
+          const ps = await dget(`/d2l/api/lp/${lpV}/enrollments/myenrollments/?orgUnitTypeId=3&isActive=true${bm ? `&bookmark=${encodeURIComponent(bm)}` : ""}`);
+          for (const it of (ps.Items || [])) { const o = it.OrgUnit || {}; if (o.Id) courses.push(String(o.Id)); }
+          if (ps.PagingInfo && ps.PagingInfo.HasMoreItems) bm = ps.PagingInfo.Bookmark; else break;
+        }
+        const files = [];
+        await Promise.all(courses.map(async (ou) => {
+          try {
+            const toc = await dget(`/d2l/api/le/${leV}/${ou}/content/toc`);
+            const walk = (mod) => { for (const t of (mod.Topics || [])) { if (t.TypeIdentifier === "File" && t.TopicId) files.push({ url: `${origin}/d2l/le/content/${ou}/topics/files/download/${t.TopicId}/DirectFileTopicDownload`, filename: t.Title || ("topic_" + t.TopicId), courseId: String(ou) }); } for (const s of (mod.Modules || [])) walk(s); };
+            for (const m of ((toc && toc.Modules) || [])) walk(m);
+          } catch { /* skip course */ }
+        }));
+        return { lms: "d2l", files: files.slice(0, CAP), courses: courses.length };
+      } catch (e) { return { lms: "d2l", error: true, files: [], detail: String((e && e.message) || e) }; }
+    }
+
+    // MOODLE — sesskey scraped from the DOM (logout link / hidden input).
+    let sesskey = "";
+    try {
+      const a = document.querySelector('a[href*="sesskey="]');
+      if (a) { try { sesskey = new URL(a.href).searchParams.get("sesskey") || ""; } catch {} }
+      if (!sesskey) { const inp = document.querySelector('input[name="sesskey"]'); if (inp) sesskey = inp.value || ""; }
+    } catch { /* DOM not ready */ }
+    if (sesskey && (document.querySelector("body[class*='moodle'], #page-mymoodle, meta[name='generator'][content*='Moodle']") || /\/(course|mod)\//.test(location.pathname))) {
+      try {
+        const call = async (methodname, args) => {
+          const { data } = await getJSON(`${origin}/lib/ajax/service.php?sesskey=${encodeURIComponent(sesskey)}&info=${methodname}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify([{ index: 0, methodname, args }]) });
+          if (Array.isArray(data) && data[0] && !data[0].error) return data[0].data;
+          throw new Error("moodle " + methodname);
+        };
+        const cres = await call("core_course_get_enrolled_courses_by_timeline_classification", { classification: "all", limit: 0, offset: 0, sort: "fullname" });
+        const mc = (cres && cres.courses) || [];
+        const files = [];
+        await Promise.all(mc.map(async (c) => {
+          try { const secs = await call("core_course_get_contents", { courseid: Number(c.id) }); for (const sec of (secs || [])) for (const mod of (sec.modules || [])) for (const ct of (mod.contents || [])) { if (ct.type === "file" && ct.fileurl) files.push({ url: ct.fileurl, filename: ct.filename || mod.name || "file", courseId: String(c.id) }); } } catch { /* skip */ }
+        }));
+        return { lms: "moodle", files: files.slice(0, CAP), courses: mc.length };
+      } catch (e) { return { lms: "moodle", error: true, files: [], detail: String((e && e.message) || e) }; }
+    }
+
+    return { lms: null, files: [] };
+  }
+
+  // Background asks the top frame to enumerate (it has same-origin fetch + tokens).
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg?.type !== "ENUMERATE_LMS") return;   // ignore other messages
+    if (window !== window.top) { sendResponse({ lms: null, files: [] }); return; }   // top frame only
+    enumerateLmsFiles()
+      .then((r) => sendResponse(r || { lms: null, files: [] }))
+      .catch((e) => sendResponse({ lms: null, files: [], error: true, detail: String((e && e.message) || e) }));
+    return true;   // async response
+  });
+
   // Per-site consent: heuristics alone must never grant a random website the power
   // to silently push documents into the student's knowledge base (RAG poisoning).
   // First qualifying visit → one small prompt; the answer is remembered per host.

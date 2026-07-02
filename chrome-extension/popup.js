@@ -281,18 +281,13 @@ $("login-password") ?.addEventListener("keydown", e => { if (e.key === "Enter") 
 $("signup-password")?.addEventListener("keydown", e => { if (e.key === "Enter") submit("signup"); });
 
 $("btn-sync-now")?.addEventListener("click", () => {
-  const btn = $("btn-sync-now");
-  const orig = btn.textContent;
-  btn.disabled = true; btn.textContent = "Starting sync…";
+  const btn = $("btn-sync-now"), orig = btn.textContent, msg = $("sync-msg");
+  btn.disabled = true; btn.textContent = "Syncing…"; if (msg) msg.textContent = "Reading your courses…";
   chrome.runtime.sendMessage({ type: "FORCE_SYNC" }, (res) => {
-    btn.disabled = false;
-    if (chrome.runtime.lastError || !res?.ok) {
-      btn.textContent = res?.error ? res.error.slice(0, 40) : "Open your LMS tab first";
-      setTimeout(() => { btn.textContent = orig; }, 4000);
-      return;
-    }
-    // Success: the live card takes over ("Syncing all your courses…") via storage.onChanged.
-    btn.textContent = orig;
+    btn.disabled = false; btn.textContent = orig;
+    // Always show a concrete outcome — never leave the user staring at a static screen.
+    if (msg) msg.textContent = chrome.runtime.lastError ? "Extension restarted — click Sync again."
+                             : (res?.message || "Done.");
   });
 });
 
