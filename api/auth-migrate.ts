@@ -30,7 +30,7 @@ const sha256 = (str) => createHash("sha256").update(str, "utf8").digest("hex");
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
@@ -150,5 +150,41 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
-  return res.status(400).json({ error: "Unknown action. Use ?action=signup, ?action=migrate, or ?action=reset" });
+  // ── adopt (merge a stale/guest uid into the caller's canonical profile) ────
+  // POST /api/auth-migrate?action=adopt   Authorization: Bearer <supabase access token>
+  // body { oldId }. The canonical id derives from the verified JWT (auth_id → users.id),
+  // NEVER from the body — so a client can only re-key data onto its OWN profile, and only
+  // from an id that is unowned or already linked to the same auth account.
+  if (action === "adopt") {
+    const jwt = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+    if (!jwt) return res.status(401).json({ error: "Authorization required" });
+    const { data: userData, error: jwtErr } = await supabase.auth.getUser(jwt);
+    const authUser = userData?.user;
+    if (jwtErr || !authUser) return res.status(401).json({ error: "Invalid session" });
+
+    const { data: canonical } = await supabase
+      .from("users").select("id").eq("auth_id", authUser.id).maybeSingle();
+    if (!canonical) return res.status(404).json({ error: "No profile for this account" });
+
+    const oldId = String(req.body?.oldId ?? "").trim();
+    if (!oldId || oldId === canonical.id)
+      return res.status(200).json({ userId: canonical.id, merged: false });
+
+    // Never merge a profile owned by a DIFFERENT auth account (shared computer).
+    const { data: oldRow } = await supabase
+      .from("users").select("id, auth_id").eq("id", oldId).maybeSingle();
+    if (oldRow?.auth_id && oldRow.auth_id !== authUser.id)
+      return res.status(200).json({ userId: canonical.id, merged: false, refused: true });
+
+    // Proceed even when oldRow is null — non-FK tables (rag_*, room_messages,
+    // whiteboard_strokes) can hold rows for a guest uid that has no users row.
+    const { error: mergeErr } = await supabase.rpc("merge_user_ids", { p_old: oldId, p_new: canonical.id });
+    if (mergeErr) {
+      console.error("[auth-migrate/adopt] merge failed:", mergeErr.message);
+      return res.status(500).json({ error: "Could not merge accounts. Please try again." });
+    }
+    return res.status(200).json({ userId: canonical.id, merged: true });
+  }
+
+  return res.status(400).json({ error: "Unknown action. Use ?action=signup, ?action=migrate, ?action=reset, or ?action=adopt" });
 }

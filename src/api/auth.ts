@@ -66,3 +66,21 @@ export async function signUp({ name, email, password }: { name: string; email: s
 export async function signOut(): Promise<void> {
   try { await supabase.auth.signOut(); } catch { /* clear local state regardless */ }
 }
+
+/** Merge data written under a stale/guest uid into the canonical profile (server-side).
+ *  Never throws. Returns true when the old id was merged (or there was nothing to merge)
+ *  and is therefore safe to discard. On failure it records the uid so boot can retry. */
+export async function adoptIdentity(oldId: string): Promise<boolean> {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session || !oldId) return false;
+  try {
+    const r = await fetch('/api/auth-migrate?action=adopt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
+      body: JSON.stringify({ oldId }),
+    });
+    if (r.ok) { localStorage.removeItem('fschool_merge_pending'); return true; }
+  } catch { /* network — retry at next boot */ }
+  localStorage.setItem('fschool_merge_pending', oldId);
+  return false;
+}

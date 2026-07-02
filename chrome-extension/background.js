@@ -203,14 +203,9 @@ async function importFile({ url, filename, pageUrl, courseId, bytes, mimeType, p
 
 // ── Message handlers ───────────────────────────────────────────────────────
 
-// External sign-in handshake from the FschoolAI web app (externally_connectable).
-chrome.runtime.onMessageExternal.addListener((msg, sender, sendResponse) => {
-  if (msg.type === "SIGN_IN") {
-    const { userId, token, expiresAt } = msg.payload;
-    setAuth(userId, token, expiresAt).then(() => sendResponse({ ok: true }));
-    return true;
-  }
-});
+// (Removed) external SIGN_IN handshake: web pages could overwrite the extension's
+// canonical userId with a stale fschool_uid. The popup's own GoTrue login (popup.js)
+// is the only way a session enters this extension now.
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "IMPORT_FILE") {

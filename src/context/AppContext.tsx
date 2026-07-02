@@ -5,6 +5,7 @@ import { createContext, useContext, useState, useEffect, useCallback } from "rea
 import { supabase }                  from "../api/supabase";
 import { syncCanvasData, loadCanvasData } from "../api/canvasSync";
 import { getTokenSummary, onTokenAwarded } from "../api/tokens";
+import { currentProfile, adoptIdentity }   from "../api/auth";
 
 const AppContext = createContext(null);
 
@@ -158,6 +159,28 @@ export function AppProvider({ children }) {
     if (result.flashcardMap)             setFlashcardMap(result.flashcardMap);
     if (result.pastCourses?.length)      setPastCourses(result.pastCourses);
   }
+
+  // Identity reconciliation: if a GoTrue session exists, the auth-linked profile id is
+  // canonical. If localStorage.fschool_uid drifted, merge the old id's data server-side
+  // FIRST, then adopt the canonical id. When there is no session, never touch identity
+  // (offline / legacy logged-in users stay in).
+  useEffect(() => {
+    (async () => {
+      try {
+        const profile = await currentProfile();
+        if (!profile?.id) return;                      // no session → keep current id, stay logged in
+        const pending = localStorage.getItem("fschool_merge_pending");
+        if (pending && pending !== profile.id) await adoptIdentity(pending);
+        if (profile.id === userId) return;             // already canonical
+        const ok = await adoptIdentity(userId);
+        if (!ok) return;                               // merge failed → keep old id, retry next boot
+        localStorage.setItem("fschool_uid", profile.id);
+        localStorage.setItem("fschool_logged_in", "1");
+        setUserId(profile.id);                         // every [userId]-dep effect reloads under the new id
+      } catch { /* keep current identity on any failure */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load user + cached Canvas data from Supabase on mount
   useEffect(() => {
