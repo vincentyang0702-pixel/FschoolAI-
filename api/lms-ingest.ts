@@ -52,7 +52,15 @@ function sb() {
   return _sb;
 }
 
-function selfBaseUrl(): string {
+// Base URL for the internal /api/extract call. MUST be a PUBLIC host: the
+// deployment-specific VERCEL_URL is behind Vercel Deployment Protection and
+// returns an HTML auth page (so `extractRes.json()` throws "Unexpected token
+// '<' …"). Prefer the caller-supplied host (derived from the incoming request's
+// public domain, e.g. fschoolai.com) or PUBLIC_BASE_URL; only fall back to
+// VERCEL_URL as a last resort.
+function selfBaseUrl(explicit?: string | null): string {
+  if (explicit) return explicit.replace(/\/+$/, "");
+  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/+$/, "");
   if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
   return "http://localhost:5173";
 }
@@ -133,8 +141,9 @@ function sanitize(raw: string): string {
 }
 
 // ── Core (exported — server-side callers import this directly, no HTTP hop) ──
-export async function ingestLmsFile({ userId, courseId = null, file }: {
+export async function ingestLmsFile({ userId, courseId = null, file, baseUrl = null }: {
   userId: string; courseId?: string | null;
+  baseUrl?: string | null;   // public origin for the internal /api/extract call
   file: {
     name: string; mimeType: string; sourceUrl: string; provider: string;
     bytes?: Buffer | string | null; storagePath?: string | null; bucket?: string | null;
@@ -188,7 +197,7 @@ export async function ingestLmsFile({ userId, courseId = null, file }: {
   const extractBody: any = storagePath
     ? { storagePath, bucket, keepFile: true, file_type: fileType, name: file.name }
     : { base64: buf!.toString("base64"), file_type: fileType, name: file.name };
-  const extractRes = await fetch(`${selfBaseUrl()}/api/extract`, {
+  const extractRes = await fetch(`${selfBaseUrl(baseUrl)}/api/extract`, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify(extractBody),
@@ -197,6 +206,15 @@ export async function ingestLmsFile({ userId, courseId = null, file }: {
     const detail = await extractRes.text().catch(() => "");
     console.error("[lms-ingest] extract failed", extractRes.status, detail.slice(0, 200));
     return { status: 502, json: { error: `extract failed (${extractRes.status})` } };
+  }
+  // Defensive: if extract ever returns HTML (e.g. a deployment-protection auth
+  // page from a protected base URL), surface a clear error instead of throwing a
+  // raw "Unexpected token '<' …" JSON-parse error to the caller.
+  const extractCt = extractRes.headers.get("content-type") || "";
+  if (!extractCt.includes("application/json")) {
+    const snippet = (await extractRes.text().catch(() => "")).slice(0, 120).replace(/\s+/g, " ");
+    console.error("[lms-ingest] extract returned non-JSON", extractRes.status, extractCt, snippet);
+    return { status: 502, json: { error: `extract returned non-JSON (protected host?) — ${snippet}` } };
   }
   const { text: rawText } = await extractRes.json();
 
@@ -323,7 +341,13 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const result = await ingestLmsFile({ userId, courseId, file });
+    // Derive the PUBLIC origin this request came in on (e.g. https://fschoolai.com)
+    // so the internal /api/extract call hits the unprotected custom domain, not
+    // the deployment-protected VERCEL_URL.
+    const host  = req.headers["x-forwarded-host"] || req.headers.host;
+    const proto = req.headers["x-forwarded-proto"] || "https";
+    const baseUrl = host ? `${proto}://${host}` : null;
+    const result = await ingestLmsFile({ userId, courseId, file, baseUrl });
     return res.status(result.status).json(result.json);
   } catch (e: any) {
     console.error("[lms-ingest] error:", e.message);
