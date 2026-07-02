@@ -138,7 +138,7 @@ begin
   --    the canonical (p_new) row wins and the old duplicate is dropped.
   ------------------------------------------------------------------------
   for t in
-    select c.table_name
+    select c.table_name, c.data_type
     from information_schema.columns c
     join information_schema.tables tb
       on tb.table_schema = c.table_schema and tb.table_name = c.table_name
@@ -147,24 +147,36 @@ begin
       and tb.table_type  = 'BASE TABLE'
       and c.table_name  <> 'users'
   loop
-    -- Fast path: one bulk UPDATE per table. Tables without a user_id-scoped unique
-    -- constraint (rag_chunks and friends — the big ones) finish in a single statement,
-    -- keeping heavy accounts inside the function/HTTP timeout.
+    -- Some live tables type user_id as uuid instead of text (preflight 2026-07-02:
+    -- sessions, content_connections, calendar_connections, weekly_plans). Cast the
+    -- text params for those; `uuid = text` has no operator and would abort the merge.
+    declare cast_sfx text := case when t.data_type = 'uuid' then '::uuid' else '' end;
     begin
-      execute format('update public.%I set user_id = $1 where user_id = $2', t.table_name)
-        using p_new, p_old;
-    exception when unique_violation then
-      -- Collisions exist (user_oauth, canvas_data, files, ...): the failed bulk update
-      -- rolled back to its savepoint; redo row-by-row, canonical row wins.
-      for r in execute format('select ctid from public.%I where user_id = $1', t.table_name) using p_old
-      loop
-        begin
-          execute format('update public.%I set user_id = $1 where ctid = $2', t.table_name)
-            using p_new, r.ctid;
-        exception when unique_violation then
-          execute format('delete from public.%I where ctid = $1', t.table_name) using r.ctid;
-        end;
-      end loop;
+      -- Fast path: one bulk UPDATE per table. Tables without a user_id-scoped unique
+      -- constraint (rag_chunks and friends — the big ones) finish in a single statement,
+      -- keeping heavy accounts inside the function/HTTP timeout.
+      begin
+        execute format('update public.%I set user_id = $1%s where user_id = $2%s',
+                       t.table_name, cast_sfx, cast_sfx)
+          using p_new, p_old;
+      exception
+        when unique_violation then
+          -- Collisions exist (user_oauth, canvas_data, files, ...): the failed bulk update
+          -- rolled back to its savepoint; redo row-by-row, canonical row wins.
+          for r in execute format('select ctid from public.%I where user_id = $1%s', t.table_name, cast_sfx) using p_old
+          loop
+            begin
+              execute format('update public.%I set user_id = $1%s where ctid = $2',
+                             t.table_name, cast_sfx)
+                using p_new, r.ctid;
+            exception when unique_violation then
+              execute format('delete from public.%I where ctid = $1', t.table_name) using r.ctid;
+            end;
+          end loop;
+        when invalid_text_representation then
+          -- p_old isn't uuid-shaped (odd legacy id): a uuid column cannot contain it → skip table
+          null;
+      end;
     end;
   end loop;
 
