@@ -115,6 +115,13 @@ function getAuth() {
   return new Promise(resolve => chrome.runtime.sendMessage({ type: "GET_AUTH_STATUS" }, resolve));
 }
 
+// Stamp the running version so it's obvious whether a reload actually took effect.
+try {
+  const v = chrome.runtime.getManifest?.().version;
+  const hs = $("header-sub");
+  if (hs && v) hs.textContent = `LMS File Importer · v${v}`;
+} catch {}
+
 async function init() {
   const auth = await getAuth();
   signedIn = !!auth?.signedIn;
