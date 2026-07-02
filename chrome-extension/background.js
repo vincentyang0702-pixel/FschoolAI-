@@ -339,6 +339,32 @@ async function fetchFileBytes(url) {
   return bytesFromResponse(res);
 }
 
+// Diagnostic: fetch a URL the exact same way the download does, but report the
+// RAW result (status, where it redirected to, content-type, a body snippet)
+// instead of a cleaned-up error. This is how we see what the LMS actually returns
+// to the service worker, rather than guessing from a summarized message.
+async function diagnoseFetch(url) {
+  try {
+    const res = await fetch(url, { credentials: "include", redirect: "follow" });
+    let snippet = "";
+    try { snippet = (await res.clone().text()).slice(0, 180).replace(/\s+/g, " ").trim(); } catch {}
+    const diag = {
+      status: res.status,
+      ok: res.ok,
+      redirected: res.redirected,
+      finalUrl: res.url,
+      ctype: (res.headers.get("content-type") || "").split(";")[0].trim(),
+      snippet,
+    };
+    console.log("[FschoolAI] diagnose", url, "→", diag);
+    return diag;
+  } catch (e) {
+    const diag = { error: String((e && e.message) || e) };
+    console.log("[FschoolAI] diagnose", url, "→ threw", diag.error);
+    return diag;
+  }
+}
+
 // ── Viewer-link resolver ─────────────────────────────────────────────────────
 // Some LMS links need more than a straight fetch (see viewerRuleFor in content.js):
 //   canvas-module-item — /courses/{c}/modules/items/{i} 302s to the item; only
@@ -873,7 +899,18 @@ function summarizeSync(r) {
       if (r.total === 0)                        return `${r.lms}: no files found in your courses.`;
       if (r.imported > 0)                       return `Importing ${r.imported} file(s)${r.failed ? `, ${r.failed} failed` : ""}…`;
       if (r.skipped > 0 && r.failed === 0)      return `Up to date (${r.skipped} already imported).`;
-      return `${r.total} file(s) found but all failed${r.lastError ? ` — ${String(r.lastError).slice(0, 80)}` : ""}.`;
+      // All failed → show the RAW response of a sample file so the real cause is visible.
+      {
+        let m = `${r.total} found, all failed.`;
+        if (r.diag) {
+          m += r.diag.error
+            ? ` [fetch threw: ${r.diag.error}]`
+            : ` [HTTP ${r.diag.status}${r.diag.redirected ? ` →redirected` : ""}, ${r.diag.ctype || "?"}; ${r.diag.finalUrl || ""}; body: ${r.diag.snippet || ""}]`;
+        } else if (r.lastError) {
+          m += ` ${String(r.lastError).slice(0, 80)}`;
+        }
+        return m;
+      }
     default: return "Sync started.";
   }
 }
@@ -953,7 +990,12 @@ async function runFullSync(tabId, host, { force = false } = {}) {
     // un-throttled and a refresh retries. Per-file 3-strike backoff still bounds it.
     if (files.length === 0 || imported > 0 || skipped > 0) await markSynced(host);
     console.log(`[FschoolAI] full-sync ${res.lms} on ${host}: ${files.length} files → ${imported} imported, ${skipped} skipped, ${failed} failed, ${blocked} blocked${lastError ? ` (last error: ${lastError})` : ""}`);
-    return { ok: true, reason: "done", lms: res.lms, total: files.length, imported, skipped, failed, blocked, lastError };
+    // Total failure → capture the RAW response of the first file so we can see
+    // exactly what the LMS returns (status/redirect/content-type/body), instead
+    // of guessing from the summarized per-file error.
+    let diag = null;
+    if (imported === 0 && files.length) { try { diag = await diagnoseFetch(files[0].url); } catch {} }
+    return { ok: true, reason: "done", lms: res.lms, total: files.length, imported, skipped, failed, blocked, lastError, diag, sampleUrl: files[0] && files[0].url };
   } finally {
     fullSyncHosts.delete(host);
     // Only touch the live flag if we actually started work — gate-bail
@@ -1062,6 +1104,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const keys = Object.keys(autoSites);
         if (keys.length > 200) delete autoSites[keys[0]];
         chrome.storage.local.set({ autoSites }, async () => {
+          // Clear the activity feed so the user sees ONLY this run's results,
+          // not stale entries from earlier extension versions.
+          recentActivity.length = 0; writeLiveState();
           const r = await runFullSync(tab.id, host, { force: true });
           sendResponse({ ok: !!r?.ok, host, message: summarizeSync(r) });
         });
