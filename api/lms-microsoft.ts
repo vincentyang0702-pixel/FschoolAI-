@@ -37,7 +37,7 @@ function redirectUri(req: any): string {
 }
 const tenantId     = () => process.env.MICROSOFT_TENANT_ID ?? "common";
 
-const SCOPES = "Files.Read.All EduAssignments.ReadBasic offline_access";
+const SCOPES = "Files.Read.All EduRoster.ReadBasic EduAssignments.ReadBasic offline_access"; // EduRoster.ReadBasic is REQUIRED for /education/me/classes
 
 const TOKEN_URL = () =>
   `https://login.microsoftonline.com/${tenantId()}/oauth2/v2.0/token`;
@@ -200,7 +200,7 @@ export default async function handler(req: any, res: any) {
 
         // Assignment file resources
         const asgRes = await fetch(
-          `https://graph.microsoft.com/v1.0/education/classes/${cls.id}/assignments?$select=id,displayName,resources`,
+          `https://graph.microsoft.com/v1.0/education/classes/${cls.id}/assignments?$select=id,displayName&$expand=resources`,
           { headers },
         ).catch(() => null);
 
@@ -364,7 +364,7 @@ export default async function handler(req: any, res: any) {
 
       // 2. Assignments (with due dates) + their attached files.
       const asgRes = await fetch(
-        `https://graph.microsoft.com/v1.0/education/classes/${cls.id}/assignments?$select=id,displayName,instructions,dueDateTime,grading,resources&$top=50`,
+        `https://graph.microsoft.com/v1.0/education/classes/${cls.id}/assignments?$select=id,displayName,instructions,dueDateTime,grading&$expand=resources&$top=50`,
         { headers },
       ).catch(() => null);
 
@@ -386,9 +386,14 @@ export default async function handler(req: any, res: any) {
           } catch (e: any) { summary.errors.push(`assignment ${asg.displayName}: ${e.message}`); }
 
           for (const r of (asg.resources ?? [])) {
-            const rsrc = r.resource ?? r;
-            const fileUrl = rsrc?.fileResource?.fileUrl ?? rsrc?.file?.odataid ?? null;
-            const link    = rsrc?.linkResource?.link ?? rsrc?.link ?? null;
+            // Shape (per Graph docs): wrapper { id, resource } where resource IS the
+            // concrete subclass — fileUrl sits directly on it; links are identified by
+            // @odata.type *LinkResource. TODO(no-MS-keys-yet): also descend class-drive
+            // channel folders (root children are mostly folders) once testable.
+            const rsrc    = r.resource ?? r;
+            const otype   = String(rsrc?.["@odata.type"] ?? "");
+            const fileUrl = typeof rsrc?.fileUrl === "string" ? rsrc.fileUrl : null;
+            const link    = /linkResource/i.test(otype) ? (rsrc?.link ?? null) : null;
             if (fileUrl) {
               summary.filesFound++;
               const resolved = await resolveFileResource(fileUrl);
