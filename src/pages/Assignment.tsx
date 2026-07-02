@@ -10,6 +10,7 @@ import { Target, Check, ChevronUp, ChevronDown } from "lucide-react";
 import { buildStudentContext } from "../data/mockData";
 import { useApp }        from "../context/AppContext";
 import { awardTokens }   from "../api/tokens";
+import OfficeHoursPanel  from "../components/OfficeHoursPanel";
 
 // ── Monitor agent — fires once per assignment, returns targeted nudge ─────────
 function useMonitorAgent(assignment, userData, userId) {
@@ -292,6 +293,11 @@ export default function Assignment() {
           {selectedTitle}
         </h1>
         <p style={{ color: "var(--text-secondary)", fontSize: "13px", marginBottom: "16px" }}>{selectedCourse}</p>
+
+        {/* Office Hours Prep — gated on having a courseId to scope the question generation to */}
+        {selected.courseId && (
+          <OfficeHoursPanel userId={userId} courseId={selected.courseId} courseName={selectedCourse} />
+        )}
 
         {/* Monitor agent nudge banner */}
         {hasNudge && (
