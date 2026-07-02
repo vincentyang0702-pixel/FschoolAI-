@@ -475,8 +475,8 @@ function writeLiveState(flush = false) {
   }, 120);
 }
 
-function pushActivity(name, status) {
-  recentActivity.unshift({ name: name || "file", status, t: Date.now() });
+function pushActivity(name, status, error) {
+  recentActivity.unshift({ name: name || "file", status, error: error || null, t: Date.now() });
   if (recentActivity.length > RECENT_MAX) recentActivity.length = RECENT_MAX;
   writeLiveState();
 }
@@ -536,7 +536,7 @@ async function importFileInner(payload) {
   }
   activeFile = null;
   if (result?.ok && !result.skipped) sessionImported++;
-  pushActivity(displayName, result?.ok ? (result.skipped ? "skipped" : "done") : "failed");
+  pushActivity(displayName, result?.ok ? (result.skipped ? "skipped" : "done") : "failed", result?.ok ? null : result?.error);
   return result;
 }
 
@@ -798,29 +798,33 @@ async function runFullSync(tabId, host, { force = false } = {}) {
     syncErrorAt.delete(host);
 
     const files = Array.isArray(res.files) ? res.files : [];
-    let imported = 0, blocked = 0;
+    let imported = 0, skipped = 0, failed = 0, blocked = 0;
     await runPool(files, 6, async (f) => {
       if (!f || !f.url) return;
       // isPrivateTarget blocks internal hosts; isAllowedSyncFileUrl blocks
       // MAIN-world-supplied third-party URLs (credentialed-fetch SSRF / RAG poison).
       if (isPrivateTarget(f.url) || !isAllowedSyncFileUrl(f.url, host)) { blocked++; return; }
       const key = canonicalizeUrl(f.url);
-      if ((await getCaptured()).includes(key) || inFlight.has(key)) return;   // dedup vs history + concurrent captures
-      if (await isBlockedByFailures(key)) return;                             // respect the 3-strike backoff
+      if ((await getCaptured()).includes(key) || inFlight.has(key)) { skipped++; return; }  // dedup vs history + concurrent captures
+      if (await isBlockedByFailures(key)) { skipped++; return; }                            // respect the 3-strike backoff
       inFlight.add(key);
       try {
         const r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
-        if (r?.ok) { if (!r.skipped) imported++; }
-        else if (!r?.transient) await recordFailure(key);   // permanent-only strike (login walls/network are transient)
+        if (r?.ok) { if (r.skipped) skipped++; else imported++; }
+        else { failed++; if (!r?.transient) await recordFailure(key); }   // permanent-only strike (login walls/network are transient)
       } finally {
         inFlight.delete(key);
       }
     });
     if (blocked > 0) console.warn(`[FschoolAI] full-sync skipped ${blocked} off-domain file URL(s) on ${host}`);
     if (imported > 0) bumpStat("autoImported", imported);
-    // Mark AFTER a completed run: if the SW is killed mid-sync, the next visit
-    // resumes (dedup makes already-imported files cheap skips).
-    await markSynced(host);
+    // Throttle only when something actually worked (or there was nothing to do).
+    // A non-empty enumeration that imported/skipped NOTHING (every file failed)
+    // smells transient — ingest endpoint down, expired session — so leave the host
+    // un-throttled and a refresh retries. The per-file 3-strike/7-day backoff still
+    // prevents infinite hammering of genuinely-bad files.
+    if (files.length === 0 || imported > 0 || skipped > 0) await markSynced(host);
+    else console.warn(`[FschoolAI] full-sync on ${host}: all ${failed} file(s) failed, 0 imported — not throttling; refresh to retry (check errors in the popup).`);
   } finally {
     fullSyncHosts.delete(host);
     // Only touch the live flag if we actually started work — gate-bail
@@ -898,6 +902,42 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await new Promise(r => chrome.storage.local.set({ settings }, r));
       return { ok: true, settings };
     })().then(sendResponse);
+    return true;
+  }
+
+  // Content script on a supported LMS asks us to sync this tab's whole library
+  // (e.g. it's already consented but no tab-load fired, or the user just signed
+  // in). Host is taken from the trusted sender tab; runFullSync re-checks consent
+  // + throttle, so this is safe and idempotent.
+  if (msg.type === "FULL_SYNC_NUDGE") {
+    const tabId = sender.tab?.id;
+    let host = "";
+    try { host = new URL(sender.tab?.url || "").hostname; } catch { /* no tab url */ }
+    if (tabId && host) runFullSync(tabId, host);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  // Manual "Sync my courses now" from the popup. Clicking it in the extension UI
+  // IS explicit consent for the active tab's host, so we set consent on and force
+  // past the 6h throttle. Gives the user a reliable retry when a sync failed.
+  if (msg.type === "FORCE_SYNC") {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      let host = "";
+      try { host = new URL(tab?.url || "").hostname; } catch { /* no url */ }
+      if (!tab?.id || !host) { sendResponse({ ok: false, error: "Open your LMS in this tab, then click Sync." }); return; }
+      chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) => {
+        autoSites[host] = "on";
+        consentedHosts.add(host);
+        const keys = Object.keys(autoSites);
+        if (keys.length > 200) delete autoSites[keys[0]];
+        chrome.storage.local.set({ autoSites }, () => {
+          runFullSync(tab.id, host, { force: true });
+          sendResponse({ ok: true, host });
+        });
+      });
+    });
     return true;
   }
 
