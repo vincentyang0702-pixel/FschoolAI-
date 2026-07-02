@@ -10,6 +10,8 @@
 
 > **v1.7 addition:** §18.1 now states the **topology and division of responsibility** (per engineering direction) — `neuro-agi ↔ fschool (main agent) ↔ subagents`: internal scenarios stay closed-loop inside FschoolAI, and NeuroAGI's role is narrowed to exactly three jobs (route intent, augment context, facilitate bidirectional interaction). Reinforced at Agent 1 (Reggie = the main-agent node) and in the §18.4 mapping.
 
+> **v2.1 — onboarding redesign (§5.1):** replaces the 5-step onboarding with a researched low-friction / high-data flow (benchmarked against Duolingo, Noom, Headspace, Photomath, ELSA, Calm, Speak, Khan Academy, Quizlet, Linear). Core strategy: the LMS connection is the questionnaire and the tutor is the form — day 1 asks exactly eight taps (hook + five scenario questions asked *during* the real sync wait + two confirmations); everything else is inferred passively or asked by the tutor contextually over week 1 (progressive profiling). Declared data seeds the model, behavior overrides it. Includes the exact question copy, the never-ask/infer list, and binding anti-patterns (no question nothing consumes; no stacked asks; skips say "Later," never "discard").
+
 > **v2.0 — architecture-review merge (§19):** folds in the four documents produced after v1.9 (June 27–28). **NeuroAGI / CTO side:** `en-final-backend-technical-architecture.md` (the target *product-backend* architecture — LangGraph **Agent Server** + DeepAgents + FastAPI + A2A, an Application Control Plane over an Agent Execution Plane) and `readthis.md` (the **built** FschoolAI_v2 acceptance — Python / LangGraph / FastAPI / sqlite on `neuroagi-core` **v2**, all 17 scenarios end-to-end, 56/56 harness checks). **FschoolAI Step-1 side:** `fschoolai_step1_scenario_plan.md` (the 17-scenario catalog + C0–C4 latency model + edge taxonomy + eval-fixture contract) and `fschoolai_step1_tools_breakdown.md` (the capability / tool surface). §19 records **build status**, the **target backend architecture and its phasing** (doc1 = target; the built v2 = Phase 1), the **scenario catalog**, the **capability surface**, and this review's **resolved decisions**. The §18 brain contract is **unchanged and still governs**; §19 only refines §3.5.2 (arbiter), §7 (stack), §9 (latency), §12.3 (retrieval boundary), and §15 (contract) where noted.
 
 > **v1.8 — conflict resolutions:** each merged-brain conflict was decided in favour of the optimal approach and applied to the source text (not left as a side-note): **data model** → single `memory` log (§6); **Signal Arbiter** → `cortex.policy`, don't reinvent (§3.5.2); **proactive queues** → outbox memories + channel (§3.5.2/§6); **decay** → core day-one mechanism (§3.6 table); **knowledge graph** → derived layer gated on *data sufficiency*, not infrastructure (§3.6 retitled + reframed); **brain API** → canonical product contract is `/api/agent-manager`, canonical brain interface is the v2 primitives, granular `/api/brain/*` RPC deprecated as a public contract (§15.2); **person bridge** → brain uses a text `subject`, no FK into product tables (§12.4); **§18.4** Intervention/agent rows rewritten so NeuroAGI routes+arbitrates and FschoolAI runs the closed loop. The **Social / Leaderboard / Study-Rooms** scope contradiction (§11) is **resolved as in-scope** (they are already coded on `frontend/dev`); the deferral was removed, with the §14 cohort/leaderboard privacy review retained as the only gate.
@@ -882,24 +884,81 @@ The student picks one or more sources:
 
 ## 5. User Flows
 
-### 5.1 Onboarding Flow
+### 5.1 Onboarding Flow (v2.1 — low-friction / high-data redesign)
 
-The onboarding is the "identity card" session — a one-on-one setup with FschoolAI that builds the student's initial brain profile.
+> **v2.1 revision.** This section replaces the earlier 5-step flow with a researched design
+> (benchmarked against Duolingo, Noom, Headspace, Photomath, ELSA, Calm, Speak, Khan Academy,
+> Quizlet, Linear — their published experiment numbers are cited inline). The prior flow's
+> steps survive inside it: old Step 2 = S5, old Step 3 = S6, old Step 4 = S7, old Step 5 = S8.
 
-**Step 1 — Account creation**
-Student signs up with email or Google. A blank brain object is created with their student_id.
+**Strategy: the LMS connection is the questionnaire, and the tutor is the form.** One connect
+action hands us courses, grades, deadlines, assignment text, and files — data a questionnaire
+app needs 40 questions to approximate. Day 1 therefore asks **exactly eight taps and zero
+typing**: one emotional hook, five scenario questions (learning style + study window — the only
+agent-consumed data that cannot be synced or computed on day one), and two confirmations.
+Everything else is inferred passively or asked later by the tutor inside normal conversation.
+Governing rule (Speak/Spotify): **declared data seeds the model; behavior overrides it from
+session one.**
 
-**Step 2 — Connect your LMS**
-The student connects their LMS. Two mechanisms, generalized in §16.8. Installing the **browser extension** is the universal path: it works on any LMS (Canvas, D2L, Moodle, Blackboard, Schoology) and also captures content and attached files. **Canvas OAuth** (the §4 Canvas Agent) is the fast path that pulls structured courses, assignments, and grades instantly where Canvas is available. Either way the brain is populated with course context and upcoming deadlines. **No-LMS branch:** if the student connects nothing yet, onboarding still completes on the learning-style profile alone, and the daily brief degrades to a generic prompt until an LMS is connected (eval edge X2).
+#### The Day-1 flow (8 taps, zero typing)
 
-**Step 3 — Learning style assessment**
-Reggie asks 5 quick questions to determine the student's learning style. These are conversational, not a formal test. Example: "When you are trying to understand something new, do you prefer to see a diagram, hear an explanation, read about it, or try it yourself?"
+| # | Step | Mechanic (source) |
+|---|------|-------------------|
+| S0 | **Hook (pre-signup):** "What's school throwing at you right now?" — *Exam I'm not ready for / Behind on assignments / Grades need to come up / Just looking.* Answer shapes the next screen's copy and seeds the stress prior (never asked again — stress is computed thereafter, §3.5.5). | Calm's intent-capture first screen |
+| S1 | **Instant demo (anonymous):** "Drop anything — a homework question, a syllabus, a photo of a problem." Tutor answers/parses it in seconds. Course + topic + level inferred from the artifact. If skipped → a pre-populated sample course; no empty state ever renders. | Photomath tool-first; ELSA diagnostic-as-demo; Linear sample workspace |
+| S2 | **Echo-back:** "Looks like BIO 201 — cell metabolism. Track this course?" One confirmation chip. | Speak's echo-back |
+| S3 | **Soft signup wall** — after first value, before LMS connect: "Save your brain — it's already learning." OAuth one-tap + a visible **"Later"** link (never "discard"). Optional one-tap "How'd you hear about us?" | Duolingo: deferred signup **+20% DAU**; "Later" copy **+8.2% DAU**; Noom's "see my results" framing |
+| S4 | **Name confirm** — prefilled from OAuth; tap to accept. | — |
+| S5 | **Connect your classes** (= §16.8): extension install / Classroom OAuth primary; Canvas token demoted to a collapsed fallback (highest-friction screen in the old flow). School shown as a **confirmation chip** inferred from email domain / LMS host — never a search box. Skip lands in the sample workspace. | Khan Academy defer-rostering |
+| S6 | **Sync narration + interleaved assessment:** while the REAL ingestion runs (20–60s), a terminal-style screen prints true itemized lines ("found 4 courses… 12 assignments… reading your BIO 201 syllabus…") and Reggie asks the **5 questions below conversationally in the same view** — the wait pays for the quiz, so the assessment costs zero additional time. Each answer adds a node to a visible brain graphic and echoes one consequence line ("Got it — diagrams first"). | HBS labor illusion; Noom's mutating-artifact interstitials; Duolingo tap-only discipline |
+| S7 | **Mirror-back brain card (the payoff):** "Here's your brain so far: 4 courses · BIO 201 midterm in 9 days · learns best with diagrams · studies Tue/Thu evenings. Did I get anything wrong?" Every line is a tap-to-correct chip. Corrections are the highest-confidence declared data; the ask itself drives perceived-fit lift (**+7.6pp** even with identical output). Screenshot-able artifact → organic sharing. | ELSA score card; Headspace perceived-fit; Quizlet artifact-as-acquisition |
+| S8 | **First interaction that visibly uses everything:** "Your BIO 201 midterm is in 9 days and Week 3 (glycolysis) looks heaviest — want a diagram-first walkthrough or a 2-minute readiness check?" Every intake answer appears in this one message — the structural differentiator no generic AI tutor has (ChatGPT study mode has zero intake). First-session behavior stream begins (the first session IS the questionnaire — TikTok). | — |
+| S9 | **Notification permission — after the first completed session**, tied to the declared schedule: "Want me to remind you Tuesday at 7pm before the midterm?" Precommitment reminders: **+7.5% app opens** (Headspace). Discord upsell is REMOVED from onboarding entirely (Quizlet's stacked-asks cautionary tale). | Calm defer-permissions |
 
-**Step 4 — First brain summary**
-FschoolAI shows the student their initial brain: "Here is what I know about you so far. You are taking 4 courses. Your next deadline is in 2 days. I think you learn best visually. Is this right?"
+#### The five scenario questions (exact copy — asked during the S6 sync wait)
 
-**Step 5 — First interaction**
-Reggie asks: "What do you want to work on today?" The student is now in the product.
+Students cannot self-report "learning style" — every question is a concrete scenario whose
+tap-options map to modalities. Every question has an "honestly, not sure / a mix" escape hatch,
+and the skip itself is logged as a signal (Noom).
+
+1. "When a new topic just isn't clicking, what actually helps?" — *diagram / talk me through it / read at my own pace / try a problem / honestly, a mix* → learning_style modality (Tutor response-format table §3.3, Library matching, Lesson Generator).
+2. "It's 11pm and you're stuck on a problem. What's your move?" — *rewatch the lecture / get someone to explain / back through my notes / grind practice problems / close the laptop* → modality confirmation + help-seeking style; the last option is an honest avoidance signal.
+3. "How do you want me to explain things?" — *quick answer first / step-by-step from basics / why before how / worked example* → explanation depth/order from message one.
+4. "Exam in a week. What's your prep style?" — *mind-maps / explain out loud / rewrite notes / past papers on repeat / cram the night before — no judgment* → Planner session design + SRS format weighting.
+5. "When do you actually study? Be honest." — *weeknights / late night 10pm+ / mornings / weekends / whenever the deadline scares me* → Planner stated hours + reminder scheduling. Precommitment beat every preference question for retention (Headspace **+7.5%**). Options anchor to the synced class schedule.
+
+#### Never ask — infer instead
+
+Stress (computed: missing×3 + urgent deadlines×2 + stress signals×2), real study schedule
+(session timestamps override the declared window within a week), knowledge gaps (chat topics +
+grades + missed SRS cards), motivation type (learned from nudge-response history — never ask
+"what motivates you?"), momentum (message counts), school (email domain / LMS host → confirmation
+chip), course/level (inferred from whatever the student drops in S1), UI preference (observed),
+language (browser locale, confirm only on mismatch). Asking what the brain computes duplicates
+friction and produces worse data than behavior (Spotify: stated preferences lie).
+
+#### Progressive profiling (week 1 — the tutor is the form)
+
+Day 1 is capped at eight taps. Everything else arrives through the conversational surface —
+at most **one embedded question per session**, always contextually triggered, always visibly
+consumed in the tutor's next reply (a question whose answer changes nothing on screen gets cut
+— Duolingo's rule): session 2 → goal grade for the most urgent course (chips in chat);
+session 3 → exam dates the LMS lacks (only when the sync lacks them); after the first grade
+sync → "how are you feeling about that grade?" (calibrates stress; "don't want to talk about
+it" writes `what_not_to_mention`); after the first proactive nudge → "useful or annoying?"
+(trains the Motivation Engine per its spec); day 7 → **mirror-back v2**: "here's what I've
+learned about you this week — fix anything," reconciling declared answers against a week of
+behavior and re-running the perceived-fit effect. Cold-start gates per §3.5.5 apply throughout.
+
+#### Anti-patterns (bind on implementation)
+
+- **No question nothing consumes** — every question feeds a named agent field or it dies.
+- **No stacked asks in onboarding** — signup, notifications, and Discord never appear together; notifications move after the first session, Discord after the first week.
+- **No skip framed as loss** — "Later," never "discard" (**+8.2% DAU** for that copy change alone).
+- **No spinner during sync** — there is REAL labor to narrate; hiding it wastes the flow's best value-demonstration moment.
+- **No hard-required fields** — each added required field costs ~7% conversion; the 7→3-field cut removed 44.7% of abandonment (HubSpot/UXCam).
+- **No forced slang** — plain, lightly casual copy; one sentence per screen.
+- **No quiz wall before value** — the five questions live inside the sync wait, never on standalone form screens.
 
 ---
 
