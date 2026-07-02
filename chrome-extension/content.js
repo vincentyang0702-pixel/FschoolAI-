@@ -268,23 +268,47 @@
         courses = courses.filter((c) => c.id && c.name && !c.access_restricted_by_date);
         const files = [];
         const seen = new Set();   // dedup by course:file id (a file can appear in Files + a module)
-        // Build a session download URL (fetched in-page → cookie auth, no verifier needed).
-        const addFile = (cid, fid, name) => {
+        // Canvas serves files by 302-redirecting to a separate CDN (inst-fs). The
+        // in-page fetch has the session but can't read the cross-origin CDN (CORS);
+        // the background can read cross-origin but has no session (403). Bridge:
+        // the file's `.url` from the API carries a `verifier` token that authorizes
+        // the download WITHOUT a cookie, so the background can fetch it. Prefer that
+        // signed url; fall back to a plain download path only if we can't resolve it.
+        const addFile = (cid, fid, name, signedUrl) => {
           const k = cid + ":" + fid;
           if (!fid || seen.has(k)) return;
           seen.add(k);
-          files.push({ url: `${origin}/courses/${cid}/files/${fid}/download?download_frd=1`, filename: name || ("file_" + fid), courseId: String(cid) });
+          files.push({
+            url: signedUrl || `${origin}/courses/${cid}/files/${fid}/download?download_frd=1`,
+            filename: name || ("file_" + fid),
+            courseId: String(cid),
+          });
+        };
+        // Resolve a single file's signed download url (in-page, session) — works
+        // per-file even when the whole Files tab/list is 403 for the student.
+        const resolveSigned = async (cid, fid, fallbackName) => {
+          try {
+            const { data: fo } = await getJSON(`${origin}/api/v1/courses/${cid}/files/${fid}`);
+            addFile(cid, fid, (fo && (fo.display_name || fo.filename)) || fallbackName, fo && fo.url);
+          } catch { addFile(cid, fid, fallbackName); }
         };
         await Promise.all(courses.map(async (c) => {
-          // (1) Files tab — often DISABLED for students (403), so treat as best-effort.
-          try { for (const f of await pageAll(`/courses/${c.id}/files`)) addFile(c.id, f.id, f.display_name || f.filename); } catch { /* files tab off */ }
-          // (2) Modules → File items — the reliable path (works even when the Files
-          // tab is hidden, which is common: e.g. UofT Quercus). This is where the
-          // "Lecture N.pdf" course materials actually live for most students.
+          // (1) Files tab — often DISABLED for students (403). When it works, the
+          // response already includes each file's signed `.url` (no extra call).
+          try { for (const f of await pageAll(`/courses/${c.id}/files`)) addFile(c.id, f.id, f.display_name || f.filename, f.url); } catch { /* files tab off */ }
+          // (2) Modules → File items — the reliable path when the Files tab is hidden
+          // (e.g. UofT Quercus), where the "Lecture N.pdf" materials actually live.
+          // Resolve each item's signed url via the single-file API.
           try {
             const mods = await pageAll(`/courses/${c.id}/modules`);
             await Promise.all(mods.map(async (m) => {
-              try { for (const it of await pageAll(`/courses/${c.id}/modules/${m.id}/items`)) { if (it.type === "File" && it.content_id) addFile(c.id, it.content_id, it.title); } } catch { /* module items blocked */ }
+              try {
+                const items = await pageAll(`/courses/${c.id}/modules/${m.id}/items`);
+                await Promise.all(items.map((it) => {
+                  if (it.type !== "File" || !it.content_id || seen.has(c.id + ":" + it.content_id)) return null;
+                  return resolveSigned(c.id, it.content_id, it.title);
+                }));
+              } catch { /* module items blocked */ }
             }));
           } catch { /* modules off */ }
         }));
