@@ -8,6 +8,10 @@
 // POST ?action=disconnect               → { userId } → revoke + delete
 
 import { createClient } from "@supabase/supabase-js";
+import { ingestLmsFile } from "./lms-ingest.js";
+
+// Full-class sync ingests files inline (download → extract → embed), which is slow.
+export const config = { maxDuration: 300 };
 
 let _sb: any = null;
 function sb() {
@@ -264,6 +268,176 @@ export default async function handler(req: any, res: any) {
     return res.status(200).json({ classes, onedrive });
   }
 
+  // ── sync ──────────────────────────────────────────────────────────────────
+  // Full Microsoft Teams-for-Education sync: persists classes as courses and
+  // assignments (with due dates), and auto-ingests attached + class-drive files.
+  // Mirrors drive-auth's Classroom ?action=sync. Personal (non-EDU) accounts have
+  // no education/me/classes — they degrade gracefully to a OneDrive-only note.
+  if (action === "sync" && req.method === "POST") {
+    const { userId } = req.body ?? {};
+    if (!userId) return res.status(400).json({ error: "userId required" });
+
+    let accessToken: string;
+    try { accessToken = await getAccessToken(userId); }
+    catch (e: any) { return res.status(401).json({ error: e.message }); }
+    const headers = { Authorization: `Bearer ${accessToken}` };
+
+    const summary = { courses: 0, assignments: 0, filesFound: 0, ingested: 0, skipped: 0, errors: [] as string[] };
+    const FILE_BUDGET = 40; // cap inline ingests per call; re-run sync to continue
+
+    // Strip HTML from assignment instructions (Graph returns HTML content).
+    const stripHtml = (s: string) => String(s ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() || null;
+
+    // Download a Graph file: pre-authorized downloadUrl first, Bearer fallback.
+    async function graphDownload(url: string): Promise<{ bytes: Buffer; mime: string } | null> {
+      let r = await fetch(url).catch(() => null);
+      if (!r?.ok) r = await fetch(url, { headers }).catch(() => null);
+      if (!r?.ok) return null;
+      const bytes = Buffer.from(await r.arrayBuffer());
+      if (!bytes.length || bytes.length > 50 * 1024 * 1024) return null;
+      return { bytes, mime: r.headers.get("content-type")?.split(";")[0]?.trim() ?? "application/octet-stream" };
+    }
+
+    // Resolve an educationFileResource's fileUrl (a Graph driveItem URL) to
+    // { name, stable sourceUrl, temp downloadUrl }.
+    async function resolveFileResource(fileUrl: string): Promise<{ name: string; sourceUrl: string; downloadUrl: string | null } | null> {
+      const sep = fileUrl.includes("?") ? "&" : "?";
+      const r = await fetch(`${fileUrl}${sep}$select=id,name,webUrl,file,@microsoft.graph.downloadUrl`, { headers }).catch(() => null);
+      if (!r?.ok) return null;
+      const item = await r.json().catch(() => null);
+      if (!item?.id) return null;
+      return {
+        name:        item.name ?? "File",
+        sourceUrl:   item.webUrl ?? `msgraph://drive-item/${item.id}`, // STABLE — downloadUrl rotates per request
+        downloadUrl: item["@microsoft.graph.downloadUrl"] ?? null,
+      };
+    }
+
+    async function ingestOne(courseId: string | null, name: string, sourceUrl: string, downloadUrl: string, mimeType: string | null) {
+      if (summary.ingested + summary.skipped >= FILE_BUDGET) {
+        if (!summary.errors.includes("file budget reached — run sync again to ingest the rest"))
+          summary.errors.push("file budget reached — run sync again to ingest the rest");
+        return;
+      }
+      try {
+        const dl = await graphDownload(downloadUrl);
+        if (!dl) throw new Error("download failed");
+        const r = await ingestLmsFile({
+          userId, courseId,
+          file: { name, mimeType: mimeType ?? dl.mime, bytes: dl.bytes, sourceUrl, provider: "microsoft" },
+        });
+        if (r.status !== 200) throw new Error(r.json?.error ?? `ingest ${r.status}`);
+        if (r.json?.skipped) summary.skipped++; else summary.ingested++;
+      } catch (e: any) { summary.errors.push(`${name}: ${e.message}`); }
+    }
+
+    const classRes = await fetch(
+      "https://graph.microsoft.com/v1.0/education/me/classes?$select=id,displayName,classCode",
+      { headers },
+    ).catch(() => null);
+
+    if (!classRes?.ok) {
+      // Personal / non-EDU tenant — nothing class-shaped to sync. Not an error.
+      const status = classRes?.status ?? "network";
+      return res.status(200).json({
+        ...summary,
+        note: `No Teams-for-Education classes available (${status}) — this account may not be a school account. Use Browse files for OneDrive imports.`,
+      });
+    }
+
+    const { value: eduClasses = [] } = await classRes.json();
+
+    for (const cls of eduClasses.slice(0, 20)) {
+      // 1. Upsert the class as a course (ms_ prefix keeps Graph ids from colliding).
+      let courseId: string | null = null;
+      try {
+        const { data: cRow } = await sb().from("courses").upsert({
+          user_id:          userId,
+          canvas_course_id: `ms_${cls.id}`,
+          name:             cls.displayName ?? "Untitled class",
+          course_code:      cls.classCode ?? cls.displayName ?? null,
+          source:           "microsoft_teams",
+        }, { onConflict: "user_id,canvas_course_id" }).select("id").maybeSingle();
+        courseId = cRow?.id ?? null;
+        summary.courses++;
+      } catch (e: any) { summary.errors.push(`class ${cls.displayName}: ${e.message}`); }
+
+      // 2. Assignments (with due dates) + their attached files.
+      const asgRes = await fetch(
+        `https://graph.microsoft.com/v1.0/education/classes/${cls.id}/assignments?$select=id,displayName,instructions,dueDateTime,grading,resources&$top=50`,
+        { headers },
+      ).catch(() => null);
+
+      if (asgRes?.ok) {
+        const { value: assignments = [] } = await asgRes.json();
+        for (const asg of assignments) {
+          try {
+            await sb().from("assignments").upsert({
+              user_id:              userId,
+              course_id:            courseId,
+              canvas_assignment_id: `ms_${asg.id}`,
+              title:                asg.displayName ?? "Untitled",
+              description:          stripHtml(asg.instructions?.content),
+              due_at:               asg.dueDateTime ?? null,
+              points_possible:      asg.grading?.maxPoints ?? null,
+              source:               "microsoft_teams",
+            }, { onConflict: "user_id,canvas_assignment_id" });
+            summary.assignments++;
+          } catch (e: any) { summary.errors.push(`assignment ${asg.displayName}: ${e.message}`); }
+
+          for (const r of (asg.resources ?? [])) {
+            const rsrc = r.resource ?? r;
+            const fileUrl = rsrc?.fileResource?.fileUrl ?? rsrc?.file?.odataid ?? null;
+            const link    = rsrc?.linkResource?.link ?? rsrc?.link ?? null;
+            if (fileUrl) {
+              summary.filesFound++;
+              const resolved = await resolveFileResource(fileUrl);
+              if (resolved?.downloadUrl) await ingestOne(courseId, resolved.name, resolved.sourceUrl, resolved.downloadUrl, null);
+              else summary.errors.push(`${rsrc?.displayName ?? "file"}: could not resolve`);
+            } else if (link) {
+              summary.filesFound++;
+              try {
+                let h = 0; const s = String(link);
+                for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+                await sb().from("files").upsert({
+                  user_id:     userId,
+                  course_id:   courseId,
+                  lms_file_id: "ms_link_" + (h >>> 0).toString(36),
+                  name:        rsrc?.displayName ?? link,
+                  file_type:   "link",
+                  source_url:  link,
+                  provider:    "microsoft",
+                }, { onConflict: "user_id,lms_file_id" });
+              } catch { /* non-fatal */ }
+            }
+          }
+        }
+      }
+
+      // 3. Class team drive root files (lecture decks etc. shared with the class).
+      const driveRes = await fetch(
+        `https://graph.microsoft.com/v1.0/groups/${cls.id}/drive/root/children?$select=id,name,webUrl,file,@microsoft.graph.downloadUrl&$top=50`,
+        { headers },
+      ).catch(() => null);
+      if (driveRes?.ok) {
+        const { value: driveItems = [] } = await driveRes.json();
+        for (const item of driveItems) {
+          if (!item.file || !item["@microsoft.graph.downloadUrl"]) continue;
+          summary.filesFound++;
+          await ingestOne(
+            courseId,
+            item.name ?? "File",
+            item.webUrl ?? `msgraph://drive-item/${item.id}`,
+            item["@microsoft.graph.downloadUrl"],
+            item.file?.mimeType ?? null,
+          );
+        }
+      }
+    }
+
+    return res.status(200).json(summary);
+  }
+
   // ── fetch ─────────────────────────────────────────────────────────────────
   if (action === "fetch" && req.method === "POST") {
     const { userId, downloadUrl, name, mimeType, courseId } = req.body ?? {};
@@ -292,27 +466,26 @@ export default async function handler(req: any, res: any) {
       return res.status(413).json({ error: "File too large (max 50 MB)" });
     }
 
-    const ingestRes = await fetch(`${selfBase()}/api/lms-ingest`, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({
-        userId,
-        courseId: courseId ?? null,
-        file: {
-          name:      name ?? "microsoft-file",
-          mimeType:  mimeType ?? fileRes.headers.get("content-type") ?? "application/octet-stream",
-          bytes:     bytes.toString("base64"),
-          sourceUrl: downloadUrl,
-          provider:  "microsoft",
-        },
-      }),
-    });
+    // @microsoft.graph.downloadUrl carries a rotating tempauth query — strip it so the
+    // sourceUrl is stable across syncs and dedup actually works.
+    let stableUrl = downloadUrl;
+    try { const u = new URL(downloadUrl); u.search = ""; stableUrl = u.toString(); } catch {}
 
-    const ingestData = await ingestRes.json().catch(() => ({}));
-    if (!ingestRes.ok) {
-      return res.status(502).json({ error: ingestData.error ?? "lms-ingest failed" });
+    const result = await ingestLmsFile({
+      userId,
+      courseId: courseId ?? null,
+      file: {
+        name:      name ?? "microsoft-file",
+        mimeType:  mimeType ?? fileRes.headers.get("content-type") ?? "application/octet-stream",
+        bytes,
+        sourceUrl: stableUrl,
+        provider:  "microsoft",
+      },
+    });
+    if (result.status !== 200) {
+      return res.status(502).json({ error: result.json?.error ?? "lms-ingest failed" });
     }
-    return res.status(200).json(ingestData);
+    return res.status(200).json(result.json);
   }
 
   // ── disconnect ────────────────────────────────────────────────────────────

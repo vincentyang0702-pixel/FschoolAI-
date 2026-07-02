@@ -6,6 +6,11 @@
 (function () {
   "use strict";
 
+  // Frame/protocol guards: only http(s) documents with a real host (all_frames
+  // injects into iframes — LMS render file lists inside them — but never
+  // about:blank, srcdoc, or extension pages).
+  if (!/^https?:$/.test(location.protocol) || !location.hostname) return;
+
   // Never inject on search engines, social media, or the cloud providers' own pages.
   // drive.google.com, docs.google.com, dropbox.com, 1drv.ms, onedrive.live.com, box.com are
   // excluded here only as a page-to-inject-on check — we still catch links TO them from other
@@ -36,6 +41,68 @@
   }
 
   const platform = detectPlatform(location.hostname);
+
+  // ── LMS detection (gates auto-capture — buttons appear everywhere) ─────────
+  // Universities often self-host (canvas.uoft.ca has no "instructure" in it), so a
+  // hostname match alone misses the most common case. Combine: known platform,
+  // LMS-ish URL paths, and LMS-specific DOM markers.
+  function looksLikeLms() {
+    if (platform !== "web" && platform !== "google" && platform !== "microsoft") return true;
+    const path = location.pathname.toLowerCase();
+    if (/\/(courses?|course)\/\d+|\/mod\/|\/d2l\/|\/webapps\/|\/ultra\/|\/pluginfile\.php|\/portal\/|\/learn\//.test(path)) return true;
+    if (/^(canvas|lms|moodle|elearning|learn|bb|brightspace|classes|courseware)\./i.test(location.hostname)) return true;
+    try {
+      if (document.querySelector("#application.ic-app, .ic-app, [class*='d2l-'], body[class*='moodle'], #page-mymoodle, meta[name='generator'][content*='Moodle'], #globalNavBar, .bb-offcanvas-panel")) return true;
+    } catch { /* DOM not ready */ }
+    return false;
+  }
+
+  // Google Classroom is owned by the Drive OAuth sync (same files, canonical dedup) —
+  // auto-capture there would only duplicate work, so it stays manual-button-only.
+  const AUTO_EXCLUDED_HOSTS = /classroom\.google\.com$/i;
+
+  // Auto-capture imports DOCUMENT types only (media is large + often not study
+  // material); the manual button still covers everything.
+  const AUTO_EXT = /\.(pdf|docx?|pptx?|xlsx?|txt|csv)(\?|#|$)/i;
+  const AUTO_URL_HINTS = /\/files\/download|[?&]download=1|\/pluginfile\.php\//i;
+  const AUTO_BUDGET = window === window.top ? 8 : 3;   // per page-load; iframes get less
+  let autoSent = 0;
+  const autoSeen = new Set();
+
+  function collectAutoCandidates() {
+    const out = [];
+    document.querySelectorAll("a[href]").forEach((a) => {
+      const href = a.href;
+      if (!href || autoSeen.has(href)) return;
+      if (!(AUTO_EXT.test(href) || (AUTO_URL_HINTS.test(href) && !/logout|login/i.test(href)))) return;
+      autoSeen.add(href);
+      out.push({ url: href, filename: guessFilename(href, a.textContent) });
+    });
+    return out;
+  }
+
+  let autoTimer = null;
+  function scheduleAutoCapture() {
+    if (autoTimer) return;
+    autoTimer = setTimeout(async () => {
+      autoTimer = null;
+      try {
+        if (!chrome?.runtime?.sendMessage) return;             // orphaned script
+        if (AUTO_EXCLUDED_HOSTS.test(location.hostname)) return;
+        if (!looksLikeLms()) return;
+        if (autoSent >= AUTO_BUDGET) return;
+        const items = collectAutoCandidates().slice(0, AUTO_BUDGET - autoSent);
+        if (!items.length) return;
+        autoSent += items.length;
+        // Background gates on signed-in + the autoCapture setting, dedups against
+        // its captured-URL memory, and serializes the actual downloads.
+        chrome.runtime.sendMessage({
+          type: "AUTO_IMPORT",
+          payload: { items, pageUrl: location.href, platform },
+        }, () => void chrome.runtime.lastError);
+      } catch { /* never break the host page */ }
+    }, 2500);   // let SPA content settle; batches instead of per-link spam
+  }
 
   // Universal selector — catches file links on any website.
   const SELECTOR = [
@@ -177,11 +244,25 @@
 
         bytes = bufferToBase64(buffer);
       } catch (err) {
-        btn.textContent      = "Download failed";
-        btn.style.background = "#ff453a";
-        btn.style.opacity    = "1";
-        btn.disabled         = false;
-        setTimeout(() => { btn.textContent = "⬆ Import to FschoolAI"; btn.style.background = "#4285F4"; }, 3000);
+        // Cross-origin file host (CDN, storage domain) → the content script's fetch is
+        // CORS-blocked. The background service worker has host permissions and can
+        // fetch it with the same session cookies.
+        btn.textContent = "Importing…";
+        const bgResult = await chrome.runtime.sendMessage({
+          type:    "IMPORT_FILE",
+          payload: { url: href, fetchUrl: href, filename, pageUrl: location.href, courseId: null, platform },
+        });
+        if (bgResult?.ok) {
+          btn.textContent      = bgResult.skipped ? "Already indexed ✓" : "Indexed ✓";
+          btn.style.background = "#30d158";
+          btn.style.opacity    = "1";
+        } else {
+          btn.textContent      = bgResult?.error?.slice(0, 40) ?? "Download failed";
+          btn.style.background = "#ff453a";
+          btn.style.opacity    = "1";
+          btn.disabled         = false;
+          setTimeout(() => { btn.textContent = "⬆ Import to FschoolAI"; btn.style.background = "#4285F4"; }, 3000);
+        }
         return;
       }
 
@@ -235,14 +316,22 @@
     });
   }
 
-  injectButtons();
+  function scan() {
+    injectButtons();
+    scheduleAutoCapture();
+  }
+
+  if (document.body) scan();
+  else window.addEventListener("DOMContentLoaded", scan);
 
   // Re-scan when the DOM changes (SPA navigation, lazy-loaded content)
-  const observer = new MutationObserver(() => injectButtons());
-  observer.observe(document.body, { childList: true, subtree: true });
+  if (document.body) {
+    const observer = new MutationObserver(() => scan());
+    observer.observe(document.body, { childList: true, subtree: true });
+  }
 
   // Re-scan on SPA URL changes
   const origPush = history.pushState.bind(history);
-  history.pushState = (...args) => { origPush(...args); setTimeout(injectButtons, 600); };
-  window.addEventListener("popstate", () => setTimeout(injectButtons, 600));
+  history.pushState = (...args) => { origPush(...args); setTimeout(scan, 600); };
+  window.addEventListener("popstate", () => setTimeout(scan, 600));
 })();

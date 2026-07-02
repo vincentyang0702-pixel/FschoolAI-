@@ -9,6 +9,7 @@
 // POST ?action=disconnect               → { userId } → revoke + delete
 
 import { createClient } from "@supabase/supabase-js";
+import { ingestLmsFile } from "./lms-ingest.js";
 
 let _sb: any = null;
 function sb() {
@@ -153,19 +154,15 @@ async function fetchDriveBytes(accessToken: string, driveFileId: string, mimeTyp
   return { bytes, finalMime, sourceUrl: `https://drive.google.com/file/d/${driveFileId}` };
 }
 
-// Push bytes through the unified ingest pipeline (dedups on sourceUrl → { ok, documentId, skipped }).
+// Push bytes through the unified ingest pipeline — DIRECT call (no internal HTTP hop,
+// so Vercel's 4.5MB body limit never applies to server-fetched Drive files).
 async function ingestBytes(userId: string, courseId: string | null, name: string, mimeType: string, bytes: Buffer, sourceUrl: string) {
-  const ingestRes = await fetch(`${selfBase()}/api/lms-ingest`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({
-      userId, courseId: courseId ?? null,
-      file: { name, mimeType, bytes: bytes.toString("base64"), sourceUrl, provider: "google" },
-    }),
+  const result = await ingestLmsFile({
+    userId, courseId: courseId ?? null,
+    file: { name, mimeType, bytes, sourceUrl, provider: "google" },
   });
-  const data = await ingestRes.json().catch(() => ({}));
-  if (!ingestRes.ok) throw new Error(data.error ?? "lms-ingest failed");
-  return data;
+  if (result.status !== 200) throw new Error(result.json?.error ?? "lms-ingest failed");
+  return result.json;
 }
 
 // Build a due_at ISO string from Classroom's split {dueDate,dueTime}. Classroom omits
@@ -567,27 +564,21 @@ export default async function handler(req: any, res: any) {
 
     const sourceUrl = `https://drive.google.com/file/d/${driveFileId}`;
 
-    const ingestRes = await fetch(`${selfBase()}/api/lms-ingest`, {
-      method:  "POST",
-      headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({
-        userId,
-        courseId: courseId ?? null,
-        file: {
-          name:      name ?? `drive-${driveFileId}`,
-          mimeType:  finalMime,
-          bytes:     bytes.toString("base64"),
-          sourceUrl,
-          provider:  "google",
-        },
-      }),
+    const result = await ingestLmsFile({
+      userId,
+      courseId: courseId ?? null,
+      file: {
+        name:      name ?? `drive-${driveFileId}`,
+        mimeType:  finalMime,
+        bytes,
+        sourceUrl,
+        provider:  "google",
+      },
     });
-
-    const ingestData = await ingestRes.json().catch(() => ({}));
-    if (!ingestRes.ok) {
-      return res.status(502).json({ error: ingestData.error ?? "lms-ingest failed" });
+    if (result.status !== 200) {
+      return res.status(502).json({ error: result.json?.error ?? "lms-ingest failed" });
     }
-    return res.status(200).json(ingestData);
+    return res.status(200).json(result.json);
   }
 
   // ── disconnect ────────────────────────────────────────────────────────────

@@ -17,7 +17,7 @@ const SB_PROFILE = { "Accept-Profile": "public", "Content-Profile": "public" };
 // ── Claude extraction via Vercel proxy ────────────────────────────────────────
 // We route through our own API to keep ANTHROPIC_API_KEY server-side.
 async function callClaude(system, userContent) {
-  const res = await fetch("https://neuro-agi-topaz.vercel.app/api/claude", {
+  const res = await fetch("https://fschoolai.com/api/claude", {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -342,7 +342,7 @@ async function ingestApiData(userId, data) {
 // Bounded + skips files that already have BOTH stored.
 // NOTE: points at the same Vercel base as the Claude proxy — /api/extract must be
 // DEPLOYED there. For local testing, set EXTRACT_URL to http://localhost:5173/api/extract.
-const EXTRACT_URL = "https://neuro-agi-topaz.vercel.app/api/extract";
+const EXTRACT_URL = "https://fschoolai.com/api/extract";
 const MAX_EXTRACT_PER_SYNC = 25;
 const MAX_FILE_BYTES = 25_000_000;   // matches the bucket's file_size_limit
 

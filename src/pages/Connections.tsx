@@ -128,6 +128,7 @@ export default function Connections() {
 
   const [importToast, setImportToast] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [syncingMs, setSyncingMs] = useState(false);
 
   // Clear ?lms= from URL after reading
   useEffect(() => {
@@ -191,6 +192,33 @@ export default function Connections() {
   async function connectMicrosoft() {
     if (!userId) return;
     window.location.href = `/api/lms-microsoft?action=auth&userId=${encodeURIComponent(userId)}`;
+  }
+
+  // Full Teams-for-Education sync: classes + assignments (with due dates) + auto-ingest files.
+  async function syncMicrosoft() {
+    if (!userId || syncingMs) return;
+    setSyncingMs(true);
+    setImportToast("Syncing Teams classes, assignments & files…");
+    try {
+      const r = await fetch("/api/lms-microsoft?action=sync", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ userId }),
+      });
+      const s = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setImportToast(s.error ? `Sync failed: ${s.error}` : "Sync failed");
+      } else if (s.note) {
+        setImportToast(s.note);
+      } else {
+        const more = (s.errors?.length ? ` · ${s.errors.length} issue(s)` : "");
+        setImportToast(`Synced ${s.courses ?? 0} classes, ${s.assignments ?? 0} assignments, ${s.ingested ?? 0} files${s.skipped ? ` (${s.skipped} already had)` : ""}${more}`);
+      }
+    } catch (e: any) {
+      setImportToast(`Sync failed: ${e?.message ?? "network error"}`);
+    } finally {
+      setSyncingMs(false);
+    }
   }
 
   async function disconnectGoogle() {
@@ -350,6 +378,9 @@ export default function Connections() {
                 style={connectBtn("rgba(127,186,0,0.18)")}
               >
                 {openImporter === "microsoft" ? "Hide files" : "Browse files"}
+              </button>
+              <button onClick={syncMicrosoft} disabled={syncingMs} style={connectBtn("rgba(48,209,88,0.18)")}>
+                {syncingMs ? "Syncing…" : "Sync all"}
               </button>
               <button onClick={disconnectMicrosoft} style={dangerBtn}>Disconnect</button>
             </>
