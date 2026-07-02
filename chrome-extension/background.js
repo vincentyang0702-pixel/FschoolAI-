@@ -895,22 +895,24 @@ function summarizeSync(r) {
     case "autocapture-off":   return "Auto-capture is turned off (see the toggle below).";
     case "already-running":   return "A sync is already running…";
     case "throttled":         return "Already synced recently — files are up to date.";
-    case "done":
-      if (r.total === 0)                        return `${r.lms}: no files found in your courses.`;
-      if (r.imported > 0)                       return `Importing ${r.imported} file(s)${r.failed ? `, ${r.failed} failed` : ""}…`;
-      if (r.skipped > 0 && r.failed === 0)      return `Up to date (${r.skipped} already imported).`;
-      // All failed → show the RAW response of a sample file so the real cause is visible.
-      {
-        let m = `${r.total} found, all failed.`;
-        if (r.diag) {
-          m += r.diag.error
-            ? ` [fetch threw: ${r.diag.error}]`
-            : ` [HTTP ${r.diag.status}${r.diag.redirected ? ` →redirected` : ""}, ${r.diag.ctype || "?"}; ${r.diag.finalUrl || ""}; body: ${r.diag.snippet || ""}]`;
-        } else if (r.lastError) {
-          m += ` ${String(r.lastError).slice(0, 80)}`;
-        }
-        return m;
+    case "done": {
+      if (r.total === 0) return `${r.lms}: no files found in your courses.`;
+      const parts = [];
+      if (r.imported > 0) parts.push(`imported ${r.imported}`);
+      if (r.skipped > 0)  parts.push(`${r.skipped} already`);
+      if (r.failed > 0)   parts.push(`${r.failed} failed`);
+      let m = parts.join(", ") || "done";
+      // On ANY failure, show the RAW response of a FAILING file so the real cause
+      // is visible (login page? locked? redirect to a library system?).
+      if (r.failed > 0 && r.diag) {
+        m += r.diag.error
+          ? ` — [fetch threw: ${r.diag.error}]`
+          : ` — [HTTP ${r.diag.status}${r.diag.redirected ? " →redirected" : ""}, ${r.diag.ctype || "?"}; ${r.diag.finalUrl || ""}; body: ${r.diag.snippet || ""}]`;
+      } else if (r.failed > 0 && r.lastError) {
+        m += ` — ${String(r.lastError).slice(0, 80)}`;
       }
+      return m;
+    }
     default: return "Sync started.";
   }
 }
@@ -962,7 +964,7 @@ async function runFullSync(tabId, host, { force = false } = {}) {
     syncErrorAt.delete(host);
 
     const files = Array.isArray(res.files) ? res.files : [];
-    let imported = 0, skipped = 0, failed = 0, blocked = 0, lastError = null;
+    let imported = 0, skipped = 0, failed = 0, blocked = 0, lastError = null, firstFailUrl = null;
     await runPool(files, 6, async (f) => {
       if (!f || !f.url) return;
       // isPrivateTarget blocks internal hosts; isAllowedSyncFileUrl blocks
@@ -977,7 +979,7 @@ async function runFullSync(tabId, host, { force = false } = {}) {
         // download and follows the 302 to the CDN, which the SW can read).
         const r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
         if (r?.ok) { if (r.skipped) skipped++; else imported++; }
-        else { failed++; lastError = r?.error || lastError; if (!r?.transient) await recordFailure(key); }
+        else { failed++; lastError = r?.error || lastError; if (!firstFailUrl) firstFailUrl = f.url; if (!r?.transient) await recordFailure(key); }
       } finally {
         inFlight.delete(key);
       }
@@ -990,12 +992,12 @@ async function runFullSync(tabId, host, { force = false } = {}) {
     // un-throttled and a refresh retries. Per-file 3-strike backoff still bounds it.
     if (files.length === 0 || imported > 0 || skipped > 0) await markSynced(host);
     console.log(`[FschoolAI] full-sync ${res.lms} on ${host}: ${files.length} files → ${imported} imported, ${skipped} skipped, ${failed} failed, ${blocked} blocked${lastError ? ` (last error: ${lastError})` : ""}`);
-    // Total failure → capture the RAW response of the first file so we can see
-    // exactly what the LMS returns (status/redirect/content-type/body), instead
-    // of guessing from the summarized per-file error.
+    // Any failures → capture the RAW response of a FAILING file (status / redirect
+    // target / content-type / body snippet), so we can see exactly what the LMS
+    // returns for the files that don't work — not the ones that do.
     let diag = null;
-    if (imported === 0 && files.length) { try { diag = await diagnoseFetch(files[0].url); } catch {} }
-    return { ok: true, reason: "done", lms: res.lms, total: files.length, imported, skipped, failed, blocked, lastError, diag, sampleUrl: files[0] && files[0].url };
+    if (failed > 0) { try { diag = await diagnoseFetch(firstFailUrl || files[0].url); } catch {} }
+    return { ok: true, reason: "done", lms: res.lms, total: files.length, imported, skipped, failed, blocked, lastError, diag, sampleUrl: firstFailUrl };
   } finally {
     fullSyncHosts.delete(host);
     // Only touch the live flag if we actually started work — gate-bail
