@@ -25,8 +25,17 @@ export const config = { maxDuration: 300 };
 
 const clientId     = () => process.env.GOOGLE_CLIENT_ID ?? "";
 const clientSecret = () => process.env.GOOGLE_CLIENT_SECRET ?? "";
-const redirectUri  = () =>
-  process.env.GOOGLE_REDIRECT_URI ?? "http://localhost:5173/api/drive-auth?action=callback";
+// The redirect URI must be THIS endpoint's callback and identical on both OAuth legs
+// (consent URL + token exchange). Never reuse GOOGLE_REDIRECT_URI — that belongs to
+// calendar-auth, and pointing Google there silently swallowed every Drive connect.
+// Derive from the request host (works on fschoolai.com, *.vercel.app, and localhost);
+// GOOGLE_DRIVE_REDIRECT_URI overrides if ever needed.
+function redirectUri(req: any): string {
+  if (process.env.GOOGLE_DRIVE_REDIRECT_URI) return process.env.GOOGLE_DRIVE_REDIRECT_URI;
+  const host  = String(req?.headers?.["x-forwarded-host"] ?? req?.headers?.host ?? "fschoolai.com");
+  const proto = String(req?.headers?.["x-forwarded-proto"] ?? (host.startsWith("localhost") ? "http" : "https"));
+  return `${proto}://${host}/api/drive-auth?action=callback`;
+}
 
 const SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
@@ -183,7 +192,7 @@ export default async function handler(req: any, res: any) {
 
     const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
     url.searchParams.set("client_id",     clientId());
-    url.searchParams.set("redirect_uri",  redirectUri());
+    url.searchParams.set("redirect_uri",  redirectUri(req));
     url.searchParams.set("response_type", "code");
     url.searchParams.set("scope",         SCOPES);
     url.searchParams.set("access_type",   "offline");
@@ -213,7 +222,7 @@ export default async function handler(req: any, res: any) {
           code,
           client_id:     clientId(),
           client_secret: clientSecret(),
-          redirect_uri:  redirectUri(),
+          redirect_uri:  redirectUri(req),
           grant_type:    "authorization_code",
         }),
       });
