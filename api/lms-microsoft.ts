@@ -21,8 +21,16 @@ function sb() {
 
 const clientId     = () => process.env.MICROSOFT_CLIENT_ID ?? "";
 const clientSecret = () => process.env.MICROSOFT_CLIENT_SECRET ?? "";
-const redirectUri  = () =>
-  process.env.MICROSOFT_REDIRECT_URI ?? "http://localhost:5173/api/lms-microsoft";
+// Must be THIS endpoint's callback, identical on both OAuth legs (consent + token
+// exchange), and include ?action=callback (the bare path hits "Unknown action").
+// Derived from the request host so fschoolai.com / *.vercel.app / localhost all work;
+// MICROSOFT_REDIRECT_URI overrides if ever needed.
+function redirectUri(req: any): string {
+  if (process.env.MICROSOFT_REDIRECT_URI) return process.env.MICROSOFT_REDIRECT_URI;
+  const host  = String(req?.headers?.["x-forwarded-host"] ?? req?.headers?.host ?? "fschoolai.com");
+  const proto = String(req?.headers?.["x-forwarded-proto"] ?? (host.startsWith("localhost") ? "http" : "https"));
+  return `${proto}://${host}/api/lms-microsoft?action=callback`;
+}
 const tenantId     = () => process.env.MICROSOFT_TENANT_ID ?? "common";
 
 const SCOPES = "Files.Read.All EduAssignments.ReadBasic offline_access";
@@ -88,7 +96,7 @@ export default async function handler(req: any, res: any) {
 
     const url = new URL(AUTH_URL());
     url.searchParams.set("client_id",     clientId());
-    url.searchParams.set("redirect_uri",  redirectUri());
+    url.searchParams.set("redirect_uri",  redirectUri(req));
     url.searchParams.set("response_type", "code");
     url.searchParams.set("scope",         SCOPES);
     url.searchParams.set("response_mode", "query");
@@ -117,7 +125,7 @@ export default async function handler(req: any, res: any) {
           code,
           client_id:     clientId(),
           client_secret: clientSecret(),
-          redirect_uri:  redirectUri(),
+          redirect_uri:  redirectUri(req),
           grant_type:    "authorization_code",
           scope:         SCOPES,
         }),
