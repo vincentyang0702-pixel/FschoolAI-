@@ -162,11 +162,14 @@ function renderRecent(items) {
 function renderLive(live, stats) {
   if (!live) return;
   const scanning = !!live.scanning;
+  const busy = scanning || !!live.fullSync;   // full course sync also = "working"
   const dot = $("live-dot"), title = $("live-title"), spin = $("live-spinner");
-  if (dot)  dot.className = "live-dot " + (scanning ? "scanning" : "idle");
-  if (spin) spin.style.display = scanning ? "inline-block" : "none";
+  if (dot)  dot.className = "live-dot " + (busy ? "scanning" : "idle");
+  if (spin) spin.style.display = busy ? "inline-block" : "none";
   if (title) {
-    title.textContent = scanning
+    title.textContent = live.fullSync
+      ? (live.activeFile ? `Syncing courses — ${live.activeFile}…` : "Syncing all your courses…")
+      : scanning
       ? (live.activeFile ? `Importing ${live.activeFile}…`
          : live.queueDepth > 1 ? `Importing ${live.queueDepth} files…`
          : "Scanning…")

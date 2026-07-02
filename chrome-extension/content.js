@@ -244,10 +244,13 @@
       bar.id = "fschoolai-consent";
       bar.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:2147483647;background:#111;color:#eee;padding:12px 14px;border-radius:12px;font:13px -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 4px 24px rgba(0,0,0,0.4);max-width:300px";
       const text = document.createElement("div");
-      text.textContent = "FschoolAI: auto-import course files from this site?";
+      // Honest scope: on a supported LMS this triggers a full course-library sync
+      // via the LMS API (all your courses), and re-syncs on later visits — not just
+      // the files on this one page.
+      text.textContent = "FschoolAI: import all your course files from this LMS, and keep them synced?";
       text.style.marginBottom = "8px";
       const yes = document.createElement("button");
-      yes.textContent = "Yes, auto-import";
+      yes.textContent = "Yes, sync my courses";
       yes.style.cssText = "background:#4285F4;color:#fff;border:none;border-radius:8px;padding:6px 12px;margin-right:8px;cursor:pointer;font:inherit";
       const no = document.createElement("button");
       no.textContent = "No";

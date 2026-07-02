@@ -10,9 +10,13 @@
 //   • Tracks per-URL capture history so auto-capture never re-imports
 //   • Captures completed downloads from academic sites (pending list / opt-in auto)
 
+import { lmsFileSync } from "./lms-api-sync.js";
+
 // Dev vs prod: change to "http://localhost:5173" for local testing
 const FSCHOOLAI_ORIGIN = "https://fschoolai.com";
 const API_BASE         = FSCHOOLAI_ORIGIN;
+
+const FULL_SYNC_TTL_MS = 6 * 60 * 60 * 1000;    // re-sync a given LMS host at most every 6h
 
 const INLINE_B64_LIMIT = 3_000_000;             // base64 chars (~2.2MB binary) — under Vercel's cap
 const MAX_FILE_BYTES   = 50 * 1024 * 1024;      // absolute cap, matches the server
@@ -428,6 +432,7 @@ let activeFile       = null;   // filename currently importing, or null when idl
 let sessionImported  = 0;      // successful (non-skipped) imports, restored across SW recycles
 const recentActivity = [];     // [{ name, status: "done"|"skipped"|"failed", t }]
 const RECENT_MAX = 6;
+let fullSyncActive   = false;   // an LMS full-course API sync is in progress
 
 function buildLiveState() {
   return {
@@ -437,6 +442,7 @@ function buildLiveState() {
     activeFile,
     sessionImported,
     recent:          recentActivity.slice(),
+    fullSync:        fullSyncActive,
     updatedAt:       Date.now(),
   };
 }
@@ -673,6 +679,159 @@ function bumpStat(key, by) {
   });
 }
 
+// ── Full-course API sync ─────────────────────────────────────────────────────
+// The zero-friction path: once the user has consented to a host, enumerate EVERY
+// course file via the LMS's own API (injected into the page's MAIN world) and
+// import them all — no tabs opened, no page-by-page clicking. Gated on consent
+// (mode "on"), throttled per host, and serialized through the same import queue
+// (with a small pool so we never overflow QUEUE_MAX or hammer the LMS).
+
+const fullSyncHosts = new Set();   // hosts with a sync in flight (re-entry guard)
+const SYNC_ERROR_COOLDOWN_MS = 5 * 60 * 1000;   // back off a host after a transient enum error
+const syncErrorAt = new Map();                   // host → last-error ts (in-memory)
+
+// In-memory cache of hosts the user consented to ("on"), so tabs.onUpdated can
+// pre-filter with a synchronous Set lookup instead of a storage read on EVERY
+// navigation the user makes anywhere. Repopulated on SW start; kept in sync by
+// SET_SITE_MODE and a storage.onChanged listener.
+const consentedHosts = new Set();
+async function refreshConsentedHosts() {
+  const autoSites = await new Promise((r) => chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) => r(autoSites)));
+  consentedHosts.clear();
+  for (const h in autoSites) if (autoSites[h] === "on") consentedHosts.add(h);
+}
+
+// eTLD+1 approximation (no public-suffix list in a service worker): the last two
+// labels. Defence-in-depth only — it over-allows within a shared ccTLD but never
+// under-allows a legitimate same-host file, and pairs with the CDN allowlist.
+function registrableDomain(host) {
+  const p = String(host || "").toLowerCase().split(".").filter(Boolean);
+  return p.slice(-2).join(".");
+}
+// LMS file CDNs that legitimately serve files off a different domain than the portal.
+const LMS_FILE_HOST_ALLOW = [
+  /(^|\.)inscloudgate\.net$/,        // Canvas inst-fs
+  /(^|\.)instructure-uploads[.-]/,   // Canvas S3 upload buckets
+  /(^|\.)brightspace\.com$/,         // D2L CDN
+  /(^|\.)brightspacecdn\.com$/,
+  /(^|\.)desire2learn\.com$/,
+];
+// The enumerated file URL comes from the page's MAIN world, which the site fully
+// controls (it can override window.fetch/ENV to return arbitrary URLs). Before
+// fetching it WITH CREDENTIALS, constrain it to the consented host's own org
+// domain or a known LMS CDN — otherwise a hostile consented page could drive
+// credentialed cross-origin GETs or poison the RAG with third-party content.
+function isAllowedSyncFileUrl(fileUrl, tabHost) {
+  try {
+    const h = new URL(fileUrl).hostname.toLowerCase();
+    const th = String(tabHost || "").toLowerCase();
+    if (!h) return false;
+    if (h === th || h.endsWith("." + th) || th.endsWith("." + h)) return true;
+    if (registrableDomain(h) && registrableDomain(h) === registrableDomain(th)) return true;
+    return LMS_FILE_HOST_ALLOW.some((re) => re.test(h));
+  } catch { return false; }
+}
+
+async function getSyncTimes() {
+  return new Promise((r) => chrome.storage.local.get(["syncTimes"], ({ syncTimes }) =>
+    r(syncTimes && typeof syncTimes === "object" ? syncTimes : {})));
+}
+async function markSynced(host) {
+  const m = await getSyncTimes();
+  m[host] = Date.now();
+  const keys = Object.keys(m);
+  if (keys.length > 100) delete m[keys[0]];   // bound the map
+  await new Promise((r) => chrome.storage.local.set({ syncTimes: m }, r));
+}
+
+// Bounded-concurrency runner: caps outstanding work so we neither overflow the
+// import queue nor stampede the LMS with parallel downloads.
+async function runPool(items, limit, fn) {
+  let i = 0;
+  const worker = async () => { while (i < items.length) { const idx = i++; try { await fn(items[idx]); } catch { /* isolate */ } } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+async function siteMode(host) {
+  return new Promise((r) => chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) =>
+    r(autoSites[host])));
+}
+
+async function runFullSync(tabId, host, { force = false } = {}) {
+  // Atomic re-entry guard: claim the host SYNCHRONOUSLY before any await, so two
+  // near-simultaneous triggers (two tabs, or consent racing an onUpdated) can't
+  // both pass a check-then-act gate and double-enumerate the whole library.
+  if (!host || fullSyncHosts.has(host)) return;
+  fullSyncHosts.add(host);
+  let started = false;
+  try {
+    const auth = await getAuth();
+    if (!auth) return;
+    if (await siteMode(host) !== "on") return;            // consent required
+    if (!(await getSettings()).autoCapture) return;       // respect the master toggle
+    if (!force) {
+      const times = await getSyncTimes();
+      if (times[host] && Date.now() - times[host] < FULL_SYNC_TTL_MS) return;      // 6h success throttle
+      const eAt = syncErrorAt.get(host);
+      if (eAt && Date.now() - eAt < SYNC_ERROR_COOLDOWN_MS) return;                 // don't hammer during an outage
+    }
+
+    started = true;
+    fullSyncActive = true;
+    writeLiveState();
+
+    let res;
+    try {
+      const [inj] = await chrome.scripting.executeScript({ target: { tabId }, world: "MAIN", func: lmsFileSync });
+      res = inj?.result;
+    } catch {
+      return;   // restricted page / tab navigated away — not marked, a real page retries
+    }
+
+    // Detected a supported LMS but enumeration errored (429/5xx) → do NOT mark
+    // synced (that would blacklist a working host for 6h); brief in-memory cooldown.
+    if (res && res.error) { syncErrorAt.set(host, Date.now()); return; }
+    // No supported LMS on this page (dashboard, login redirect, js-only portal) →
+    // don't mark: a later course page on the same host must still get its shot.
+    // lmsFileSync returns immediately here (no API calls), so re-injection is cheap.
+    if (!res || !res.lms) return;
+    syncErrorAt.delete(host);
+
+    const files = Array.isArray(res.files) ? res.files : [];
+    let imported = 0, blocked = 0;
+    await runPool(files, 6, async (f) => {
+      if (!f || !f.url) return;
+      // isPrivateTarget blocks internal hosts; isAllowedSyncFileUrl blocks
+      // MAIN-world-supplied third-party URLs (credentialed-fetch SSRF / RAG poison).
+      if (isPrivateTarget(f.url) || !isAllowedSyncFileUrl(f.url, host)) { blocked++; return; }
+      const key = canonicalizeUrl(f.url);
+      if ((await getCaptured()).includes(key) || inFlight.has(key)) return;   // dedup vs history + concurrent captures
+      if (await isBlockedByFailures(key)) return;                             // respect the 3-strike backoff
+      inFlight.add(key);
+      try {
+        const r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
+        if (r?.ok) { if (!r.skipped) imported++; }
+        else if (!r?.transient) await recordFailure(key);   // permanent-only strike (login walls/network are transient)
+      } finally {
+        inFlight.delete(key);
+      }
+    });
+    if (blocked > 0) console.warn(`[FschoolAI] full-sync skipped ${blocked} off-domain file URL(s) on ${host}`);
+    if (imported > 0) bumpStat("autoImported", imported);
+    // Mark AFTER a completed run: if the SW is killed mid-sync, the next visit
+    // resumes (dedup makes already-imported files cheap skips).
+    await markSynced(host);
+  } finally {
+    fullSyncHosts.delete(host);
+    // Only touch the live flag if we actually started work — gate-bail
+    // navigations (throttled revisits) must not churn storage.
+    if (started) {
+      fullSyncActive = fullSyncHosts.size > 0;
+      writeLiveState();
+    }
+  }
+}
+
 // ── Message handlers ───────────────────────────────────────────────────────
 
 // (No onMessageExternal handler: web pages must never be able to set this
@@ -755,10 +914,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const host = String(msg.payload?.host ?? "");
       const mode = msg.payload?.mode === "on" ? "on" : "off";
       if (host) autoSites[host] = mode;
+      if (host) { if (mode === "on") consentedHosts.add(host); else consentedHosts.delete(host); }
       // Bound the map.
       const keys = Object.keys(autoSites);
       if (keys.length > 200) delete autoSites[keys[0]];
-      chrome.storage.local.set({ autoSites }, () => sendResponse({ ok: true }));
+      chrome.storage.local.set({ autoSites }, () => {
+        sendResponse({ ok: true });
+        // Consent just granted → immediately pull the whole course library via
+        // the LMS API (force past the throttle: this is the user's first opt-in).
+        if (mode === "on" && sender.tab?.id) runFullSync(sender.tab.id, host, { force: true });
+      });
     });
     return true;
   }
@@ -843,6 +1008,29 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   });
 });
 
+// Subsequent visits to an already-consented LMS: re-run the full API sync on
+// page load (self-gates on consent "on" + the 6h throttle inside runFullSync).
+// Cheap when it no-ops — a couple of storage reads, no executeScript unless due.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete" || !tab.url) return;
+  let host;
+  try {
+    const u = new URL(tab.url);
+    if (!/^https?:$/.test(u.protocol)) return;
+    host = u.hostname;
+  } catch { return; }
+  // Cheap synchronous gate: only ever touch consented hosts. Non-LMS browsing
+  // (news, email, shopping) never wakes the sync path. runFullSync re-checks
+  // consent authoritatively from storage.
+  if (!consentedHosts.has(host)) return;
+  runFullSync(tabId, host);
+});
+
+// Keep the consented-host cache correct if autoSites is written anywhere.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.autoSites) refreshConsentedHosts();
+});
+
 // On SW (re)start nothing is running yet. Restore the running counter + recent
 // feed from the last snapshot (so an open popup's counter doesn't jump backward
 // when MV3 recycles the worker), then publish a clean snapshot — queueDepth is 0
@@ -860,4 +1048,5 @@ chrome.downloads.onChanged.addListener(async (delta) => {
     }
   }
   writeLiveState(true);
+  await refreshConsentedHosts();   // repopulate the consented-host cache after an SW (re)start
 })();
