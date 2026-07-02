@@ -287,9 +287,14 @@ async function start(body) {
     }
 
     // 8. Ingest transcript into RAG so the tutor/Study Assistant can answer questions about it.
+    // NOTE: RAG's course_id column is uuid (see supabase-rag-migration.sql), but
+    // public.courses.id is bigint — different id spaces. Passing the bigint courseId here
+    // makes the rag_documents insert fail on the uuid cast, and the catch below swallows it,
+    // so the lecture would silently never get ingested. RAG is queried per-user anyway
+    // (StudyAssistant sends no courseId), so scope to the user and leave course_id null.
     let documentId = null;
     try {
-      const ing = await ingest({ userId, courseId, title, kind: "lecture", text: transcript });
+      const ing = await ingest({ userId, courseId: null, title, kind: "lecture", text: transcript });
       documentId = ing.json?.documentId ?? null;
       if (documentId) {
         for (let i = 0; i < 1000; i++) {
