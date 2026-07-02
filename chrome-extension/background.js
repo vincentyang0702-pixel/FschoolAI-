@@ -78,6 +78,67 @@ function canonicalizeUrl(raw) {
   return s;
 }
 
+// ── Failure memory (auto-capture backoff) ────────────────────────────────────
+// Files that permanently fail (scanned PDF over OCR cap, 422s, dead links) must not
+// re-download on every page visit. 3 strikes → skip for 7 days.
+
+const FAIL_MAX = 3;
+const FAIL_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+async function getFailures() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["failedUrls"], ({ failedUrls }) =>
+      resolve(failedUrls && typeof failedUrls === "object" ? failedUrls : {}));
+  });
+}
+
+async function recordFailure(key) {
+  const map = await getFailures();
+  const cur = map[key] ?? { n: 0, t: 0 };
+  map[key] = { n: cur.n + 1, t: Date.now() };
+  // Bound the map — drop expired entries.
+  for (const k of Object.keys(map)) if (Date.now() - map[k].t > FAIL_TTL_MS) delete map[k];
+  await new Promise((r) => chrome.storage.local.set({ failedUrls: map }, r));
+}
+
+async function isBlockedByFailures(key) {
+  const map = await getFailures();
+  const f = map[key];
+  return !!f && f.n >= FAIL_MAX && Date.now() - f.t < FAIL_TTL_MS;
+}
+
+// ── SSRF guard ───────────────────────────────────────────────────────────────
+// Auto-capture fetches URLs harvested from page DOMs. A hostile page could plant
+// links to internal services (localhost, router admin, cloud metadata) and have the
+// extension exfiltrate them into the user's own account. Refuse private targets.
+
+function isPrivateTarget(rawUrl) {
+  try {
+    const u = new URL(rawUrl);
+    if (!/^https?:$/.test(u.protocol)) return true;
+    const h = u.hostname.toLowerCase();
+    if (h === "localhost" || h === "0.0.0.0" || h.endsWith(".local") || h.endsWith(".internal")) return true;
+    if (h === "[::1]" || h === "::1") return true;
+    if (/^127\.|^10\.|^192\.168\.|^169\.254\.|^0\./.test(h)) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+    return false;
+  } catch { return true; }
+}
+
+// ── SW keepalive while the import queue is busy ──────────────────────────────
+// MV3 kills idle service workers after ~30s; long ingest awaits (OCR, embedding)
+// can exceed the extended grace. A trivial API heartbeat keeps the worker alive
+// exactly while queueDepth > 0.
+
+let keepaliveTimer = null;
+function keepaliveStart() {
+  if (keepaliveTimer) return;
+  keepaliveTimer = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20_000);
+}
+function keepaliveStop() {
+  if (keepaliveTimer && queueDepth === 0) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+}
+
 // ── Byte helpers ─────────────────────────────────────────────────────────────
 
 function bufferToBase64(buffer) {
@@ -253,26 +314,57 @@ async function uploadViaStorage(auth, filename, b64, mimeType) {
 
 let importChain = Promise.resolve();
 let queueDepth  = 0;
+const inFlight  = new Set();   // canonical URLs currently queued/downloading (cross-frame dedup)
 
 function enqueueImport(task) {
   if (queueDepth >= QUEUE_MAX) {
     return Promise.resolve({ error: "Import queue is full — try again in a minute" });
   }
   queueDepth++;
-  const run = importChain.then(task).finally(() => { queueDepth--; });
+  keepaliveStart();
+  const run = importChain.then(task).finally(() => { queueDepth--; keepaliveStop(); });
   // Keep the chain alive even when a task rejects.
   importChain = run.catch(() => {});
   return run;
+}
+
+// Filename ↔ mimeType reconciliation: auto-captured "/files/download?id=N"-style links
+// have no real filename, and a guessed wrong extension would mislead the server's
+// type detection (it prefers the name's extension). Trust the fetched mimeType.
+const MIME_EXT = {
+  "application/pdf": "pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+  "application/msword": "doc",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+  "application/vnd.ms-powerpoint": "ppt",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+  "application/vnd.ms-excel": "xls",
+  "text/plain": "txt",
+  "text/csv": "csv",
+};
+function reconcileFilename(filename, mimeType) {
+  const wantExt = MIME_EXT[mimeType];
+  if (!wantExt) return filename;
+  const m = String(filename ?? "file").match(/^(.*?)(\.[a-z0-9]{2,5})?$/i);
+  const stem = (m?.[1] || "file").replace(/\.$/, "");
+  const haveExt = (m?.[2] ?? "").slice(1).toLowerCase();
+  return haveExt === wantExt ? filename : `${stem}.${wantExt}`;
 }
 
 async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeType, platform, fetchUrl }) {
   const auth = await getAuth();
   if (!auth) return { error: "Not signed in. Open the extension popup to sign in." };
 
+  const canonicalKey = canonicalizeUrl(url ?? fetchUrl);
   try {
+    // Cross-frame race: top frame and an iframe often list the same file — the second
+    // occurrence waits in the queue, so re-check history when its turn comes.
+    if ((await getCaptured()).includes(canonicalKey)) return { ok: true, skipped: true };
+
     // Fetch here (SW bypasses CORS) when the content script couldn't, or for
     // pending-download imports where only the URL is known.
     if (!bytes && fetchUrl) {
+      if (isPrivateTarget(fetchUrl)) return { error: "Refusing to fetch a private/internal address" };
       const fetched = await fetchFileBytes(fetchUrl);
       bytes    = fetched.bytes;
       mimeType = mimeType && mimeType !== "application/octet-stream" ? mimeType : fetched.mimeType;
@@ -282,7 +374,8 @@ async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeTy
       return { error: "Got a login/HTML page instead of the file — are you signed in to the LMS?" };
     }
 
-    const sourceUrl = canonicalizeUrl(url ?? fetchUrl);
+    filename = reconcileFilename(filename, mimeType);
+    const sourceUrl = canonicalKey;
     const filePayload = {
       name:      filename,
       mimeType:  mimeType ?? "application/octet-stream",
@@ -310,6 +403,14 @@ async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeTy
     if (!res.ok) return { error: data.error ?? `Ingest failed (${res.status})` };
 
     await markCaptured(sourceUrl);
+    // Imported downloads leave the pending list (and the badge shrinks with them).
+    if (platform === "download") {
+      chrome.storage.local.get(["pendingDownloads"], ({ pendingDownloads = [] }) => {
+        const remaining = pendingDownloads.filter(d => d.url !== (fetchUrl ?? url));
+        chrome.storage.local.set({ pendingDownloads: remaining });
+        chrome.action.setBadgeText({ text: remaining.length ? String(remaining.length) : "" });
+      });
+    }
     return { ok: true, skipped: data.skipped, documentId: data.documentId };
   } catch (e) {
     return { error: e.message ?? "Network error" };
@@ -333,19 +434,26 @@ async function autoImportBatch({ items, pageUrl, platform }) {
   const seenThisBatch = new Set();
   for (const it of (items ?? [])) {
     const key = canonicalizeUrl(it.url);
-    if (captured.includes(key) || seenThisBatch.has(key)) continue;
+    if (captured.includes(key) || seenThisBatch.has(key) || inFlight.has(key)) continue;
+    if (isPrivateTarget(it.url)) continue;              // SSRF guard (defense in depth)
+    if (await isBlockedByFailures(key)) continue;       // 3-strike backoff — no eternal retries
     seenThisBatch.add(key);
-    fresh.push(it);
+    inFlight.add(key);
+    fresh.push({ ...it, key });
   }
 
   let imported = 0, skipped = 0, failed = 0;
-  for (const it of fresh) {
-    const r = await importFile({
-      url: it.url, fetchUrl: it.url, filename: it.filename,
-      pageUrl, courseId: null, platform,
-    });
-    if (r?.ok) { if (r.skipped) skipped++; else imported++; }
-    else failed++;
+  try {
+    for (const it of fresh) {
+      const r = await importFile({
+        url: it.url, fetchUrl: it.url, filename: it.filename,
+        pageUrl, courseId: null, platform,
+      });
+      if (r?.ok) { if (r.skipped) skipped++; else imported++; }
+      else { failed++; await recordFailure(it.key); }
+    }
+  } finally {
+    for (const it of fresh) inFlight.delete(it.key);
   }
   if (imported > 0) bumpStat("autoImported", imported);
   return { ok: true, imported, skipped, failed, considered: fresh.length };
@@ -414,6 +522,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === "GET_SITE_MODE") {
+    chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) => {
+      const mode = autoSites[msg.payload?.host];
+      sendResponse({ mode: mode === "on" || mode === "off" ? mode : "unknown" });
+    });
+    return true;
+  }
+
+  if (msg.type === "SET_SITE_MODE") {
+    chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) => {
+      const host = String(msg.payload?.host ?? "");
+      const mode = msg.payload?.mode === "on" ? "on" : "off";
+      if (host) autoSites[host] = mode;
+      // Bound the map.
+      const keys = Object.keys(autoSites);
+      if (keys.length > 200) delete autoSites[keys[0]];
+      chrome.storage.local.set({ autoSites }, () => sendResponse({ ok: true }));
+    });
+    return true;
+  }
+
   if (msg.type === "CLEAR_PENDING") {
     chrome.storage.local.set({ pendingDownloads: [] }, () => {
       chrome.action.setBadgeText({ text: "" });
@@ -439,10 +568,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // downloads"), or imported silently when autoImportDownloads is on.
 
 const ACADEMIC_PATTERNS = [
-  /edu/, /\.ac\.[a-z]{2}$/, /chaoxing\.com/, /zhihuishu\.com/,
-  /pronote\.net/, /brightspace\.com/, /blackboard\.com/,
-  /instructure\.com/, /desire2learn\.com/, /moodle/,
-  /sharepoint\.com/, /teams\.microsoft\.com/,
+  /(^|\.)edu(\.[a-z]{2})?$/,     // *.edu / *.edu.au — anchored ("seduction.com" must not match)
+  /\.ac\.[a-z]{2}$/, /chaoxing\.com$/, /zhihuishu\.com$/,
+  /pronote\.net$/, /brightspace\.com$/, /blackboard\.com$/,
+  /instructure\.com$/, /desire2learn\.com$/, /moodle/,
+  /sharepoint\.com$/, /teams\.microsoft\.com$/,
 ];
 
 const DOC_EXT_RE = /\.(pdf|docx?|pptx?|xlsx?|txt|csv)(\?|#|$)/i;
@@ -460,7 +590,8 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   const [item] = await new Promise(resolve => chrome.downloads.search({ id: delta.id }, resolve));
   if (!item) return;
 
-  const refUrl = item.referrer ?? item.url;
+  // referrer is "" (not null) when absent — `??` would never fall back to the URL.
+  const refUrl = item.referrer || item.url;
   if (!isAcademic(refUrl)) return;
 
   const netUrl = item.finalUrl ?? item.url;           // the network URL (never file://)

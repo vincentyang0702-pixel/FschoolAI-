@@ -81,6 +81,34 @@
     return out;
   }
 
+  // Per-site consent: heuristics alone must never grant a random website the power
+  // to silently push documents into the student's knowledge base (RAG poisoning).
+  // First qualifying visit → one small prompt; the answer is remembered per host.
+  function askSiteConsent() {
+    return new Promise((resolve) => {
+      if (window !== window.top) return resolve(false);   // iframes never prompt
+      if (document.getElementById("fschoolai-consent")) return resolve(false);
+      const bar = document.createElement("div");
+      bar.id = "fschoolai-consent";
+      bar.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:2147483647;background:#111;color:#eee;padding:12px 14px;border-radius:12px;font:13px -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 4px 24px rgba(0,0,0,0.4);max-width:300px";
+      const text = document.createElement("div");
+      text.textContent = "FschoolAI: auto-import course files from this site?";
+      text.style.marginBottom = "8px";
+      const yes = document.createElement("button");
+      yes.textContent = "Yes, auto-import";
+      yes.style.cssText = "background:#4285F4;color:#fff;border:none;border-radius:8px;padding:6px 12px;margin-right:8px;cursor:pointer;font:inherit";
+      const no = document.createElement("button");
+      no.textContent = "No";
+      no.style.cssText = "background:rgba(255,255,255,0.1);color:#ccc;border:none;border-radius:8px;padding:6px 12px;cursor:pointer;font:inherit";
+      const done = (v) => { bar.remove(); resolve(v); };
+      yes.addEventListener("click", () => done(true));
+      no.addEventListener("click", () => done(false));
+      bar.append(text, yes, no);
+      document.body.appendChild(bar);
+      setTimeout(() => { if (bar.isConnected) done(false); }, 30_000);  // no answer = no
+    });
+  }
+
   let autoTimer = null;
   function scheduleAutoCapture() {
     if (autoTimer) return;
@@ -93,9 +121,25 @@
         if (autoSent >= AUTO_BUDGET) return;
         const items = collectAutoCandidates().slice(0, AUTO_BUDGET - autoSent);
         if (!items.length) return;
+
+        // Per-host consent (remembered): "on" proceeds, "off" stops, unknown prompts once.
+        const mode = await new Promise((r) =>
+          chrome.runtime.sendMessage({ type: "GET_SITE_MODE", payload: { host: location.hostname } },
+            (res) => r(chrome.runtime.lastError ? "off" : (res?.mode ?? "off"))));
+        if (mode === "off") return;
+        if (mode === "unknown") {
+          const authed = await new Promise((r) =>
+            chrome.runtime.sendMessage({ type: "GET_AUTH_STATUS" }, (res) => r(!chrome.runtime.lastError && !!res?.signedIn)));
+          if (!authed) return;                                  // never prompt signed-out users
+          const yes = await askSiteConsent();
+          chrome.runtime.sendMessage({ type: "SET_SITE_MODE", payload: { host: location.hostname, mode: yes ? "on" : "off" } },
+            () => void chrome.runtime.lastError);
+          if (!yes) return;
+        }
+
         autoSent += items.length;
         // Background gates on signed-in + the autoCapture setting, dedups against
-        // its captured-URL memory, and serializes the actual downloads.
+        // its captured-URL memory + failure backoff, and serializes the downloads.
         chrome.runtime.sendMessage({
           type: "AUTO_IMPORT",
           payload: { items, pageUrl: location.href, platform },
@@ -148,8 +192,11 @@
       const seg = u.pathname.split("/").filter(Boolean).pop() ?? "";
       if (seg && /\.\w{2,5}$/.test(seg)) return decodeURIComponent(seg);
     } catch {}
+    // No real filename in the URL: use the link text WITHOUT inventing an extension —
+    // the background reconciles the name against the fetched mimeType (a fabricated
+    // ".pdf" would mislead the server's extension-first type detection).
     const clean = (linkText ?? "file").replace(/[^\w\s.-]/g, "").trim().slice(0, 80);
-    return (clean || "file") + ".pdf";
+    return clean || "file";
   }
 
   // ArrayBuffer → base64 in chunks to avoid stack overflow on large files
@@ -190,8 +237,15 @@
       e.preventDefault();
       e.stopPropagation();
 
+      // Any sendMessage can reject ("message port closed") if the SW restarts —
+      // never leave the button stuck on "Importing…".
+      const send = async (message) => {
+        try { return await chrome.runtime.sendMessage(message); }
+        catch (err) { return { error: err?.message ?? "Extension restarted — try again" }; }
+      };
+
       // Step 1 — check auth first
-      const authStatus = await chrome.runtime.sendMessage({ type: "GET_AUTH_STATUS" });
+      const authStatus = await send({ type: "GET_AUTH_STATUS" });
       if (!authStatus?.signedIn) {
         btn.textContent      = "Sign in first ↗";
         btn.style.background = "#ff9500";
@@ -208,7 +262,7 @@
       // Background workers with host_permissions bypass CORS entirely.
       if (CLOUD_STORAGE_RE.test(href)) {
         btn.textContent = "Importing…";
-        const result = await chrome.runtime.sendMessage({
+        const result = await send({
           type:    "IMPORT_CLOUD_FILE",
           payload: { href, filename, pageUrl: location.href, platform },
         });
@@ -234,6 +288,7 @@
         if (!fileRes.ok) throw new Error(`HTTP ${fileRes.status}`);
         mimeType = fileRes.headers.get("content-type")?.split(";")[0]?.trim() ?? "application/octet-stream";
         const buffer = await fileRes.arrayBuffer();
+        if (buffer.byteLength > 50 * 1024 * 1024) throw new Error("File too large (max 50 MB)");
 
         // Validate we got an actual PDF and not an HTML redirect/login page.
         if (mimeType === "application/pdf" || href.match(/\.pdf/i)) {
@@ -242,13 +297,17 @@
           if (!isPdf) throw new Error("Server returned HTML instead of PDF (login wall or redirect)");
         }
 
+        // Big files: don't base64 + copy through sendMessage (message-size + memory
+        // limits) — let the background re-fetch and take the storage-upload path.
+        if (buffer.byteLength > 2_500_000) throw new Error("__delegate_to_background__");
+
         bytes = bufferToBase64(buffer);
       } catch (err) {
         // Cross-origin file host (CDN, storage domain) → the content script's fetch is
         // CORS-blocked. The background service worker has host permissions and can
         // fetch it with the same session cookies.
         btn.textContent = "Importing…";
-        const bgResult = await chrome.runtime.sendMessage({
+        const bgResult = await send({
           type:    "IMPORT_FILE",
           payload: { url: href, fetchUrl: href, filename, pageUrl: location.href, courseId: null, platform },
         });
@@ -269,7 +328,7 @@
       // Step 3 — hand bytes to background → lms-ingest
       btn.textContent = "Importing…";
 
-      const result = await chrome.runtime.sendMessage({
+      const result = await send({
         type:    "IMPORT_FILE",
         payload: { url: href, filename, pageUrl: location.href, courseId: null, bytes, mimeType, platform },
       });
@@ -321,17 +380,24 @@
     scheduleAutoCapture();
   }
 
+  // Debounced: MutationObserver fires on every DOM batch, and injectButtons runs two
+  // document-wide querySelectorAll passes — unthrottled it would burn CPU on busy
+  // SPAs (and now runs in every iframe via all_frames).
+  let scanTimer = null;
+  function scheduleScan() {
+    if (scanTimer) return;
+    scanTimer = setTimeout(() => { scanTimer = null; scan(); }, 400);
+  }
+
   if (document.body) scan();
   else window.addEventListener("DOMContentLoaded", scan);
 
-  // Re-scan when the DOM changes (SPA navigation, lazy-loaded content)
+  // Re-scan when the DOM changes (SPA navigation, lazy-loaded content). SPA URL
+  // changes always mutate the DOM, so the observer covers them too — a pushState
+  // monkey-patch would be dead code in MV3's isolated world anyway.
   if (document.body) {
-    const observer = new MutationObserver(() => scan());
+    const observer = new MutationObserver(scheduleScan);
     observer.observe(document.body, { childList: true, subtree: true });
   }
-
-  // Re-scan on SPA URL changes
-  const origPush = history.pushState.bind(history);
-  history.pushState = (...args) => { origPush(...args); setTimeout(scan, 600); };
-  window.addEventListener("popstate", () => setTimeout(scan, 600));
+  window.addEventListener("popstate", scheduleScan);
 })();
