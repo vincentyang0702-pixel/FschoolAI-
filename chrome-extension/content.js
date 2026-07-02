@@ -257,12 +257,16 @@
       const no = document.createElement("button");
       no.textContent = "No";
       no.style.cssText = "background:rgba(255,255,255,0.1);color:#ccc;border:none;border-radius:8px;padding:6px 12px;cursor:pointer;font:inherit";
-      const done = (v) => { bar.remove(); resolve(v); };
+      let settled = false;
+      // Always settle exactly once — even if the host page re-renders and removes
+      // our bar before the timeout, so ensureSiteConsent's finally always releases
+      // consentBusy (a stuck promise would lock consent for the whole page-load).
+      const done = (v) => { if (settled) return; settled = true; try { bar.remove(); } catch {} resolve(v); };
       yes.addEventListener("click", () => done("yes"));
       no.addEventListener("click", () => done("no"));
       bar.append(text, yes, no);
       document.body.appendChild(bar);
-      setTimeout(() => { if (bar.isConnected) done(null); }, 30_000);  // ignored → re-ask next time
+      setTimeout(() => done(null), 30_000);  // ignored → re-ask next time
     });
   }
 
@@ -305,13 +309,14 @@
   // reliable DOM markers; D2L also exposes its session token in localStorage.
   function isSupportedLmsPage() {
     try {
-      if (location.pathname.startsWith("/d2l/")) return true;
-      if (localStorage.getItem("XSRF.Token")) return true;          // D2L session token
+      if (location.pathname.startsWith("/d2l/")) return true;                  // strongest D2L signal
+      // Bare XSRF.Token is a weak signal (other apps use that key) — require a D2L host.
+      if (localStorage.getItem("XSRF.Token") && /(^|\.)(brightspace\.com|desire2learn\.com)$/i.test(location.hostname)) return true;
     } catch { /* storage blocked */ }
     try {
       return !!document.querySelector(
         "body.ic-app, #application.ic-app, #wrapper.ic-Layout-wrapper,"        // Canvas
-        + "[class*='d2l-'], d2l-navigation,"                                   // D2L
+        + "d2l-navigation, d2l-navigation-main-header, #d2l_body,"             // D2L (specific custom elements, not [class*=d2l-])
         + "body[class*='moodle'], #page-mymoodle, meta[name='generator'][content*='Moodle']");  // Moodle
     } catch { return false; }
   }
@@ -328,10 +333,16 @@
       if (AUTO_EXCLUDED_HOSTS.test(location.hostname)) return;
       if (!isSupportedLmsPage()) return;
       if (engagedForHost === location.hostname) return;   // once per host per page-load
-      if (!(await isAuthed())) return;                    // wait until signed in
+      // Latch BEFORE the auth check so a signed-out user doesn't re-send
+      // GET_AUTH_STATUS (waking the SW) on every scan. Signing in resets this
+      // latch via the storage.onChanged(userId) listener below, which re-invokes us.
       engagedForHost = location.hostname;
+      if (!(await isAuthed())) return;                    // wait until signed in
       const mode = await ensureSiteConsent();
       if (mode !== "on") return;   // declined/ignored: re-asked on next page load
+      // Consent just turned on → re-run the DOM scan so auto-capturable files on
+      // THIS page import now that we're allowed (structured files come via the nudge).
+      scheduleScan();
       // Grant fires the sync in the background (SET_SITE_MODE force). This nudge
       // also covers the already-consented case with no tab reload (e.g. signed
       // into the extension while already sitting on the LMS). Throttled/guarded
@@ -349,13 +360,15 @@
         if (!chrome?.runtime?.sendMessage) return;             // orphaned script
         if (AUTO_EXCLUDED_HOSTS.test(location.hostname)) return;
         if (!looksLikeLms()) return;
+        // Consent FIRST — before collectAutoCandidates marks any hrefs into
+        // autoSeen. If a full-sync prompt is mid-flight (consentBusy), this
+        // returns "off" and we retry on the next scan, without permanently
+        // burning this page's file links out of the auto-capture budget.
+        if (await ensureSiteConsent() !== "on") return;
         resetAutoBudgetOnRouteChange();
         if (autoSent >= AUTO_BUDGET) return;
         const items = collectAutoCandidates(AUTO_BUDGET - autoSent);
         if (!items.length) return;
-
-        // Shared consent gate (prompts once if unknown; never for signed-out).
-        if (await ensureSiteConsent() !== "on") return;
 
         autoSent += items.length;
         // Background gates on signed-in + the autoCapture setting, dedups against

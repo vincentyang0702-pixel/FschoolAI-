@@ -110,9 +110,10 @@
     .live-total { font-size: 11px; color: rgba(255,255,255,0.28); margin-left: auto; }
     .live-recent { margin-top: 10px; display: flex; flex-direction: column; gap: 4px; }
     .live-recent:empty { display: none; }
-    .live-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: rgba(255,255,255,0.5); }
+    .live-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: rgba(255,255,255,0.5); flex-wrap: wrap; }
     .live-item .ic { width: 12px; text-align: center; flex-shrink: 0; }
-    .live-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .live-item .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; flex: 1; }
+    .live-item .err { flex-basis: 100%; padding-left: 18px; color: #ff8a80; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .live-item.done    .ic { color: #30d158; }
     .live-item.skipped .ic { color: rgba(255,255,255,0.35); }
     .live-item.failed  .ic { color: #ff6961; }
@@ -150,6 +151,8 @@
       </div>
       <div class="live-recent" id="live-recent"></div>
     </div>
+
+    <button class="btn btn-primary" id="btn-sync-now">⟳ Sync my courses now</button>
 
     <label style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:8px 0; font-size:12px; color:rgba(255,255,255,0.7); cursor:pointer">
       <span>Auto-capture files on LMS pages</span>

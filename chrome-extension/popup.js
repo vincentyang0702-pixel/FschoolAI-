@@ -153,8 +153,16 @@ function renderRecent(items) {
     const nm = document.createElement("span");
     nm.className = "nm";
     nm.textContent = it.name || "file";
-    nm.title = it.name || "";
+    nm.title = it.error ? `${it.name}\n${it.error}` : (it.name || "");
     row.append(ic, nm);
+    // Show WHY a file failed, so problems are diagnosable without the console.
+    if (it.status === "failed" && it.error) {
+      const err = document.createElement("span");
+      err.className = "err";
+      err.textContent = String(it.error);
+      err.title = String(it.error);
+      row.appendChild(err);
+    }
     box.appendChild(row);
   });
 }
@@ -271,6 +279,22 @@ $("btn-signup")?.addEventListener("click", () => submit("signup"));
 // Enter-to-submit
 $("login-password") ?.addEventListener("keydown", e => { if (e.key === "Enter") submit("login"); });
 $("signup-password")?.addEventListener("keydown", e => { if (e.key === "Enter") submit("signup"); });
+
+$("btn-sync-now")?.addEventListener("click", () => {
+  const btn = $("btn-sync-now");
+  const orig = btn.textContent;
+  btn.disabled = true; btn.textContent = "Starting sync…";
+  chrome.runtime.sendMessage({ type: "FORCE_SYNC" }, (res) => {
+    btn.disabled = false;
+    if (chrome.runtime.lastError || !res?.ok) {
+      btn.textContent = res?.error ? res.error.slice(0, 40) : "Open your LMS tab first";
+      setTimeout(() => { btn.textContent = orig; }, 4000);
+      return;
+    }
+    // Success: the live card takes over ("Syncing all your courses…") via storage.onChanged.
+    btn.textContent = orig;
+  });
+});
 
 $("btn-open-app")?.addEventListener("click", () => { chrome.tabs.create({ url: FSCHOOLAI_URL }); window.close(); });
 $("btn-sign-out")?.addEventListener("click", async () => {
