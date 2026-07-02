@@ -164,6 +164,14 @@ export async function ingest(body) {
   const { userId, courseId = null, title = "Untitled", kind = "text", sourceUrl = null, text, pages } = body ?? {};
   if (!userId) return { status: 400, json: { error: "userId required" } };
 
+  // course_id columns are uuid. Callers sometimes pass a non-UUID native id (e.g.
+  // an LMS course number "4552"), which throws "invalid input syntax for type
+  // uuid". Coerce anything that isn't a real UUID to null (document still indexes,
+  // just not course-linked). One chokepoint covers every ingest caller + all three
+  // inserts below (documents / sections / chunks).
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const cid = (courseId && UUID_RE.test(String(courseId))) ? String(courseId) : null;
+
   // Prefer structured per-page input (real page-number citations); fall back to
   // a flat text string for callers that don't have page structure.
   let sections;
@@ -184,13 +192,13 @@ export async function ingest(body) {
   sections.forEach((sec, idx) => {
     const sectionId = randomUUID();
     sectionRows.push({
-      id: sectionId, document_id: documentId, user_id: userId, course_id: courseId,
+      id: sectionId, document_id: documentId, user_id: userId, course_id: cid,
       heading: sec.heading, ordinal: idx, loc_start: sec.locStart ?? null, loc_end: sec.locEnd ?? null, full_text: sec.text,
     });
     for (const content of chunkText(sec.text)) {
       chunkRows.push({
         id: randomUUID(), section_id: sectionId, document_id: documentId,
-        user_id: userId, course_id: courseId, content, embedding: null,
+        user_id: userId, course_id: cid, content, embedding: null,
       });
     }
   });
@@ -202,7 +210,7 @@ export async function ingest(body) {
   // can't blow the serverless time limit in one request. Chunks are immediately
   // keyword-searchable (FTS); vector search activates per chunk as embeddings land.
   const { error: dErr } = await supabase.from("rag_documents").insert({
-    id: documentId, user_id: userId, course_id: courseId, title, kind, source_url: sourceUrl,
+    id: documentId, user_id: userId, course_id: cid, title, kind, source_url: sourceUrl,
   });
   if (dErr) return { status: 500, json: { error: `document insert: ${dErr.message}` } };
 

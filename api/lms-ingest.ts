@@ -178,7 +178,10 @@ export async function ingestLmsFile({ userId, courseId = null, file, baseUrl = n
         if (!error && data?.id) { courseUuid = data.id; break; }
       } catch { /* column doesn't exist — try the next */ }
     }
-    if (!courseUuid) console.warn(`[lms-ingest] courseId "${courseId}" is not an app UUID and no course row matched — ingesting unlinked`);
+    // The matched course row's id must ITSELF be a uuid — some courses tables key
+    // rows by the native LMS id (so `id` could be "4552"). Only keep a real uuid.
+    if (courseUuid && !UUID_RE.test(String(courseUuid))) courseUuid = null;
+    if (!courseUuid) console.warn(`[lms-ingest] courseId "${courseId}" is not an app UUID and no uuid-keyed course row matched — ingesting unlinked`);
   }
 
   // ── 1. Dedup (canonical AND raw form — older rows stored the raw URL) ────
