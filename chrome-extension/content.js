@@ -236,10 +236,12 @@
   // Per-site consent: heuristics alone must never grant a random website the power
   // to silently push documents into the student's knowledge base (RAG poisoning).
   // First qualifying visit → one small prompt; the answer is remembered per host.
+  // Resolves "yes" | "no" | null. null = ignored/timed out → we DON'T persist a
+  // decision (so it re-asks next visit instead of locking the site off forever).
   function askSiteConsent() {
     return new Promise((resolve) => {
-      if (window !== window.top) return resolve(false);   // iframes never prompt
-      if (document.getElementById("fschoolai-consent")) return resolve(false);
+      if (window !== window.top) return resolve(null);   // iframes never prompt
+      if (document.getElementById("fschoolai-consent")) return resolve(null);
       const bar = document.createElement("div");
       bar.id = "fschoolai-consent";
       bar.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:2147483647;background:#111;color:#eee;padding:12px 14px;border-radius:12px;font:13px -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 4px 24px rgba(0,0,0,0.4);max-width:300px";
@@ -256,12 +258,86 @@
       no.textContent = "No";
       no.style.cssText = "background:rgba(255,255,255,0.1);color:#ccc;border:none;border-radius:8px;padding:6px 12px;cursor:pointer;font:inherit";
       const done = (v) => { bar.remove(); resolve(v); };
-      yes.addEventListener("click", () => done(true));
-      no.addEventListener("click", () => done(false));
+      yes.addEventListener("click", () => done("yes"));
+      no.addEventListener("click", () => done("no"));
       bar.append(text, yes, no);
       document.body.appendChild(bar);
-      setTimeout(() => { if (bar.isConnected) done(false); }, 30_000);  // no answer = no
+      setTimeout(() => { if (bar.isConnected) done(null); }, 30_000);  // ignored → re-ask next time
     });
+  }
+
+  function getSiteMode() {
+    return new Promise((r) =>
+      chrome.runtime.sendMessage({ type: "GET_SITE_MODE", payload: { host: location.hostname } },
+        (res) => r(chrome.runtime.lastError ? "off" : (res?.mode ?? "off"))));
+  }
+  function isAuthed() {
+    return new Promise((r) =>
+      chrome.runtime.sendMessage({ type: "GET_AUTH_STATUS" },
+        (res) => r(!chrome.runtime.lastError && !!res?.signedIn)));
+  }
+
+  // Single per-host consent gate for BOTH full-course sync and DOM auto-capture,
+  // so they never double-prompt. Returns the effective mode ("on"/"off").
+  let consentBusy = false;
+  async function ensureSiteConsent() {
+    const mode = await getSiteMode();
+    if (mode !== "unknown") return mode;
+    if (window !== window.top) return "off";        // only the top frame prompts
+    if (!(await isAuthed())) return "off";           // never prompt signed-out users
+    if (consentBusy) return "off";
+    consentBusy = true;
+    try {
+      const ans = await askSiteConsent();            // "yes" | "no" | null(ignored)
+      if (ans === null) return "off";                // ignored → don't persist; re-ask next visit
+      const decided = ans === "yes" ? "on" : "off";
+      await new Promise((r) =>
+        chrome.runtime.sendMessage({ type: "SET_SITE_MODE", payload: { host: location.hostname, mode: decided } },
+          () => { void chrome.runtime.lastError; r(); }));
+      return decided;
+    } finally { consentBusy = false; }
+  }
+
+  // Strong "this really is a supported (API-syncable) LMS with a live session"
+  // signal — used to offer the full-course sync even on pages with NO visible file
+  // links (dashboards, D2L home). Canvas/Moodle session globals live in the page's
+  // MAIN world (invisible to this isolated content script), so we detect via
+  // reliable DOM markers; D2L also exposes its session token in localStorage.
+  function isSupportedLmsPage() {
+    try {
+      if (location.pathname.startsWith("/d2l/")) return true;
+      if (localStorage.getItem("XSRF.Token")) return true;          // D2L session token
+    } catch { /* storage blocked */ }
+    try {
+      return !!document.querySelector(
+        "body.ic-app, #application.ic-app, #wrapper.ic-Layout-wrapper,"        // Canvas
+        + "[class*='d2l-'], d2l-navigation,"                                   // D2L
+        + "body[class*='moodle'], #page-mymoodle, meta[name='generator'][content*='Moodle']");  // Moodle
+    } catch { return false; }
+  }
+
+  // Engage the full-course API sync: on a supported LMS, get consent (prompt once)
+  // and nudge the background to sync THIS tab's whole library — independent of any
+  // file links on the page, so it works from a dashboard/home. This is the fix for
+  // "signed in, opened my LMS, and nothing happened".
+  let engagedForHost = "";
+  async function maybeEngageLms() {
+    try {
+      if (!chrome?.runtime?.sendMessage) return;      // orphaned script
+      if (window !== window.top) return;              // top frame only
+      if (AUTO_EXCLUDED_HOSTS.test(location.hostname)) return;
+      if (!isSupportedLmsPage()) return;
+      if (engagedForHost === location.hostname) return;   // once per host per page-load
+      if (!(await isAuthed())) return;                    // wait until signed in
+      engagedForHost = location.hostname;
+      const mode = await ensureSiteConsent();
+      if (mode !== "on") return;   // declined/ignored: re-asked on next page load
+      // Grant fires the sync in the background (SET_SITE_MODE force). This nudge
+      // also covers the already-consented case with no tab reload (e.g. signed
+      // into the extension while already sitting on the LMS). Throttled/guarded
+      // in the background, so a redundant nudge is a cheap no-op.
+      chrome.runtime.sendMessage({ type: "FULL_SYNC_NUDGE" }, () => void chrome.runtime.lastError);
+    } catch { /* never break the host page */ }
   }
 
   let autoTimer = null;
@@ -278,20 +354,8 @@
         const items = collectAutoCandidates(AUTO_BUDGET - autoSent);
         if (!items.length) return;
 
-        // Per-host consent (remembered): "on" proceeds, "off" stops, unknown prompts once.
-        const mode = await new Promise((r) =>
-          chrome.runtime.sendMessage({ type: "GET_SITE_MODE", payload: { host: location.hostname } },
-            (res) => r(chrome.runtime.lastError ? "off" : (res?.mode ?? "off"))));
-        if (mode === "off") return;
-        if (mode === "unknown") {
-          const authed = await new Promise((r) =>
-            chrome.runtime.sendMessage({ type: "GET_AUTH_STATUS" }, (res) => r(!chrome.runtime.lastError && !!res?.signedIn)));
-          if (!authed) return;                                  // never prompt signed-out users
-          const yes = await askSiteConsent();
-          chrome.runtime.sendMessage({ type: "SET_SITE_MODE", payload: { host: location.hostname, mode: yes ? "on" : "off" } },
-            () => void chrome.runtime.lastError);
-          if (!yes) return;
-        }
+        // Shared consent gate (prompts once if unknown; never for signed-out).
+        if (await ensureSiteConsent() !== "on") return;
 
         autoSent += items.length;
         // Background gates on signed-in + the autoCapture setting, dedups against
@@ -586,7 +650,20 @@
   function scan() {
     injectButtons();
     scheduleAutoCapture();
+    maybeEngageLms();     // offer/trigger full-course sync even with no file links on the page
   }
+
+  // If the user signs into the extension while ALREADY sitting on their LMS, no
+  // tab reload fires — re-engage the moment auth appears so the consent prompt /
+  // full sync starts immediately instead of waiting for a navigation.
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && changes.userId && changes.userId.newValue) {
+        engagedForHost = "";
+        maybeEngageLms();
+      }
+    });
+  } catch { /* storage unavailable in this context */ }
 
   // Debounced: MutationObserver fires on every DOM batch, and injectButtons runs two
   // document-wide querySelectorAll passes — unthrottled it would burn CPU on busy

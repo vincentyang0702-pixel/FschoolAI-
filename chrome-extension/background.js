@@ -901,6 +901,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Content script on a supported LMS asks us to sync this tab's whole library
+  // (e.g. it's already consented but no tab-load fired, or the user just signed
+  // in). Host is taken from the trusted sender tab; runFullSync re-checks consent
+  // + throttle, so this is safe and idempotent.
+  if (msg.type === "FULL_SYNC_NUDGE") {
+    const tabId = sender.tab?.id;
+    let host = "";
+    try { host = new URL(sender.tab?.url || "").hostname; } catch { /* no tab url */ }
+    if (tabId && host) runFullSync(tabId, host);
+    sendResponse({ ok: true });
+    return false;
+  }
+
   if (msg.type === "GET_SITE_MODE") {
     chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) => {
       const mode = autoSites[msg.payload?.host];
