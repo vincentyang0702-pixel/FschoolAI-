@@ -65,19 +65,171 @@
   // material); the manual button still covers everything.
   const AUTO_EXT = /\.(pdf|docx?|pptx?|xlsx?|txt|csv)(\?|#|$)/i;
   const AUTO_URL_HINTS = /\/files\/download|[?&]download=1|\/pluginfile\.php\//i;
-  const AUTO_BUDGET = window === window.top ? 8 : 3;   // per page-load; iframes get less
+  // Per SPA route (reset on URL change — Canvas/D2L navigate without reloads, and a
+  // fixed per-page-load budget would starve the second course you open). A course
+  // page with more files than this gets the rest on the next visit (dedup is cheap).
+  const AUTO_BUDGET = window === window.top ? 25 : 8;
   let autoSent = 0;
+  let autoRouteHref = location.href;
   const autoSeen = new Set();
 
-  function collectAutoCandidates() {
+  function resetAutoBudgetOnRouteChange() {
+    if (location.href === autoRouteHref) return;
+    autoRouteHref = location.href;
+    autoSent = 0;                      // new route, fresh budget (autoSeen still dedups)
+  }
+
+  // ── Viewer/launcher link rules (research-backed, per-platform) ─────────────
+  // Many LMSs never link the file itself: they link a VIEWER page with no
+  // extension (D2L "viewContent/{id}/View", Canvas "/files/{id}?wrap=1", Moodle
+  // "mod/resource/view.php?id="). Each rule recognises one such shape and either
+  // rewrites it to the platform's direct-download URL or tags it with a
+  // resolveHint so the background can follow redirects / parse the wrapper.
+  // Most shapes are unique enough to self-gate; Canvas "/files/{id}" is generic,
+  // so it's gated on a Canvas DOM marker. Non-file matches (a D2L Link topic, a
+  // Canvas Page item) resolve to HTML and are rejected server-side — the
+  // failure backoff stops eternal retries.
+  // NOT handled here (verified js-only — files are minted by XHR, no anchor
+  // hrefs exist): Blackboard Ultra, Google Classroom, Teams/SharePoint file
+  // grids, new Google Sites, Chaoxing, Zhihuishu, Pronote, Docebo, TalentLMS,
+  // Absorb, Frog. Those are covered only by the download interceptor.
+
+  // Memoized (5s): viewerRuleFor runs per anchor per scan — a querySelector per
+  // call would mean thousands of DOM queries per tick on big pages.
+  let canvasCheck = { t: 0, v: false };
+  function isCanvasPage() {
+    if (platform === "canvas") return true;
+    const now = Date.now();
+    if (now - canvasCheck.t < 5000) return canvasCheck.v;
+    let v = false;
+    try {
+      v = !!document.querySelector("body.ic-app, #application.ic-app, #wrapper.ic-Layout-wrapper");
+    } catch { /* DOM not ready */ }
+    canvasCheck = { t: now, v };
+    return v;
+  }
+
+  // Returns { url, hint } (url = canonical fetch/dedup URL) or null.
+  function viewerRuleFor(href) {
+    let m;
+
+    // ── D2L Brightspace ──────────────────────────────────────────────────
+    // Direct file-topic download (some skins emit it directly).
+    if (/\/d2l\/le\/content\/\d+\/topics\/files\/download\/\d+\/DirectFileTopicDownload/i.test(href))
+      return { url: href, hint: null };
+    // Topic viewer → deterministic rewrite to DirectFileTopicDownload.
+    // Non-file topics (Link/HTML/SCORM) return HTML there and get rejected.
+    m = href.match(/^(https?:\/\/[^/]+)\/d2l\/le\/content\/(\d+)\/viewContent\/(\d+)\/View(?:$|[?#])/i);
+    if (m) return { url: `${m[1]}/d2l/le/content/${m[2]}/topics/files/download/${m[3]}/DirectFileTopicDownload`, hint: null };
+
+    // ── Canvas (gated: "/files/{id}" alone is too generic) ───────────────
+    if (isCanvasPage()) {
+      // File link (course-, user-, group-scoped or bare, ± /preview|/download).
+      // download_frd=1 forces raw bytes instead of the HTML preview page.
+      m = href.match(/^(https?:\/\/[^/]+)(?:\/(?:courses|users|groups)\/\d+)?\/files\/(\d+)(?:\/(?:preview|download))?(?:$|[?#])/);
+      if (m) return { url: `${m[1]}/files/${m[2]}/download?download_frd=1`, hint: null };
+      // Module item — File/Page/Quiz/... not distinguishable from the URL; the
+      // background follows the redirect and only proceeds if it lands on /files/.
+      // Auto-capture only (no button): most module items are not files.
+      m = href.match(/^https?:\/\/[^/]+\/courses\/\d+\/modules\/items\/\d+(?:$|[?#])/);
+      if (m) return { url: href, hint: "canvas-module-item" };
+    }
+
+    // ── Moodle family (Moodle / Open LMS / MoodleCloud / Totara) ─────────
+    // Resource launcher 302s to /pluginfile.php in the common display modes;
+    // embed-mode returns HTML wrapping the pluginfile link (background parses).
+    // /mod/url|page|forum|book|folder/ don't match — inherently excluded.
+    if (/\/mod\/resource\/view\.php\?(?:[^#]*&)?id=\d+/i.test(href))
+      return { url: href, hint: "moodle-resource" };
+
+    // ── Blackboard Original ──────────────────────────────────────────────
+    // WebDAV file (dt-content-rid marks a real file; bare /bbcswebdav/ dirs don't match).
+    if (/\/bbcswebdav\/pid-\d+-dt-content-rid-[\w.%-]+/i.test(href))
+      return { url: href, hint: null };
+    // Content-file launcher — 302s to the bbcswebdav file with session cookies.
+    if (/\/webapps\/blackboard\/execute\/content\/file\?[^#]*\bcontent_id=_\d+_\d+/i.test(href))
+      return { url: href, hint: null };
+
+    // ── Sakai — the access servlet streams the file directly ─────────────
+    if (/\/access\/content\/(?:group|user|public|attachment)\/[^?#]+\.[a-z0-9]{2,8}(?:$|\?)/i.test(href))
+      return { url: href, hint: null };
+
+    // ── itslearning — fs_folderfile streams bytes (may 302 to a CDN) ─────
+    if (/\/File\/fs_folderfile\.aspx\?FolderFileID=\d+/i.test(href))
+      return { url: href, hint: null };
+
+    // ── Firefly (hostname-gated: resource.aspx?id= is a generic shape) ───
+    if (/\.fireflycloud\.net$/i.test(location.hostname) && /\/resource\.aspx\?id=\d+/i.test(href))
+      return { url: href, hint: null };
+
+    return null;
+  }
+
+  // Shadow-DOM-aware anchor collection. Modern D2L renders content lists inside
+  // open d2l-* web components where document.querySelectorAll can't see them.
+  // The full-tree walk is gated to pages that actually need it.
+  // Memoized: sticky once detected (a D2L page doesn't stop being one); while
+  // false, re-probed at most every 30s so ordinary websites pay ~nothing.
+  let shadowWalkCheck = { t: 0, v: false };
+  function needsShadowWalk() {
+    if (shadowWalkCheck.v) return true;
+    const now = Date.now();
+    if (now - shadowWalkCheck.t < 30_000) return false;
+    let v = false;
+    try {
+      v = /\/d2l\//.test(location.pathname) || !!document.querySelector("[class*='d2l-'],d2l-navigation");
+    } catch { /* DOM not ready */ }
+    shadowWalkCheck = { t: now, v };
+    return v;
+  }
+
+  // One tree walk serves a whole scan cycle (button pass at t=0, auto-collect at
+  // t+2.5s) — the 3s TTL covers both without walking twice.
+  let anchorCache = { t: 0, anchors: null };
+  function collectAllAnchors() {
+    const now = Date.now();
+    if (anchorCache.anchors && now - anchorCache.t < 3000) return anchorCache.anchors;
     const out = [];
-    document.querySelectorAll("a[href]").forEach((a) => {
+    document.querySelectorAll("a[href]").forEach((a) => out.push(a));
+    if (needsShadowWalk()) {
+      const walk = (root) => {
+        root.querySelectorAll("a[href]").forEach((a) => out.push(a));
+        root.querySelectorAll("*").forEach((el) => { if (el.shadowRoot) walk(el.shadowRoot); });
+      };
+      try {
+        document.querySelectorAll("*").forEach((el) => { if (el.shadowRoot) walk(el.shadowRoot); });
+      } catch { /* never break the host page */ }
+    }
+    anchorCache = { t: now, anchors: out };
+    return out;
+  }
+
+  // Collect up to `limit` candidates. Anchors are only marked seen when actually
+  // RETURNED — marking beyond-budget matches would silently drop them for the
+  // rest of the session (the next scan/route retries them instead).
+  function collectAutoCandidates(limit) {
+    const out = [];
+    if (limit <= 0) return out;
+    const anchors = collectAllAnchors();
+    // Pass A: direct file links (extension in URL / download hints) — certain, cheap.
+    for (const a of anchors) {
+      if (out.length >= limit) return out;
       const href = a.href;
-      if (!href || autoSeen.has(href)) return;
-      if (!(AUTO_EXT.test(href) || (AUTO_URL_HINTS.test(href) && !/logout|login/i.test(href)))) return;
+      if (!href || autoSeen.has(href)) continue;
+      if (!(AUTO_EXT.test(href) || (AUTO_URL_HINTS.test(href) && !/logout|login/i.test(href)))) continue;
       autoSeen.add(href);
       out.push({ url: href, filename: guessFilename(href, a.textContent) });
-    });
+    }
+    // Pass B: platform viewer/launcher links — need background resolution.
+    for (const a of anchors) {
+      if (out.length >= limit) return out;
+      const href = a.href;
+      if (!href || autoSeen.has(href)) continue;
+      const rule = viewerRuleFor(href);
+      if (!rule) continue;
+      autoSeen.add(href);
+      out.push({ url: rule.url, filename: guessFilename(href, a.textContent), resolveHint: rule.hint ?? undefined });
+    }
     return out;
   }
 
@@ -118,8 +270,9 @@
         if (!chrome?.runtime?.sendMessage) return;             // orphaned script
         if (AUTO_EXCLUDED_HOSTS.test(location.hostname)) return;
         if (!looksLikeLms()) return;
+        resetAutoBudgetOnRouteChange();
         if (autoSent >= AUTO_BUDGET) return;
-        const items = collectAutoCandidates().slice(0, AUTO_BUDGET - autoSent);
+        const items = collectAutoCandidates(AUTO_BUDGET - autoSent);
         if (!items.length) return;
 
         // Per-host consent (remembered): "on" proceeds, "off" stops, unknown prompts once.
@@ -143,7 +296,16 @@
         chrome.runtime.sendMessage({
           type: "AUTO_IMPORT",
           payload: { items, pageUrl: location.href, platform },
-        }, () => void chrome.runtime.lastError);
+        }, (res) => {
+          if (chrome.runtime.lastError) return;
+          // Refund budget for items the background never worked on (already
+          // captured / failure-blocked / signed-out) — otherwise revisiting a
+          // mostly-captured page exhausts the budget on no-ops and any NEW
+          // file on it never gets a slot. (autoSeen still stops re-sending.)
+          if (res?.ok) autoSent -= Math.max(0, items.length - (res.considered ?? items.length));
+          else         autoSent -= items.length;
+          if (autoSent < 0) autoSent = 0;
+        });
       } catch { /* never break the host page */ }
     }, 2500);   // let SPA content settle; batches instead of per-link spam
   }
@@ -185,6 +347,7 @@
   const TEXT_FILE_RE = /\b(pdf|docx?|pptx?|xlsx?|csv)\b/i;
 
   const ATTR = "data-fschoolai-btn";
+  const ruleChecked = new WeakSet();   // anchors already tested against viewerRuleFor
 
   function guessFilename(href, linkText) {
     try {
@@ -210,7 +373,7 @@
     return btoa(binary);
   }
 
-  function makeButton(href, filename) {
+  function makeButton(href, filename, rule) {
     const btn = document.createElement("button");
     btn.textContent   = "⬆ Import to FschoolAI";
     btn.style.cssText = `
@@ -256,6 +419,29 @@
       btn.textContent   = "Downloading…";
       btn.disabled      = true;
       btn.style.opacity = "0.7";
+
+      // Step 2a — viewer/launcher links (D2L topics, Canvas files, Moodle resources…):
+      // the href itself carries no bytes. The background resolves it — rewritten
+      // direct URL, redirect-following, wrapper parsing — and verifies it's a real file.
+      if (rule) {
+        btn.textContent = "Importing…";
+        const result = await send({
+          type:    "IMPORT_FILE",
+          payload: { url: rule.url, fetchUrl: rule.url, filename, pageUrl: location.href, courseId: null, platform, resolveHint: rule.hint ?? undefined },
+        });
+        if (result?.ok) {
+          btn.textContent      = result.skipped ? "Already indexed ✓" : "Indexed ✓";
+          btn.style.background = "#30d158";
+          btn.style.opacity    = "1";
+        } else {
+          btn.textContent      = result?.error?.slice(0, 40) ?? "Failed";
+          btn.style.background = "#ff453a";
+          btn.style.opacity    = "1";
+          btn.disabled         = false;
+          setTimeout(() => { btn.textContent = "⬆ Import to FschoolAI"; btn.style.background = "#4285F4"; }, 3000);
+        }
+        return;
+      }
 
       // Step 2 — cloud storage links must be fetched from the background service worker
       // because CORS blocks cross-origin fetches from content scripts even with credentials.
@@ -349,12 +535,12 @@
     return btn;
   }
 
-  function tryInject(a) {
+  function tryInject(a, rule) {
     if (a.getAttribute(ATTR)) return;
     const href = a.href;
     if (!href || href.startsWith("javascript") || href === location.href) return;
     a.setAttribute(ATTR, "1");
-    const btn = makeButton(href, guessFilename(href, a.textContent));
+    const btn = makeButton(href, guessFilename(href, a.textContent), rule);
     a.parentNode?.insertBefore(btn, a.nextSibling);
   }
 
@@ -365,7 +551,26 @@
       if (IMPORTABLE_EXT.test(a.href) || CLOUD_STORAGE_RE.test(a.href)) tryInject(a);
     });
 
-    // Pass 2: text-based (e.g. links that say "(PDF - 1.1 MB)" but href is a redirect)
+    // Pass 2: platform viewer/launcher links (D2L topics, Canvas files, Blackboard
+    // content, Moodle resources, …) — shadow-DOM-aware so modern D2L lists work.
+    // MUST run before the text heuristic: a viewer link whose text says "PDF"
+    // would otherwise get a rule-less button whose direct fetch can't succeed.
+    // Canvas module items are excluded: most are Pages/Quizzes, and a button on
+    // every one would be noise (auto-capture still resolves the File ones).
+    // ruleChecked converges the pass: non-matching anchors are regex-tested once,
+    // not on every 4s tick. (SPA frameworks replace elements rather than mutate
+    // hrefs in place — and href-attribute mutations never trigger a re-scan
+    // anyway, since the observer watches childList only.)
+    collectAllAnchors().forEach((a) => {
+      if (ruleChecked.has(a) || a.getAttribute(ATTR)) return;
+      if (!a.href || a.href.startsWith("javascript")) return;
+      ruleChecked.add(a);
+      const rule = viewerRuleFor(a.href);
+      if (!rule || rule.hint === "canvas-module-item") return;
+      tryInject(a, rule);
+    });
+
+    // Pass 3: text-based (e.g. links that say "(PDF - 1.1 MB)" but href is a redirect)
     document.querySelectorAll("a[href]").forEach((a) => {
       if (a.getAttribute(ATTR)) return;
       const text = a.textContent?.trim() ?? "";
@@ -395,9 +600,25 @@
   // Re-scan when the DOM changes (SPA navigation, lazy-loaded content). SPA URL
   // changes always mutate the DOM, so the observer covers them too — a pushState
   // monkey-patch would be dead code in MV3's isolated world anyway.
+  // Track real DOM activity (observer/navigation, NOT our own interval ticks)
+  // so the shadow re-scan can back off when the page has gone quiet.
+  let lastDomActivity = Date.now();
   if (document.body) {
-    const observer = new MutationObserver(scheduleScan);
+    const observer = new MutationObserver(() => { lastDomActivity = Date.now(); scheduleScan(); });
     observer.observe(document.body, { childList: true, subtree: true });
   }
-  window.addEventListener("popstate", scheduleScan);
+  window.addEventListener("popstate", () => { lastDomActivity = Date.now(); scheduleScan(); });
+
+  // The body observer can't see mutations INSIDE shadow roots (D2L renders its
+  // content lists in d2l-* web components). A slow tick guarantees those pages
+  // are eventually re-scanned; scheduleScan debounces, and non-matching anchors
+  // are cheap Set lookups on re-scan. Gated to pages that actually use shadow
+  // DOM, and backed off 4x (~16s) once the page has been idle for a minute.
+  let shadowTick = 0;
+  setInterval(() => {
+    if (!needsShadowWalk() || !looksLikeLms()) return;
+    shadowTick++;
+    if (Date.now() - lastDomActivity > 60_000 && shadowTick % 4 !== 0) return;
+    scheduleScan();
+  }, 4000);
 })();

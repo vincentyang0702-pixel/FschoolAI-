@@ -271,18 +271,117 @@ async function fetchCloudFile(href) {
 
 // ── SW-side file fetch (CORS bypass; used when the content script can't) ────
 
-async function fetchFileBytes(url) {
-  const res = await fetch(url, { credentials: "include", redirect: "follow" });
+// Server-declared filename beats anything guessed from link text — viewer links
+// (D2L topics, Canvas files, Moodle resources) carry no filename in the URL at all.
+function filenameFromDisposition(cd) {
+  if (!cd) return null;
+  // RFC 5987: filename*=UTF-8'lang'encoded — the language tag is optional but
+  // legal (UTF-8'en'r%C3%A9sum%C3%A9.pdf); preferred when both forms are present.
+  let m = cd.match(/filename\*\s*=\s*utf-8'[^']*'([^;]+)/i);
+  if (m) { try { return decodeURIComponent(m[1].trim()); } catch { /* fall through */ } }
+  m = cd.match(/filename\s*=\s*"([^"]+)"/i) || cd.match(/filename\s*=\s*([^;]+)/i);
+  if (m) return m[1].trim().replace(/^"+|"+$/g, "") || null;
+  return null;
+}
+
+// Fallback: the final (post-redirect) URL often carries the real filename —
+// e.g. Moodle's /pluginfile.php/.../lecture1.pdf, D2L's signed CDN URLs.
+function filenameFromUrl(u) {
+  try {
+    const seg = new URL(u).pathname.split("/").filter(Boolean).pop() ?? "";
+    if (/\.[a-z0-9]{2,8}$/i.test(seg)) return decodeURIComponent(seg);
+  } catch {}
+  return null;
+}
+
+// Redirect chains that end on an SSO/login endpoint mean the LMS session is
+// stale — an environmental condition, not a property of the file. Detecting it
+// gives a precise error AND keeps it out of the permanent failure backoff.
+function looksLikeLoginUrl(u) {
+  try {
+    const { hostname, pathname } = new URL(u);
+    return /(^|\/)(login|signin|sign-in|sso|saml2?|cas|adfs|idp|oauth2?|authorize|authentication)(\/|$|\.)/i.test(pathname)
+        || /^(login|sso|auth|idp|cas|adfs)\./i.test(hostname);
+  } catch { return false; }
+}
+
+function transientError(message) {
+  const e = new Error(message);
+  e.transient = true;      // importFileWork surfaces this so backoff never strikes it
+  return e;
+}
+
+// Shared response→bytes pipeline: size caps, HTML/login-wall rejection, and
+// server-declared filename extraction (Content-Disposition, then final URL).
+async function bytesFromResponse(res) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  // Redirect chains can land anywhere — a public viewer URL 302ing to an internal
+  // host must not have its content ingested (same rationale as isPrivateTarget on
+  // the entry URL; this covers every resolver-derived and post-redirect fetch).
+  if (res.url && isPrivateTarget(res.url)) throw new Error("Refusing a private/internal address");
   const mimeType = res.headers.get("content-type")?.split(";")[0]?.trim() ?? "application/octet-stream";
   const buffer = await res.arrayBuffer();
   if (buffer.byteLength > MAX_FILE_BYTES) throw new Error("File too large (max 50 MB)");
   if (buffer.byteLength === 0) throw new Error("Empty response");
   const b64 = bufferToBase64(buffer);
   if (mimeType.includes("text/html") || base64LooksLikeHtml(b64)) {
+    if (looksLikeLoginUrl(res.url)) throw transientError("LMS session expired — log in to your LMS and retry");
     throw new Error("Got a login/HTML page instead of the file — are you signed in to the LMS?");
   }
-  return { bytes: b64, mimeType };
+  const filename = filenameFromDisposition(res.headers.get("content-disposition")) || filenameFromUrl(res.url);
+  return { bytes: b64, mimeType, filename, finalUrl: res.url };
+}
+
+async function fetchFileBytes(url) {
+  const res = await fetch(url, { credentials: "include", redirect: "follow" });
+  return bytesFromResponse(res);
+}
+
+// ── Viewer-link resolver ─────────────────────────────────────────────────────
+// Some LMS links need more than a straight fetch (see viewerRuleFor in content.js):
+//   canvas-module-item — /courses/{c}/modules/items/{i} 302s to the item; only
+//     File items land on /files/{id} (then rewritten to the raw-bytes URL).
+//     fetch() can't expose Location headers (opaqueredirect), so we follow the
+//     redirect chain and inspect the FINAL URL instead.
+//   moodle-resource — /mod/resource/view.php?id= 302s straight to /pluginfile.php
+//     in the common display modes (plain fetch works); embed/frame modes return
+//     an HTML wrapper whose pluginfile link we extract (same-origin only).
+// Everything else: plain fetch + HTML rejection is the verification.
+
+async function resolveViewerFile(url, hint) {
+  if (hint === "canvas-module-item") {
+    const res = await fetch(url, { credentials: "include", redirect: "follow" });
+    // A stale Canvas session redirects to SSO — that's not "not a file".
+    if (looksLikeLoginUrl(res.url)) throw transientError("LMS session expired — log in to your LMS and retry");
+    const m = (res.url ?? "").match(/\/files\/(\d+)/);
+    if (!m) throw new Error("Not a file (module item is a page/quiz/link)");
+    const origin = new URL(res.url).origin;
+    return fetchFileBytes(`${origin}/files/${m[1]}/download?download_frd=1`);
+  }
+
+  if (hint === "moodle-resource") {
+    const res = await fetch(url, { credentials: "include", redirect: "follow" });
+    const ct = res.headers.get("content-type") ?? "";
+    if (res.ok && !ct.includes("text/html")) return bytesFromResponse(res);  // 302'd straight to the file
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Embed/in-frame display mode: the wrapper HTML carries the pluginfile link.
+    // The FIRST match isn't necessarily the resource — intro/description images
+    // are served via pluginfile too. Score every candidate: the mod_resource
+    // content area is the actual file, and document extensions beat images.
+    const html = await res.text();
+    const candidates = [...html.matchAll(/(?:href|src)\s*=\s*"([^"]*\/pluginfile\.php\/[^"]+)"/gi)]
+      .map((m) => m[1].replace(/&amp;/g, "&"));
+    if (!candidates.length) throw new Error("No file found in Moodle resource page");
+    const score = (u) =>
+      (/\/mod_resource\/content\//i.test(u) ? 2 : 0) +
+      (/\.(pdf|docx?|pptx?|xlsx?|txt|csv)([?#]|$)/i.test(u) ? 1 : 0);
+    candidates.sort((a, b) => score(b) - score(a));
+    const target = new URL(candidates[0], res.url);
+    if (target.origin !== new URL(url).origin) throw new Error("Cross-origin file blocked");
+    return fetchFileBytes(target.toString());
+  }
+
+  return fetchFileBytes(url);
 }
 
 // ── Signed-upload path for big files (Vercel body limit) ────────────────────
@@ -316,13 +415,78 @@ let importChain = Promise.resolve();
 let queueDepth  = 0;
 const inFlight  = new Set();   // canonical URLs currently queued/downloading (cross-frame dedup)
 
+// ── Live activity (surfaced to the popup so it isn't a static screen) ────────
+// The popup is a throwaway context and can't read the SW's in-memory queue vars,
+// so we mirror a compact snapshot into chrome.storage.local. The popup renders it
+// on open (via GET_STATUS, which also wakes the SW for a fresh read) and then
+// updates live through chrome.storage.onChanged. The counter + recent feed are
+// restored from the last snapshot on SW (re)start (see the startup block) so an
+// open popup's number never jumps backward when MV3 recycles the worker; both
+// reset on sign-out.
+
+let activeFile       = null;   // filename currently importing, or null when idle
+let sessionImported  = 0;      // successful (non-skipped) imports, restored across SW recycles
+const recentActivity = [];     // [{ name, status: "done"|"skipped"|"failed", t }]
+const RECENT_MAX = 6;
+
+function buildLiveState() {
+  return {
+    scanning:        queueDepth > 0,
+    queueDepth,
+    inFlight:        inFlight.size,
+    activeFile,
+    sessionImported,
+    recent:          recentActivity.slice(),
+    updatedAt:       Date.now(),
+  };
+}
+
+// Trailing-debounced mirror: a batch of auto-captured files fires many queue/
+// activity transitions in a burst — collapse them into one storage write per
+// ~120ms so the popup gets a steady stream, not a stampede of onChanged events.
+// Always converges to the latest state within the window.
+//
+// flush=true bypasses the debounce and writes synchronously — used for the queue
+// rising/falling edges so the "scanning" spinner turns on/off instantly and can't
+// be lost to an MV3 worker eviction inside the debounce window (a pending
+// setTimeout doesn't keep the worker alive; the eager set() is issued in the same
+// tick, before keepalive teardown can let the worker sleep).
+let liveTimer = null, liveDirty = false;
+function writeLiveState(flush = false) {
+  liveDirty = true;
+  if (flush) {
+    if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+    liveDirty = false;
+    chrome.storage.local.set({ liveState: buildLiveState() });
+    return;
+  }
+  if (liveTimer) return;
+  liveTimer = setTimeout(() => {
+    liveTimer = null;
+    if (!liveDirty) return;
+    liveDirty = false;
+    chrome.storage.local.set({ liveState: buildLiveState() });
+  }, 120);
+}
+
+function pushActivity(name, status) {
+  recentActivity.unshift({ name: name || "file", status, t: Date.now() });
+  if (recentActivity.length > RECENT_MAX) recentActivity.length = RECENT_MAX;
+  writeLiveState();
+}
+
 function enqueueImport(task) {
   if (queueDepth >= QUEUE_MAX) {
-    return Promise.resolve({ error: "Import queue is full — try again in a minute" });
+    // transient: queue pressure says nothing about the file — must not burn backoff strikes.
+    return Promise.resolve({ error: "Import queue is full — try again in a minute", transient: true });
   }
   queueDepth++;
   keepaliveStart();
-  const run = importChain.then(task).finally(() => { queueDepth--; keepaliveStop(); });
+  writeLiveState(queueDepth === 1);       // 0→1: flush so the spinner turns on instantly
+  const run = importChain.then(task).finally(() => {
+    queueDepth--; keepaliveStop();
+    writeLiveState(queueDepth === 0);     // →0: flush the idle edge before the worker can sleep
+  });
   // Keep the chain alive even when a task rejects.
   importChain = run.catch(() => {});
   return run;
@@ -351,9 +515,29 @@ function reconcileFilename(filename, mimeType) {
   return haveExt === wantExt ? filename : `${stem}.${wantExt}`;
 }
 
-async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeType, platform, fetchUrl }) {
+// Thin wrapper around the real import: tracks the active filename + records the
+// outcome so the popup can show live "Importing X…" and a ticking counter. Never
+// lets a thrown error leave activeFile stuck (which would spin the popup forever).
+async function importFileInner(payload) {
+  const displayName = String(payload.filename || "file").split(/[/\\]/).pop() || "file";
+  activeFile = displayName;
+  writeLiveState();
+  let result;
+  try {
+    result = await importFileWork(payload);
+  } catch (e) {
+    result = { error: e?.message ?? "Network error" };
+  }
+  activeFile = null;
+  if (result?.ok && !result.skipped) sessionImported++;
+  pushActivity(displayName, result?.ok ? (result.skipped ? "skipped" : "done") : "failed");
+  return result;
+}
+
+async function importFileWork({ url, filename, pageUrl, courseId, bytes, mimeType, platform, fetchUrl, resolveHint }) {
   const auth = await getAuth();
-  if (!auth) return { error: "Not signed in. Open the extension popup to sign in." };
+  // transient: signed-out is not a property of the file — must not burn backoff strikes.
+  if (!auth) return { error: "Not signed in. Open the extension popup to sign in.", transient: true };
 
   const canonicalKey = canonicalizeUrl(url ?? fetchUrl);
   try {
@@ -362,12 +546,15 @@ async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeTy
     if ((await getCaptured()).includes(canonicalKey)) return { ok: true, skipped: true };
 
     // Fetch here (SW bypasses CORS) when the content script couldn't, or for
-    // pending-download imports where only the URL is known.
+    // pending-download imports where only the URL is known. Viewer links carry a
+    // resolveHint and go through the platform resolver.
     if (!bytes && fetchUrl) {
       if (isPrivateTarget(fetchUrl)) return { error: "Refusing to fetch a private/internal address" };
-      const fetched = await fetchFileBytes(fetchUrl);
+      const fetched = await resolveViewerFile(fetchUrl, resolveHint);
       bytes    = fetched.bytes;
       mimeType = mimeType && mimeType !== "application/octet-stream" ? mimeType : fetched.mimeType;
+      // Server-declared name (Content-Disposition / final URL) beats link-text guesses.
+      if (fetched.filename) filename = fetched.filename;
     }
     if (!bytes) return { error: "No file data" };
     if (base64LooksLikeHtml(bytes)) {
@@ -413,7 +600,10 @@ async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeTy
     }
     return { ok: true, skipped: data.skipped, documentId: data.documentId };
   } catch (e) {
-    return { error: e.message ?? "Network error" };
+    // Environmental failures must not burn backoff strikes: fetch() throws
+    // TypeError on network-level failures (offline, DNS, blocked), and resolvers
+    // flag login-wall redirects with e.transient (see transientError()).
+    return { error: e.message ?? "Network error", transient: e instanceof TypeError || e?.transient === true };
   }
 }
 
@@ -443,17 +633,34 @@ async function autoImportBatch({ items, pageUrl, platform }) {
   }
 
   let imported = 0, skipped = 0, failed = 0;
+  const strikeKeys = [];
   try {
     for (const it of fresh) {
       const r = await importFile({
         url: it.url, fetchUrl: it.url, filename: it.filename,
-        pageUrl, courseId: null, platform,
+        pageUrl, courseId: null, platform, resolveHint: it.resolveHint,
       });
       if (r?.ok) { if (r.skipped) skipped++; else imported++; }
-      else { failed++; await recordFailure(it.key); }
+      else {
+        failed++;
+        // Only permanent failures count toward the 3-strike/7-day backoff.
+        // Queue-full, signed-out, and network errors are transient — striking
+        // them would silently blacklist perfectly good files for a week.
+        if (!r?.transient) strikeKeys.push(it.key);
+      }
     }
   } finally {
     for (const it of fresh) inFlight.delete(it.key);
+  }
+  // Login-wall heuristic: when EVERYTHING in a 3+ batch failed and nothing
+  // actually imported, the cause is almost certainly environmental (expired LMS
+  // session serving login pages) — don't strike, or good files get blacklisted
+  // while the user is merely logged out. Mixed batches strike normally: a
+  // failure next to real imports is file-specific (e.g. a D2L Link topic).
+  // Note `skipped` doesn't count as proof of life — dedup-skips never hit the
+  // network, so they say nothing about whether the LMS session works.
+  if (imported > 0 || strikeKeys.length < 3) {
+    for (const k of strikeKeys) await recordFailure(k);
   }
   if (imported > 0) bumpStat("autoImported", imported);
   return { ok: true, imported, skipped, failed, considered: fresh.length };
@@ -499,6 +706,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === "GET_AUTH_STATUS") {
     getAuth().then(auth => sendResponse({ signedIn: !!auth, userId: auth?.userId ?? null }));
+    return true;
+  }
+
+  // Live activity snapshot for the popup — one round-trip for live state + the
+  // current settings + all-time stats. Reading it also wakes the SW, so a stale
+  // "scanning" mirror from a previously-killed worker self-heals (queueDepth is 0
+  // on a fresh worker → scanning:false).
+  if (msg.type === "GET_STATUS") {
+    (async () => {
+      const settings = await getSettings();
+      const { stats = {} } = await new Promise(r => chrome.storage.local.get(["stats"], r));
+      return { ...buildLiveState(), settings, stats };
+    })().then(sendResponse);
     return true;
   }
 
@@ -558,7 +778,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "SIGN_OUT") {
-    chrome.storage.local.remove(["userId", "token", "expiresAt"], () => sendResponse({ ok: true }));
+    // Reset the live counters/feed so the next user doesn't inherit this session's numbers.
+    sessionImported = 0; activeFile = null; recentActivity.length = 0;
+    chrome.storage.local.remove(["userId", "token", "expiresAt"], () => {
+      writeLiveState(true);
+      sendResponse({ ok: true });
+    });
     return true;
   }
 });
@@ -617,3 +842,22 @@ chrome.downloads.onChanged.addListener(async (delta) => {
     chrome.action.setBadgeBackgroundColor({ color: "#4285F4" });
   });
 });
+
+// On SW (re)start nothing is running yet. Restore the running counter + recent
+// feed from the last snapshot (so an open popup's counter doesn't jump backward
+// when MV3 recycles the worker), then publish a clean snapshot — queueDepth is 0
+// on a fresh worker, so this also forces scanning:false, healing any stale
+// "scanning" state a killed worker left behind. Counters are only restored while
+// signed in; a signed-out start clears them.
+(async () => {
+  const auth = await getAuth();
+  const { liveState } = await new Promise((r) => chrome.storage.local.get(["liveState"], r));
+  if (auth && liveState && typeof liveState === "object") {
+    sessionImported = Number(liveState.sessionImported) || 0;
+    if (Array.isArray(liveState.recent)) {
+      recentActivity.length = 0;
+      recentActivity.push(...liveState.recent.slice(0, RECENT_MAX));
+    }
+  }
+  writeLiveState(true);
+})();
