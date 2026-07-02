@@ -14,6 +14,10 @@
 import { createClient } from "@supabase/supabase-js";
 import { createHash, randomUUID } from "node:crypto";
 
+// ?action=adopt runs merge_user_ids over every user_id table — heavy accounts
+// (thousands of rag_chunks) need more than Vercel's ~10s default.
+export const config = { maxDuration: 60 };
+
 // service_role key → bypasses RLS and unlocks auth.admin.*
 // Targets the `public` schema — where the live fschoolai.com app's users table lives
 // (vincent/frontend/dev: src/api/supabase.js uses { db: { schema: 'public' } }).
@@ -170,10 +174,21 @@ export default async function handler(req, res) {
     if (!oldId || oldId === canonical.id)
       return res.status(200).json({ userId: canonical.id, merged: false });
 
-    // Never merge a profile owned by a DIFFERENT auth account (shared computer).
+    // Ownership guard — refuse to merge anything that might belong to someone else:
+    //   • auth-linked to a DIFFERENT GoTrue account (shared computer), or
+    //   • a legacy pre-Auth row (email/password_hash set, no auth_id) whose email
+    //     doesn't match the caller — merging it would absorb that person's account
+    //     and delete their users row (they could never log in again).
+    // Guest rows (no auth_id, no email, no password_hash) merge freely.
     const { data: oldRow } = await supabase
-      .from("users").select("id, auth_id").eq("id", oldId).maybeSingle();
-    if (oldRow?.auth_id && oldRow.auth_id !== authUser.id)
+      .from("users").select("id, auth_id, email, password_hash").eq("id", oldId).maybeSingle();
+    const callerEmail = (authUser.email ?? "").toLowerCase();
+    const oldEmail    = (oldRow?.email ?? "").toLowerCase();
+    const foreign =
+      (oldRow?.auth_id && oldRow.auth_id !== authUser.id) ||
+      (oldEmail && oldEmail !== callerEmail) ||
+      (oldRow?.password_hash && !oldEmail);   // credentialed but unattributable → refuse
+    if (foreign)
       return res.status(200).json({ userId: canonical.id, merged: false, refused: true });
 
     // Proceed even when oldRow is null — non-FK tables (rag_*, room_messages,

@@ -5,7 +5,7 @@ import { createContext, useContext, useState, useEffect, useCallback } from "rea
 import { supabase }                  from "../api/supabase";
 import { syncCanvasData, loadCanvasData } from "../api/canvasSync";
 import { getTokenSummary, onTokenAwarded } from "../api/tokens";
-import { currentProfile, adoptIdentity }   from "../api/auth";
+import { currentProfile, adoptIdentity, pendingMerges } from "../api/auth";
 
 const AppContext = createContext(null);
 
@@ -169,8 +169,8 @@ export function AppProvider({ children }) {
       try {
         const profile = await currentProfile();
         if (!profile?.id) return;                      // no session → keep current id, stay logged in
-        const pending = localStorage.getItem("fschool_merge_pending");
-        if (pending && pending !== profile.id) await adoptIdentity(pending);
+        for (const pending of pendingMerges())
+          if (pending !== profile.id) await adoptIdentity(pending);
         if (profile.id === userId) return;             // already canonical
         const ok = await adoptIdentity(userId);
         if (!ok) return;                               // merge failed → keep old id, retry next boot

@@ -147,15 +147,25 @@ begin
       and tb.table_type  = 'BASE TABLE'
       and c.table_name  <> 'users'
   loop
-    for r in execute format('select ctid from public.%I where user_id = $1', t.table_name) using p_old
-    loop
-      begin
-        execute format('update public.%I set user_id = $1 where ctid = $2', t.table_name)
-          using p_new, r.ctid;
-      exception when unique_violation then
-        execute format('delete from public.%I where ctid = $1', t.table_name) using r.ctid;
-      end;
-    end loop;
+    -- Fast path: one bulk UPDATE per table. Tables without a user_id-scoped unique
+    -- constraint (rag_chunks and friends — the big ones) finish in a single statement,
+    -- keeping heavy accounts inside the function/HTTP timeout.
+    begin
+      execute format('update public.%I set user_id = $1 where user_id = $2', t.table_name)
+        using p_new, p_old;
+    exception when unique_violation then
+      -- Collisions exist (user_oauth, canvas_data, files, ...): the failed bulk update
+      -- rolled back to its savepoint; redo row-by-row, canonical row wins.
+      for r in execute format('select ctid from public.%I where user_id = $1', t.table_name) using p_old
+      loop
+        begin
+          execute format('update public.%I set user_id = $1 where ctid = $2', t.table_name)
+            using p_new, r.ctid;
+        exception when unique_violation then
+          execute format('delete from public.%I where ctid = $1', t.table_name) using r.ctid;
+        end;
+      end loop;
+    end;
   end loop;
 
   ------------------------------------------------------------------------
