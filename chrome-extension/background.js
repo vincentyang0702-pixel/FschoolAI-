@@ -755,6 +755,109 @@ async function siteMode(host) {
     r(autoSites[host])));
 }
 
+// ── LMS enumeration IN THE SERVICE WORKER ────────────────────────────────────
+// Research-verified: an MV3 SW fetch with host_permissions + credentials:"include"
+// sends the LMS session cookies (SameSite Lax/Strict) AND bypasses CORS, so it can
+// read the cross-origin inst-fs/S3 CDN that Canvas 302-redirects downloads to. A
+// content-script/page fetch runs with the PAGE origin, ignores host_permissions,
+// and is CORS-blocked on that CDN hop — which is exactly the wall the in-page
+// approach hit. So ALL authenticated I/O (enumerate + download) happens HERE.
+// Canvas needs no token (cookie authorizes); D2L needs its XSRF token and Moodle
+// its sesskey, which only the page can read, so the content script passes them in.
+
+async function swGetJSON(url, headers) {
+  const r = await fetch(url, { credentials: "include", headers: { Accept: "application/json", ...(headers || {}) } });
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return { r, data: await r.json() };
+}
+
+async function enumCanvasSW(origin) {
+  const pageAll = async (path) => {
+    let url = origin + "/api/v1" + path + (path.includes("?") ? "&" : "?") + "per_page=100";
+    const out = [];
+    for (let i = 0; i < 40 && url; i++) {
+      const { r, data } = await swGetJSON(url);
+      if (Array.isArray(data)) out.push(...data); else break;
+      const m = (r.headers.get("Link") || "").match(/<([^>]+)>;\s*rel="next"/);
+      url = m ? m[1] : null;
+    }
+    return out;
+  };
+  let courses = await pageAll("/courses?enrollment_state=active&enrollment_type=student");
+  if (!courses.length) courses = await pageAll("/courses");
+  courses = courses.filter((c) => c.id && c.name && !c.access_restricted_by_date);
+  const files = [];
+  const seen = new Set();
+  const add = (cid, fid, name) => {
+    const k = cid + ":" + fid;
+    if (!fid || seen.has(k)) return;
+    seen.add(k);
+    // The SW's credentials:"include" fetch lets the session cookie authorize this
+    // download and follow the 302 to the inst-fs CDN — no verifier needed.
+    files.push({ url: `${origin}/courses/${cid}/files/${fid}/download?download_frd=1`, filename: name || ("file_" + fid), courseId: String(cid) });
+  };
+  await Promise.all(courses.map(async (c) => {
+    // Modules survive a disabled Files tab (where /courses/{id}/files 403s) — this
+    // is where the "Lecture N.pdf" materials live for most students (e.g. Quercus).
+    try {
+      const mods = await pageAll(`/courses/${c.id}/modules?include[]=items&include[]=content_details`);
+      for (const m of mods) for (const it of (m.items || [])) {
+        if (it.type === "File" && it.content_id) add(c.id, it.content_id, it.title || (it.content_details && it.content_details.display_name));
+      }
+    } catch { /* modules off */ }
+    // Files tab (best effort; often 403 for students).
+    try { for (const f of await pageAll(`/courses/${c.id}/files`)) add(c.id, f.id, f.display_name || f.filename); } catch { /* files tab off */ }
+  }));
+  return { lms: "canvas", files, courses: courses.length };
+}
+
+async function enumD2LSW(origin, xsrf) {
+  const dget = async (p) => (await swGetJSON(origin + p, { "X-Csrf-Token": xsrf || "" })).data;
+  let lpV = "1.30", leV = "1.50";
+  try { const vers = await dget("/d2l/api/versions/"); const pick = (c) => (vers.find((v) => v.ProductCode === c) || {}).LatestVersion; lpV = pick("lp") || lpV; leV = pick("le") || leV; } catch { /* defaults */ }
+  const courses = []; let bm = "";
+  for (let i = 0; i < 25; i++) {
+    const ps = await dget(`/d2l/api/lp/${lpV}/enrollments/myenrollments/?orgUnitTypeId=3&isActive=true${bm ? `&bookmark=${encodeURIComponent(bm)}` : ""}`);
+    for (const it of (ps.Items || [])) { const o = it.OrgUnit || {}; if (o.Id) courses.push(String(o.Id)); }
+    if (ps.PagingInfo && ps.PagingInfo.HasMoreItems) bm = ps.PagingInfo.Bookmark; else break;
+  }
+  const files = [];
+  await Promise.all(courses.map(async (ou) => {
+    try {
+      const toc = await dget(`/d2l/api/le/${leV}/${ou}/content/toc`);
+      const walk = (mod) => { for (const t of (mod.Topics || [])) { if (t.TypeIdentifier === "File" && t.TopicId) files.push({ url: `${origin}/d2l/le/content/${ou}/topics/files/download/${t.TopicId}/DirectFileTopicDownload`, filename: t.Title || ("topic_" + t.TopicId), courseId: String(ou) }); } for (const s of (mod.Modules || [])) walk(s); };
+      for (const m of ((toc && toc.Modules) || [])) walk(m);
+    } catch { /* skip course */ }
+  }));
+  return { lms: "d2l", files, courses: courses.length };
+}
+
+async function enumMoodleSW(origin, sesskey) {
+  if (!sesskey) return { lms: "moodle", error: true, files: [], detail: "no sesskey (open a Moodle page while logged in)" };
+  const call = async (methodname, args) => {
+    const r = await fetch(`${origin}/lib/ajax/service.php?sesskey=${encodeURIComponent(sesskey)}&info=${methodname}`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify([{ index: 0, methodname, args }]) });
+    if (!r.ok) throw new Error(`moodle ${methodname} -> ${r.status}`);
+    const data = await r.json();
+    if (Array.isArray(data) && data[0] && !data[0].error) return data[0].data;
+    throw new Error("moodle " + methodname);
+  };
+  const cres = await call("core_course_get_enrolled_courses_by_timeline_classification", { classification: "all", limit: 0, offset: 0, sort: "fullname" });
+  const mc = (cres && cres.courses) || [];
+  const files = [];
+  await Promise.all(mc.map(async (c) => {
+    try { const secs = await call("core_course_get_contents", { courseid: Number(c.id) }); for (const sec of (secs || [])) for (const mod of (sec.modules || [])) for (const ct of (mod.contents || [])) { if (ct.type === "file" && ct.fileurl) files.push({ url: ct.fileurl, filename: ct.filename || mod.name || "file", courseId: String(c.id) }); } } catch { /* skip */ }
+  }));
+  return { lms: "moodle", files, courses: mc.length };
+}
+
+// Dispatch to the right adapter. Throws → caller treats as a retryable enum error.
+async function enumerateSW(lms, origin, tokens = {}) {
+  if (lms === "canvas") return enumCanvasSW(origin);
+  if (lms === "d2l")    return enumD2LSW(origin, tokens.xsrf);
+  if (lms === "moodle") return enumMoodleSW(origin, tokens.sesskey);
+  return { lms: null, files: [] };
+}
+
 // Human-readable summary of a runFullSync result (shown by the popup's Sync button).
 function summarizeSync(r) {
   if (!r) return "Sync failed.";
@@ -798,22 +901,27 @@ async function runFullSync(tabId, host, { force = false } = {}) {
     fullSyncActive = true;
     writeLiveState();
 
-    // Ask the top-frame content script to enumerate the library. It runs in the
-    // isolated world with same-origin authenticated fetch (first-party cookie
-    // sent), so strict LMS CSP can't block it (unlike MAIN-world injection) and
-    // there's no cross-site SameSite problem.
-    let res = null;
-    try {
-      res = await new Promise((resolve) => {
-        chrome.tabs.sendMessage(tabId, { type: "ENUMERATE_LMS" }, { frameId: 0 }, (r) => {
-          resolve(chrome.runtime.lastError ? null : r);   // no content script / not ready
-        });
-      });
-    } catch { res = null; }
+    // Ask the top frame ONLY for what the SW can't read itself: which LMS this is,
+    // plus D2L's XSRF token / Moodle's sesskey (page-scoped). Canvas needs neither.
+    const ctx = await new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, { type: "GET_LMS_CONTEXT" }, { frameId: 0 },
+        (r) => resolve(chrome.runtime.lastError ? null : r));
+    });
+    if (!ctx) return { ok: false, reason: "no-content-script" };
+    if (!ctx.lms) return { ok: false, reason: "no-lms" };
 
-    if (!res) return { ok: false, reason: "no-content-script" };
-    if (res.error) { syncErrorAt.set(host, Date.now()); return { ok: false, reason: "enum-error", lms: res.lms, detail: res.detail }; }
-    if (!res.lms) return { ok: false, reason: "no-lms" };
+    // Enumerate + download entirely in the SW (credentials:"include" → cookies
+    // sent + CORS bypassed, so the inst-fs CDN redirect is readable).
+    const origin = "https://" + host;
+    let res;
+    try {
+      res = await enumerateSW(ctx.lms, origin, { xsrf: ctx.xsrf, sesskey: ctx.sesskey });
+    } catch (e) {
+      syncErrorAt.set(host, Date.now());
+      return { ok: false, reason: "enum-error", lms: ctx.lms, detail: String((e && e.message) || e) };
+    }
+    if (res && res.error) { syncErrorAt.set(host, Date.now()); return { ok: false, reason: "enum-error", lms: ctx.lms, detail: res.detail }; }
+    if (!res || !res.lms) return { ok: false, reason: "no-lms" };
     syncErrorAt.delete(host);
 
     const files = Array.isArray(res.files) ? res.files : [];
@@ -821,33 +929,16 @@ async function runFullSync(tabId, host, { force = false } = {}) {
     await runPool(files, 6, async (f) => {
       if (!f || !f.url) return;
       // isPrivateTarget blocks internal hosts; isAllowedSyncFileUrl blocks
-      // content-supplied third-party URLs (credentialed-fetch SSRF / RAG poison).
+      // third-party URLs (credentialed-fetch SSRF / RAG poison).
       if (isPrivateTarget(f.url) || !isAllowedSyncFileUrl(f.url, host)) { blocked++; return; }
       const key = canonicalizeUrl(f.url);
       if ((await getCaptured()).includes(key) || inFlight.has(key)) { skipped++; return; }  // dedup vs history + concurrent captures
       if (await isBlockedByFailures(key)) { skipped++; return; }                            // respect the 3-strike backoff
       inFlight.add(key);
       try {
-        // Fetch bytes in the TAB (same-origin, first-party session cookie) — the
-        // SW's own fetch is cross-site and 403s / gets a login page on the LMS.
-        const fetched = await new Promise((resolve) => {
-          chrome.tabs.sendMessage(tabId, { type: "FETCH_FILE", url: f.url }, { frameId: 0 },
-            (r) => resolve(chrome.runtime.lastError ? { error: "content script gone" } : r));
-        });
-        let r;
-        if (fetched && fetched.bytes) {
-          // Import the bytes the tab fetched (importFile won't re-fetch when bytes present).
-          r = await importFile({ url: f.url, filename: f.filename, bytes: fetched.bytes, mimeType: fetched.mimeType, courseId: f.courseId ?? null, platform: res.lms });
-        } else if (fetched && fetched.corsOrNetwork) {
-          // Cross-origin CDN (e.g. Canvas inst-fs) — the tab can't fetch it (CORS),
-          // but the SW can (verifier/signed URL needs no cookie).
-          r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
-        } else {
-          r = { error: fetched?.error || "fetch failed" };
-          // No importFile call on a fetch failure → record the outcome in the
-          // activity feed ourselves, with the clean per-file error message.
-          pushActivity(String(f.filename || "file").split(/[/\\]/).pop() || "file", "failed", r.error);
-        }
+        // Download in the SW (credentials:"include" → session cookie authorizes the
+        // download and follows the 302 to the CDN, which the SW can read).
+        const r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
         if (r?.ok) { if (r.skipped) skipped++; else imported++; }
         else { failed++; lastError = r?.error || lastError; if (!r?.transient) await recordFailure(key); }
       } finally {
