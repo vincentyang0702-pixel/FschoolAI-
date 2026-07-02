@@ -14,7 +14,7 @@ import BottomNav            from "./components/BottomNav";
 import Landing              from "./pages/Landing"; // eager — logged-out entry, shown on first paint
 import { useApp }           from "./context/AppContext";
 import { supabase }         from "./api/supabase";
-import { signIn, signUp }   from "./api/auth";
+import { signIn, signUp, adoptIdentity } from "./api/auth";
 import { usePageTracking }  from "./hooks/usePageTracking";
 import { awardTokens }      from "./api/tokens";
 import TokenToast           from "./components/TokenToast";
@@ -300,39 +300,9 @@ export default function App() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  // Chrome extension sign-in handshake: /?ext=signin&extId=<extensionId>
-  // The extension popup opens this URL; we message the extension back with the user's session.
-  useEffect(() => {
-    if (!isLoggedIn || !userId) return;
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("ext") !== "signin") return;
-    const extId = params.get("extId");
-    if (!extId) return;
-
-    const cr = (window as any).chrome?.runtime;
-    if (!cr) return;
-
-    // Clean the URL immediately
-    const clean = new URL(window.location.href);
-    clean.searchParams.delete("ext");
-    clean.searchParams.delete("extId");
-    window.history.replaceState({}, "", clean.toString());
-
-    cr.sendMessage(extId, {
-      type: "SIGN_IN",
-      payload: {
-        userId,
-        token:     "ext-session",
-        expiresAt: Date.now() + 30 * 24 * 60 * 60 * 1000,
-      },
-    }, (response) => {
-      if (cr.lastError) {
-        console.warn("[ext-signin] sendMessage error:", cr.lastError.message);
-      } else {
-        console.log("[ext-signin] signed in to extension:", response);
-      }
-    });
-  }, [isLoggedIn, userId]); // eslint-disable-line
+  // (Removed) Chrome extension sign-in handshake (/?ext=signin&extId=...): it pushed the
+  // web's possibly-stale fschool_uid into the extension, overwriting the extension's
+  // correctly-resolved canonical id. The extension has its own GoTrue popup login now.
 
   const fadingRef = useRef(false);
 
@@ -380,7 +350,11 @@ export default function App() {
 
     // ── Login — Supabase Auth (lazily migrates legacy SHA-256 accounts) ──────────
     if (creds.mode === "login") {
+      const prevUid = localStorage.getItem("fschool_uid");
       const profile = await signIn(email, creds.password); // establishes a GoTrue session
+      // Merge this browser's previous uid's data into the canonical profile BEFORE
+      // discarding it (failure → fschool_merge_pending, retried at next boot).
+      if (prevUid && prevUid !== profile.id) await adoptIdentity(prevUid);
       localStorage.setItem("fschool_uid", profile.id);
       localStorage.setItem(LOGGED_IN_KEY, "1");
       if (profile.name) localStorage.setItem("fschool_name", profile.name);
@@ -390,9 +364,13 @@ export default function App() {
 
     // ── Signup — creates the GoTrue user + a fresh profile, then signs in ─────────
     // (The server mints a brand-new profile id, so signing up on a device already
-    // logged into another account can't clobber it — the old "merge" bug.)
+    // logged into another account can't clobber it — the old "merge" bug. Claiming the
+    // browser's guest data goes through ?action=adopt, which refuses ids owned by a
+    // different auth account, so that guarantee still holds.)
+    const prevGuestUid = localStorage.getItem("fschool_uid");
     localStorage.setItem("fschool_name", creds.name);
     const profile = await signUp({ name: creds.name, email, password: creds.password });
+    if (prevGuestUid && prevGuestUid !== profile.id) await adoptIdentity(prevGuestUid);
     localStorage.setItem("fschool_uid", profile.id);
 
     // Verification email — non-blocking, won't fail signup if email fails.

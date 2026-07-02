@@ -30,14 +30,6 @@
     }
   ],
 
-  "externally_connectable": {
-    "matches": [
-      "http://localhost:5173/*",
-      "https://fschoolai.com/*",
-      "https://fschool-ai.vercel.app/*"
-    ]
-  },
-
   "action": {
     "default_popup": "popup.html",
     "default_title": "FschoolAI Importer"

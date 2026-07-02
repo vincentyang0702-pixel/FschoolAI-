@@ -14,6 +14,10 @@
 import { createClient } from "@supabase/supabase-js";
 import { createHash, randomUUID } from "node:crypto";
 
+// ?action=adopt runs merge_user_ids over every user_id table — heavy accounts
+// (thousands of rag_chunks) need more than Vercel's ~10s default.
+export const config = { maxDuration: 60 };
+
 // service_role key → bypasses RLS and unlocks auth.admin.*
 // Targets the `public` schema — where the live fschoolai.com app's users table lives
 // (vincent/frontend/dev: src/api/supabase.js uses { db: { schema: 'public' } }).
@@ -30,7 +34,7 @@ const sha256 = (str) => createHash("sha256").update(str, "utf8").digest("hex");
 export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   if (req.method === "OPTIONS") return res.status(204).end();
   if (req.method !== "POST") return res.status(405).json({ error: "POST only" });
 
@@ -150,5 +154,52 @@ export default async function handler(req, res) {
     return res.status(200).json({ ok: true });
   }
 
-  return res.status(400).json({ error: "Unknown action. Use ?action=signup, ?action=migrate, or ?action=reset" });
+  // ── adopt (merge a stale/guest uid into the caller's canonical profile) ────
+  // POST /api/auth-migrate?action=adopt   Authorization: Bearer <supabase access token>
+  // body { oldId }. The canonical id derives from the verified JWT (auth_id → users.id),
+  // NEVER from the body — so a client can only re-key data onto its OWN profile, and only
+  // from an id that is unowned or already linked to the same auth account.
+  if (action === "adopt") {
+    const jwt = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+    if (!jwt) return res.status(401).json({ error: "Authorization required" });
+    const { data: userData, error: jwtErr } = await supabase.auth.getUser(jwt);
+    const authUser = userData?.user;
+    if (jwtErr || !authUser) return res.status(401).json({ error: "Invalid session" });
+
+    const { data: canonical } = await supabase
+      .from("users").select("id").eq("auth_id", authUser.id).maybeSingle();
+    if (!canonical) return res.status(404).json({ error: "No profile for this account" });
+
+    const oldId = String(req.body?.oldId ?? "").trim();
+    if (!oldId || oldId === canonical.id)
+      return res.status(200).json({ userId: canonical.id, merged: false });
+
+    // Ownership guard — refuse to merge anything that might belong to someone else:
+    //   • auth-linked to a DIFFERENT GoTrue account (shared computer), or
+    //   • a legacy pre-Auth row (email/password_hash set, no auth_id) whose email
+    //     doesn't match the caller — merging it would absorb that person's account
+    //     and delete their users row (they could never log in again).
+    // Guest rows (no auth_id, no email, no password_hash) merge freely.
+    const { data: oldRow } = await supabase
+      .from("users").select("id, auth_id, email, password_hash").eq("id", oldId).maybeSingle();
+    const callerEmail = (authUser.email ?? "").toLowerCase();
+    const oldEmail    = (oldRow?.email ?? "").toLowerCase();
+    const foreign =
+      (oldRow?.auth_id && oldRow.auth_id !== authUser.id) ||
+      (oldEmail && oldEmail !== callerEmail) ||
+      (oldRow?.password_hash && !oldEmail);   // credentialed but unattributable → refuse
+    if (foreign)
+      return res.status(200).json({ userId: canonical.id, merged: false, refused: true });
+
+    // Proceed even when oldRow is null — non-FK tables (rag_*, room_messages,
+    // whiteboard_strokes) can hold rows for a guest uid that has no users row.
+    const { error: mergeErr } = await supabase.rpc("merge_user_ids", { p_old: oldId, p_new: canonical.id });
+    if (mergeErr) {
+      console.error("[auth-migrate/adopt] merge failed:", mergeErr.message);
+      return res.status(500).json({ error: "Could not merge accounts. Please try again." });
+    }
+    return res.status(200).json({ userId: canonical.id, merged: true });
+  }
+
+  return res.status(400).json({ error: "Unknown action. Use ?action=signup, ?action=migrate, ?action=reset, or ?action=adopt" });
 }
