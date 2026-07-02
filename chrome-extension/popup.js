@@ -116,8 +116,24 @@ async function init() {
   if (signedIn) {
     $("uid-label").textContent = `User: ${auth.userId?.slice(0, 20)}…`;
     renderPending();
+    // Settings + stats
+    chrome.runtime.sendMessage({ type: "GET_SETTINGS" }, (res) => {
+      if (!res) return;
+      const ac = $("toggle-auto-capture"), ad = $("toggle-auto-downloads");
+      if (ac) ac.checked = !!res.settings?.autoCapture;
+      if (ad) ad.checked = !!res.settings?.autoImportDownloads;
+      const n = res.stats?.autoImported ?? 0;
+      if ($("stats-label")) $("stats-label").textContent = n ? `${n} file${n === 1 ? "" : "s"} auto-captured` : "";
+    });
   }
 }
+
+$("toggle-auto-capture")?.addEventListener("change", (e) => {
+  chrome.runtime.sendMessage({ type: "SET_SETTINGS", payload: { autoCapture: e.target.checked } });
+});
+$("toggle-auto-downloads")?.addEventListener("change", (e) => {
+  chrome.runtime.sendMessage({ type: "SET_SETTINGS", payload: { autoImportDownloads: e.target.checked } });
+});
 
 function renderPending() {
   chrome.storage.local.get(["pendingDownloads"], ({ pendingDownloads = [] }) => {
@@ -138,11 +154,14 @@ function renderPending() {
       btn.textContent = "Import";
       btn.addEventListener("click", async () => {
         btn.textContent = "…"; btn.disabled = true;
+        // fetchUrl → the background re-downloads the file itself (with session
+        // cookies); the popup never has the bytes for a completed download.
         const res = await chrome.runtime.sendMessage({
           type: "IMPORT_FILE",
-          payload: { url: d.url, filename: name, pageUrl: d.url },
+          payload: { url: d.url, fetchUrl: d.url, filename: name, pageUrl: d.referrer ?? d.url, platform: "download" },
         });
         btn.textContent = res?.ok ? "✓" : "Err";
+        btn.title = res?.error ?? "";
       });
       item.append(span, btn);
       list.appendChild(item);
@@ -202,9 +221,11 @@ $("btn-sign-out")?.addEventListener("click", async () => {
 });
 
 $("btn-clear-pending")?.addEventListener("click", () => {
-  chrome.storage.local.set({ pendingDownloads: [] });
-  chrome.action?.setBadgeText?.({ text: "" });
-  if ($("pending-section")) $("pending-section").style.display = "none";
+  // Background clears both the list and the badge (chrome.action isn't reliably
+  // available in the popup context).
+  chrome.runtime.sendMessage({ type: "CLEAR_PENDING" }, () => {
+    if ($("pending-section")) $("pending-section").style.display = "none";
+  });
 });
 
 init();

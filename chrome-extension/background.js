@@ -1,10 +1,23 @@
 // background.js — FschoolAI Extension service worker
-// Content script fetches file bytes (with live session cookies), sends here.
-// We call /api/lms-ingest directly — no cookie relay, no allowlist, any website.
+//
+// Roles:
+//   • Fetches file bytes cross-origin (host_permissions bypass CORS; content scripts can't)
+//   • Routes every import through /api/lms-ingest — small files inline (base64),
+//     big files via ?action=sign → PUT to storage → ingest by storagePath
+//     (Vercel rejects request bodies over ~4.5MB, so inline-only would silently
+//     fail on lecture decks — the most valuable files)
+//   • Serializes imports through a queue (many tabs / auto-capture can't stampede)
+//   • Tracks per-URL capture history so auto-capture never re-imports
+//   • Captures completed downloads from academic sites (pending list / opt-in auto)
 
 // Dev vs prod: change to "http://localhost:5173" for local testing
 const FSCHOOLAI_ORIGIN = "https://fschoolai.com";
 const API_BASE         = FSCHOOLAI_ORIGIN;
+
+const INLINE_B64_LIMIT = 3_000_000;             // base64 chars (~2.2MB binary) — under Vercel's cap
+const MAX_FILE_BYTES   = 50 * 1024 * 1024;      // absolute cap, matches the server
+const CAPTURED_MAX     = 800;                    // LRU size of the "already imported" URL set
+const QUEUE_MAX        = 40;                     // max queued imports at once
 
 // ── Auth state ─────────────────────────────────────────────────────────────
 
@@ -24,12 +37,48 @@ async function setAuth(userId, token, expiresAt) {
   });
 }
 
-// ── Cloud storage file fetcher ─────────────────────────────────────────────
-// Covers: Google Drive/Docs, Dropbox, OneDrive, SharePoint, Box.
-// Background service workers bypass CORS — content scripts cannot fetch
-// cross-origin URLs from these domains even with credentials: "include".
-// All providers: fetch with credentials so shared/private files work when the
-// user is already signed in to that service in their browser.
+// ── Settings ────────────────────────────────────────────────────────────────
+// autoCapture: content scripts auto-import files found on LMS-looking pages (default ON)
+// autoImportDownloads: completed downloads from academic sites import silently (default OFF)
+
+const SETTING_DEFAULTS = { autoCapture: true, autoImportDownloads: false };
+
+async function getSettings() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["settings"], ({ settings }) =>
+      resolve({ ...SETTING_DEFAULTS, ...(settings ?? {}) }));
+  });
+}
+
+// ── Captured-URL memory (auto-capture dedup across visits) ──────────────────
+// Server dedups too (files.source_url), but this avoids even re-downloading.
+
+async function getCaptured() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get(["capturedUrls"], ({ capturedUrls }) =>
+      resolve(Array.isArray(capturedUrls) ? capturedUrls : []));
+  });
+}
+
+async function markCaptured(url) {
+  const list = await getCaptured();
+  if (list.includes(url)) return;
+  const updated = [url, ...list].slice(0, CAPTURED_MAX);
+  await new Promise((r) => chrome.storage.local.set({ capturedUrls: updated }, r));
+}
+
+// Mirror of the server's canonicalizeSourceUrl — keeps client dedup keys aligned
+// with what drive-auth's Classroom sync and lms-ingest store.
+function canonicalizeUrl(raw) {
+  const s = String(raw ?? "");
+  const drive = s.match(/drive\.google\.com\/(?:file\/d\/|open\?.*?id=|uc\?.*?id=)([\w-]{10,})/);
+  if (drive) return `https://drive.google.com/file/d/${drive[1]}`;
+  const gdoc = s.match(/docs\.google\.com\/(document|presentation|spreadsheets)\/d\/([\w-]{10,})/);
+  if (gdoc) return `https://docs.google.com/${gdoc[1]}/d/${gdoc[2]}`;
+  return s;
+}
+
+// ── Byte helpers ─────────────────────────────────────────────────────────────
 
 function bufferToBase64(buffer) {
   const uint8 = new Uint8Array(buffer);
@@ -41,8 +90,18 @@ function bufferToBase64(buffer) {
   return btoa(binary);
 }
 
-// Transforms a cloud storage share/viewer URL into a direct download URL.
-// Returns null if the URL is not a recognised cloud storage link.
+// Decode the first bytes of a base64 string and check for an HTML page —
+// an expired LMS session serves a login page instead of the file.
+function base64LooksLikeHtml(b64) {
+  try {
+    const head = atob(String(b64).slice(0, 120)).trimStart().toLowerCase();
+    return head.startsWith("<!doctype") || head.startsWith("<html") || head.startsWith("<head");
+  } catch { return false; }
+}
+
+// ── Cloud storage file fetcher ─────────────────────────────────────────────
+// Covers: Google Drive/Docs, Dropbox, OneDrive, SharePoint, Box.
+
 function transformCloudUrl(href) {
   try {
     const u = new URL(href);
@@ -69,30 +128,21 @@ function transformCloudUrl(href) {
     }
 
     // ── Dropbox ───────────────────────────────────────────────────────────
-    // Share links (www.dropbox.com/s/… or /scl/fi/…) end in ?dl=0 (viewer page).
-    // Rewriting the host to dl.dropboxusercontent.com + dl=1 serves the raw file
-    // bytes directly, avoiding the HTML interstitial that ?dl=1 alone can return.
     if (/(^|\.)dropbox\.com$/.test(h)) {
       u.hostname = "dl.dropboxusercontent.com";
       u.searchParams.set("dl", "1");
       return u.toString();
     }
 
-    // ── OneDrive personal (1drv.ms / onedrive.live.com) ───────────────────
-    // NOT handled here. Microsoft gates these behind a JS/auth handshake, so
-    // there is no static download URL. fetchCloudFile() routes OneDrive to the
-    // dedicated fetchOneDriveFile() two-step resolver instead.
+    // ── OneDrive personal — handled by fetchOneDriveFile() (no static URL) ─
 
     // ── SharePoint / OneDrive for Business ───────────────────────────────
-    // File share links contain /:b:/ (PDF), /:w:/ (Word), /:p:/ (PPT), etc.
-    // Appending ?download=1 forces the browser/server to return raw bytes.
     if (/sharepoint\.com/.test(h)) {
       u.searchParams.set("download", "1");
       return u.toString();
     }
 
     // ── Box ───────────────────────────────────────────────────────────────
-    // Public share links: /s/{hash} — Box serves the file at /shared/static/{hash}
     if (/box\.com/.test(h)) {
       const shareMatch = u.pathname.match(/\/s\/([a-zA-Z0-9]+)/);
       if (shareMatch) return `https://app.box.com/shared/static/${shareMatch[1]}`;
@@ -102,24 +152,16 @@ function transformCloudUrl(href) {
   return null;
 }
 
-// OneDrive personal share links can't be turned into a static download URL —
-// Microsoft requires a JS/auth handshake. Best effort: follow the share-link
-// redirect to the resolved viewer URL, then re-request it with download=1,
-// relying on the user's existing OneDrive browser session (credentials) for
-// their own / shared-with-them files. Anonymous strangers will hit a sign-in
-// wall — that's Microsoft's design, not a bug here.
+// OneDrive personal share links need a redirect-following two-step (no static URL).
 async function fetchOneDriveFile(href) {
-  // Step 1 — follow the redirect to the resolved onedrive.live.com viewer URL.
   let res = await fetch(href, { credentials: "include", redirect: "follow" });
   let ct  = res.headers.get("content-type") ?? "";
 
-  // If the first hop already returned the raw file, use it.
   if (res.ok && !ct.includes("text/html")) {
     const mimeType = ct.split(";")[0]?.trim() || "application/octet-stream";
     return { bytes: bufferToBase64(await res.arrayBuffer()), mimeType };
   }
 
-  // Step 2 — re-request the resolved URL with download=1 to force raw bytes.
   let resolved;
   try { resolved = new URL(res.url); } catch { resolved = null; }
   if (resolved) {
@@ -136,7 +178,6 @@ async function fetchOneDriveFile(href) {
 }
 
 async function fetchCloudFile(href) {
-  // OneDrive personal needs the dedicated two-step resolver (see above).
   let host = "";
   try { host = new URL(href).hostname; } catch {}
   if (/(^|\.)1drv\.ms$|(^|\.)onedrive\.live\.com$/.test(host)) {
@@ -146,12 +187,9 @@ async function fetchCloudFile(href) {
   const downloadUrl = transformCloudUrl(href);
   if (!downloadUrl) throw new Error("Not a recognised cloud storage URL");
 
-  // Fetch with live session cookies — if the user is signed in to the service,
-  // shared/private files are served automatically. Public files need no auth.
   let res = await fetch(downloadUrl, { credentials: "include" });
 
-  // Google Drive: large files (>25 MB) return a virus-scan HTML page.
-  // Extract the confirm= token and retry.
+  // Google Drive: large files return a virus-scan HTML page → confirm token retry.
   const ct = res.headers.get("content-type") ?? "";
   if (ct.includes("text/html")) {
     const html = await res.text();
@@ -159,6 +197,8 @@ async function fetchCloudFile(href) {
     if (!confirmMatch) throw new Error("Cloud storage returned HTML — file may be private or login required");
     const sep = downloadUrl.includes("?") ? "&" : "?";
     res = await fetch(`${downloadUrl}${sep}confirm=${confirmMatch[1]}`, { credentials: "include" });
+    const ct2 = res.headers.get("content-type") ?? "";
+    if (ct2.includes("text/html")) throw new Error("Cloud storage returned HTML — file may be private or login required");
   }
 
   if (!res.ok) throw new Error(`Cloud fetch failed: HTTP ${res.status}`);
@@ -168,44 +208,160 @@ async function fetchCloudFile(href) {
   return { bytes: bufferToBase64(buffer), mimeType };
 }
 
-// ── File import ────────────────────────────────────────────────────────────
+// ── SW-side file fetch (CORS bypass; used when the content script can't) ────
 
-async function importFile({ url, filename, pageUrl, courseId, bytes, mimeType, platform }) {
-  const auth = await getAuth();
-  if (!auth) {
-    return { error: "Not signed in. Open the extension popup to sign in." };
+async function fetchFileBytes(url) {
+  const res = await fetch(url, { credentials: "include", redirect: "follow" });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const mimeType = res.headers.get("content-type")?.split(";")[0]?.trim() ?? "application/octet-stream";
+  const buffer = await res.arrayBuffer();
+  if (buffer.byteLength > MAX_FILE_BYTES) throw new Error("File too large (max 50 MB)");
+  if (buffer.byteLength === 0) throw new Error("Empty response");
+  const b64 = bufferToBase64(buffer);
+  if (mimeType.includes("text/html") || base64LooksLikeHtml(b64)) {
+    throw new Error("Got a login/HTML page instead of the file — are you signed in to the LMS?");
   }
+  return { bytes: b64, mimeType };
+}
+
+// ── Signed-upload path for big files (Vercel body limit) ────────────────────
+
+async function uploadViaStorage(auth, filename, b64, mimeType) {
+  const signRes = await fetch(`${API_BASE}/api/lms-ingest?action=sign`, {
+    method:  "POST",
+    headers: { "Content-Type": "application/json" },
+    body:    JSON.stringify({ userId: auth.userId, name: filename }),
+  });
+  const sign = await signRes.json().catch(() => ({}));
+  if (!signRes.ok || !sign.signedUrl) throw new Error(sign.error ?? "could not get upload URL");
+
+  // Rebuild the binary from base64 for the PUT body.
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+
+  const putRes = await fetch(sign.signedUrl, {
+    method:  "PUT",
+    headers: { "Content-Type": mimeType || "application/octet-stream" },
+    body:    bytes,
+  });
+  if (!putRes.ok) throw new Error(`storage upload failed (${putRes.status})`);
+  return { storagePath: sign.path, bucket: sign.bucket };
+}
+
+// ── File import (single entry point; queue-serialized) ──────────────────────
+
+let importChain = Promise.resolve();
+let queueDepth  = 0;
+
+function enqueueImport(task) {
+  if (queueDepth >= QUEUE_MAX) {
+    return Promise.resolve({ error: "Import queue is full — try again in a minute" });
+  }
+  queueDepth++;
+  const run = importChain.then(task).finally(() => { queueDepth--; });
+  // Keep the chain alive even when a task rejects.
+  importChain = run.catch(() => {});
+  return run;
+}
+
+async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeType, platform, fetchUrl }) {
+  const auth = await getAuth();
+  if (!auth) return { error: "Not signed in. Open the extension popup to sign in." };
 
   try {
+    // Fetch here (SW bypasses CORS) when the content script couldn't, or for
+    // pending-download imports where only the URL is known.
+    if (!bytes && fetchUrl) {
+      const fetched = await fetchFileBytes(fetchUrl);
+      bytes    = fetched.bytes;
+      mimeType = mimeType && mimeType !== "application/octet-stream" ? mimeType : fetched.mimeType;
+    }
+    if (!bytes) return { error: "No file data" };
+    if (base64LooksLikeHtml(bytes)) {
+      return { error: "Got a login/HTML page instead of the file — are you signed in to the LMS?" };
+    }
+
+    const sourceUrl = canonicalizeUrl(url ?? fetchUrl);
+    const filePayload = {
+      name:      filename,
+      mimeType:  mimeType ?? "application/octet-stream",
+      sourceUrl,
+      provider:  "extension",
+      metadata:  { platform: platform ?? "web", courseId: courseId ?? null },
+    };
+
+    // Big files can't ride an inline JSON body (Vercel ~4.5MB cap) → storage path.
+    if (bytes.length > INLINE_B64_LIMIT) {
+      const { storagePath, bucket } = await uploadViaStorage(auth, filename, bytes, filePayload.mimeType);
+      filePayload.storagePath = storagePath;
+      filePayload.bucket      = bucket;
+    } else {
+      filePayload.bytes = bytes;
+    }
+
     const res = await fetch(`${API_BASE}/api/lms-ingest`, {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({
-        userId: auth.userId,
-        file: {
-          name:      filename,
-          mimeType:  mimeType ?? "application/octet-stream",
-          bytes,
-          sourceUrl: url,
-          provider:  "extension",
-          metadata:  { platform: platform ?? "web", courseId: courseId ?? null },
-        },
-      }),
+      body:    JSON.stringify({ userId: auth.userId, courseId: courseId ?? null, file: filePayload }),
     });
 
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) return { error: data.error ?? `Ingest failed (${res.status})` };
+
+    await markCaptured(sourceUrl);
     return { ok: true, skipped: data.skipped, documentId: data.documentId };
   } catch (e) {
     return { error: e.message ?? "Network error" };
   }
 }
 
+function importFile(payload) {
+  return enqueueImport(() => importFileInner(payload));
+}
+
+// ── Auto-capture (from content scripts on LMS-looking pages) ────────────────
+
+async function autoImportBatch({ items, pageUrl, platform }) {
+  const auth = await getAuth();
+  if (!auth) return { ok: false, reason: "signed-out" };
+  const settings = await getSettings();
+  if (!settings.autoCapture) return { ok: false, reason: "disabled" };
+
+  const captured = await getCaptured();
+  const fresh = [];
+  const seenThisBatch = new Set();
+  for (const it of (items ?? [])) {
+    const key = canonicalizeUrl(it.url);
+    if (captured.includes(key) || seenThisBatch.has(key)) continue;
+    seenThisBatch.add(key);
+    fresh.push(it);
+  }
+
+  let imported = 0, skipped = 0, failed = 0;
+  for (const it of fresh) {
+    const r = await importFile({
+      url: it.url, fetchUrl: it.url, filename: it.filename,
+      pageUrl, courseId: null, platform,
+    });
+    if (r?.ok) { if (r.skipped) skipped++; else imported++; }
+    else failed++;
+  }
+  if (imported > 0) bumpStat("autoImported", imported);
+  return { ok: true, imported, skipped, failed, considered: fresh.length };
+}
+
+function bumpStat(key, by) {
+  chrome.storage.local.get(["stats"], ({ stats = {} }) => {
+    stats[key] = (stats[key] ?? 0) + by;
+    chrome.storage.local.set({ stats });
+  });
+}
+
 // ── Message handlers ───────────────────────────────────────────────────────
 
-// (Removed) external SIGN_IN handshake: web pages could overwrite the extension's
-// canonical userId with a stale fschool_uid. The popup's own GoTrue login (popup.js)
-// is the only way a session enters this extension now.
+// (No onMessageExternal handler: web pages must never be able to set this
+// extension's identity. The popup's GoTrue login is the only session entry.)
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "IMPORT_FILE") {
@@ -228,8 +384,41 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === "AUTO_IMPORT") {
+    autoImportBatch(msg.payload ?? {}).then(sendResponse);
+    return true;
+  }
+
   if (msg.type === "GET_AUTH_STATUS") {
     getAuth().then(auth => sendResponse({ signedIn: !!auth, userId: auth?.userId ?? null }));
+    return true;
+  }
+
+  if (msg.type === "GET_SETTINGS") {
+    (async () => {
+      const settings = await getSettings();
+      const captured = await getCaptured();
+      const { stats = {} } = await new Promise(r => chrome.storage.local.get(["stats"], r));
+      return { settings, capturedCount: captured.length, stats };
+    })().then(sendResponse);
+    return true;
+  }
+
+  if (msg.type === "SET_SETTINGS") {
+    (async () => {
+      const current = await getSettings();
+      const settings = { ...current, ...(msg.payload ?? {}) };
+      await new Promise(r => chrome.storage.local.set({ settings }, r));
+      return { ok: true, settings };
+    })().then(sendResponse);
+    return true;
+  }
+
+  if (msg.type === "CLEAR_PENDING") {
+    chrome.storage.local.set({ pendingDownloads: [] }, () => {
+      chrome.action.setBadgeText({ text: "" });
+      sendResponse({ ok: true });
+    });
     return true;
   }
 
@@ -245,7 +434,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 });
 
-// ── Download capture (opt-in) ──────────────────────────────────────────────
+// ── Download capture ─────────────────────────────────────────────────────────
+// Completed downloads from academic sites are queued in the popup ("Captured
+// downloads"), or imported silently when autoImportDownloads is on.
 
 const ACADEMIC_PATTERNS = [
   /edu/, /\.ac\.[a-z]{2}$/, /chaoxing\.com/, /zhihuishu\.com/,
@@ -253,6 +444,8 @@ const ACADEMIC_PATTERNS = [
   /instructure\.com/, /desire2learn\.com/, /moodle/,
   /sharepoint\.com/, /teams\.microsoft\.com/,
 ];
+
+const DOC_EXT_RE = /\.(pdf|docx?|pptx?|xlsx?|txt|csv)(\?|#|$)/i;
 
 function isAcademic(url) {
   try {
@@ -270,11 +463,23 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   const refUrl = item.referrer ?? item.url;
   if (!isAcademic(refUrl)) return;
 
-  chrome.storage.local.get(["autoImport", "pendingDownloads"], ({ autoImport, pendingDownloads = [] }) => {
-    if (autoImport === false) return;
+  const netUrl = item.finalUrl ?? item.url;           // the network URL (never file://)
+  const name   = (item.filename ?? "").split(/[/\\]/).pop() || "file";
+
+  const settings = await getSettings();
+  const auth     = await getAuth();
+
+  // Opt-in silent auto-import — document types only.
+  if (settings.autoImportDownloads && auth && DOC_EXT_RE.test(netUrl + name)) {
+    const r = await importFile({ url: netUrl, fetchUrl: netUrl, filename: name, platform: "download" });
+    if (r?.ok) { bumpStat("autoImported", 1); return; }
+    // fall through to the pending list so the user can retry manually
+  }
+
+  chrome.storage.local.get(["pendingDownloads"], ({ pendingDownloads = [] }) => {
     const updated = [
-      { id: delta.id, filename: item.filename, url: item.url, referrer: item.referrer, timestamp: Date.now() },
-      ...pendingDownloads.slice(0, 9),
+      { id: delta.id, filename: name, url: netUrl, referrer: item.referrer, timestamp: Date.now() },
+      ...pendingDownloads.filter(d => d.url !== netUrl).slice(0, 9),
     ];
     chrome.storage.local.set({ pendingDownloads: updated });
     chrome.action.setBadgeText({ text: String(updated.length) });

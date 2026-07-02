@@ -19,6 +19,10 @@
 //   - Set-Cookie stripped from upstream response
 
 import { createClient } from "@supabase/supabase-js";
+import { ingestLmsFile } from "./lms-ingest.js";
+
+// Proxied fetch + full ingest (extract/OCR/embed) can take a while for big files.
+export const config = { maxDuration: 300 };
 
 let _sb: any = null;
 function sb() {
@@ -143,27 +147,28 @@ export default async function handler(req: any, res: any) {
     return res.status(413).json({ error: "File too large (max 50 MB)" });
   }
 
-  // ── Pipe to unified ingest pipeline ──────────────────────────────────────
-  const ingestRes = await fetch(`${selfBase()}/api/lms-ingest`, {
-    method:  "POST",
-    headers: { "Content-Type": "application/json" },
-    body:    JSON.stringify({
-      userId,
-      courseId: courseId ?? null,
-      file: {
-        name:     filename,
-        mimeType: contentType,
-        bytes:    bytes.toString("base64"),
-        sourceUrl: url,
-        provider: "extension",
-        metadata: { platform: platform ?? "unknown", originalFilename: filename },
-      },
-    }),
-  });
-
-  const ingestData = await ingestRes.json().catch(() => ({}));
-  if (!ingestRes.ok) {
-    return res.status(502).json({ error: ingestData.error ?? "lms-ingest failed" });
+  // Reject HTML masquerading as a file (session-expired login pages) before ingesting garbage.
+  const head = bytes.subarray(0, 256).toString("utf8").trimStart().toLowerCase();
+  if (contentType.includes("text/html") || head.startsWith("<!doctype") || head.startsWith("<html")) {
+    return res.status(422).json({ error: "LMS returned a login/HTML page instead of the file — session may have expired" });
   }
-  return res.status(200).json(ingestData);
+
+  // ── Pipe to unified ingest pipeline — DIRECT call (no internal HTTP hop, so
+  //    Vercel's 4.5MB body limit never applies to proxied LMS files) ─────────
+  const result = await ingestLmsFile({
+    userId,
+    courseId: courseId ?? null,
+    file: {
+      name:     filename,
+      mimeType: contentType,
+      bytes,
+      sourceUrl: url,
+      provider: "extension",
+      metadata: { platform: platform ?? "unknown", originalFilename: filename },
+    },
+  });
+  if (result.status !== 200) {
+    return res.status(502).json({ error: result.json?.error ?? "lms-ingest failed" });
+  }
+  return res.status(200).json(result.json);
 }
