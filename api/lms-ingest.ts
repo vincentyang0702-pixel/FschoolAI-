@@ -295,6 +295,8 @@ export default async function handler(req: any, res: any) {
   if (req.query?.action === "sign") {
     const { userId, name } = req.body ?? {};
     if (!userId || !name) return res.status(400).json({ error: "userId and name required" });
+    // Path-traversal guard: userId becomes a storage path segment.
+    if (!/^[\w-]{1,64}$/.test(String(userId))) return res.status(400).json({ error: "invalid userId" });
     try {
       const path = `${userId}/lms/${Date.now()}-${safeName(name)}`;
       const { data, error } = await sb().storage.from(DEFAULT_BUCKET).createSignedUploadUrl(path);
