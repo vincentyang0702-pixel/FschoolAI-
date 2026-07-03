@@ -819,8 +819,18 @@ async function enumCanvasSW(origin) {
     if (!fid || seen.has(k)) return;
     seen.add(k);
     // The SW's credentials:"include" fetch lets the session cookie authorize this
-    // download and follow the 302 to the inst-fs CDN — no verifier needed.
+    // download and follow the 302 to the inst-fs CDN — no verifier needed. The real
+    // filename comes back via Content-Disposition, so a null name is fine here.
     files.push({ url: `${origin}/courses/${cid}/files/${fid}/download?download_frd=1`, filename: name || ("file_" + fid), courseId: String(cid) });
+  };
+  // Pull /files/{id} ids embedded in an HTML body (page/syllabus/assignment). This
+  // catches files that live in NO module — e.g. a syllabus PDF linked from a Page,
+  // whose on-page link points at the file PREVIEW (returns HTML), not the download.
+  const HTML_FILE_RE = /\/files\/(\d+)/g;
+  const addFromHtml = (cid, html) => {
+    if (!html || typeof html !== "string") return;
+    let m; HTML_FILE_RE.lastIndex = 0;
+    while ((m = HTML_FILE_RE.exec(html))) add(cid, m[1], null);
   };
   await Promise.all(courses.map(async (c) => {
     // Modules survive a disabled Files tab (where /courses/{id}/files 403s) — this
@@ -833,6 +843,19 @@ async function enumCanvasSW(origin) {
     } catch { /* modules off */ }
     // Files tab (best effort; often 403 for students).
     try { for (const f of await pageAll(`/courses/${c.id}/files`)) add(c.id, f.id, f.display_name || f.filename); } catch { /* files tab off */ }
+    // Files embedded in the syllabus body.
+    try { const { data } = await swGetJSON(`${origin}/api/v1/courses/${c.id}?include[]=syllabus_body`); addFromHtml(c.id, data && data.syllabus_body); } catch { /* no syllabus */ }
+    // Files embedded in Pages (e.g. a "Syllabus" page with a PDF). Bounded to keep
+    // the call count sane on courses with many pages.
+    try {
+      const pages = await pageAll(`/courses/${c.id}/pages`);
+      await Promise.all(pages.slice(0, 60).map(async (pg) => {
+        if (!pg.url) return;
+        try { const { data } = await swGetJSON(`${origin}/api/v1/courses/${c.id}/pages/${encodeURIComponent(pg.url)}`); addFromHtml(c.id, data && data.body); } catch { /* page blocked */ }
+      }));
+    } catch { /* pages off */ }
+    // Files attached inside assignment descriptions.
+    try { for (const a of await pageAll(`/courses/${c.id}/assignments`)) addFromHtml(c.id, a && a.description); } catch { /* assignments off */ }
   }));
   return { lms: "canvas", files, courses: courses.length };
 }
