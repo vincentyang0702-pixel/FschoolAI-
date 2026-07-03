@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "FschoolAI — File Importer",
-  "version": "1.2.0",
+  "version": "1.7.7",
   "description": "Import files from any website into FschoolAI for AI-powered tutoring. Works on any LMS, portal, or academic site.",
 
   "permissions": [
@@ -9,7 +9,6 @@
     "storage",
     "tabs",
     "activeTab",
-    "scripting",
     "downloads"
   ],
 

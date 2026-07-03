@@ -65,48 +65,324 @@
   // material); the manual button still covers everything.
   const AUTO_EXT = /\.(pdf|docx?|pptx?|xlsx?|txt|csv)(\?|#|$)/i;
   const AUTO_URL_HINTS = /\/files\/download|[?&]download=1|\/pluginfile\.php\//i;
-  const AUTO_BUDGET = window === window.top ? 8 : 3;   // per page-load; iframes get less
+  // Per SPA route (reset on URL change — Canvas/D2L navigate without reloads, and a
+  // fixed per-page-load budget would starve the second course you open). A course
+  // page with more files than this gets the rest on the next visit (dedup is cheap).
+  const AUTO_BUDGET = window === window.top ? 25 : 8;
   let autoSent = 0;
+  let autoRouteHref = location.href;
   const autoSeen = new Set();
 
-  function collectAutoCandidates() {
+  function resetAutoBudgetOnRouteChange() {
+    if (location.href === autoRouteHref) return;
+    autoRouteHref = location.href;
+    autoSent = 0;                      // new route, fresh budget (autoSeen still dedups)
+  }
+
+  // ── Viewer/launcher link rules (research-backed, per-platform) ─────────────
+  // Many LMSs never link the file itself: they link a VIEWER page with no
+  // extension (D2L "viewContent/{id}/View", Canvas "/files/{id}?wrap=1", Moodle
+  // "mod/resource/view.php?id="). Each rule recognises one such shape and either
+  // rewrites it to the platform's direct-download URL or tags it with a
+  // resolveHint so the background can follow redirects / parse the wrapper.
+  // Most shapes are unique enough to self-gate; Canvas "/files/{id}" is generic,
+  // so it's gated on a Canvas DOM marker. Non-file matches (a D2L Link topic, a
+  // Canvas Page item) resolve to HTML and are rejected server-side — the
+  // failure backoff stops eternal retries.
+  // NOT handled here (verified js-only — files are minted by XHR, no anchor
+  // hrefs exist): Blackboard Ultra, Google Classroom, Teams/SharePoint file
+  // grids, new Google Sites, Chaoxing, Zhihuishu, Pronote, Docebo, TalentLMS,
+  // Absorb, Frog. Those are covered only by the download interceptor.
+
+  // Memoized (5s): viewerRuleFor runs per anchor per scan — a querySelector per
+  // call would mean thousands of DOM queries per tick on big pages.
+  let canvasCheck = { t: 0, v: false };
+  function isCanvasPage() {
+    if (platform === "canvas") return true;
+    const now = Date.now();
+    if (now - canvasCheck.t < 5000) return canvasCheck.v;
+    let v = false;
+    try {
+      v = !!document.querySelector("body.ic-app, #application.ic-app, #wrapper.ic-Layout-wrapper");
+    } catch { /* DOM not ready */ }
+    canvasCheck = { t: now, v };
+    return v;
+  }
+
+  // Returns { url, hint } (url = canonical fetch/dedup URL) or null.
+  function viewerRuleFor(href) {
+    let m;
+
+    // ── D2L Brightspace ──────────────────────────────────────────────────
+    // Direct file-topic download (some skins emit it directly).
+    if (/\/d2l\/le\/content\/\d+\/topics\/files\/download\/\d+\/DirectFileTopicDownload/i.test(href))
+      return { url: href, hint: null };
+    // Topic viewer → deterministic rewrite to DirectFileTopicDownload.
+    // Non-file topics (Link/HTML/SCORM) return HTML there and get rejected.
+    m = href.match(/^(https?:\/\/[^/]+)\/d2l\/le\/content\/(\d+)\/viewContent\/(\d+)\/View(?:$|[?#])/i);
+    if (m) return { url: `${m[1]}/d2l/le/content/${m[2]}/topics/files/download/${m[3]}/DirectFileTopicDownload`, hint: null };
+
+    // ── Canvas (gated: "/files/{id}" alone is too generic) ───────────────
+    if (isCanvasPage()) {
+      // File link (course-, user-, group-scoped or bare, ± /preview|/download).
+      // download_frd=1 forces raw bytes instead of the HTML preview page.
+      m = href.match(/^(https?:\/\/[^/]+)(?:\/(?:courses|users|groups)\/\d+)?\/files\/(\d+)(?:\/(?:preview|download))?(?:$|[?#])/);
+      if (m) return { url: `${m[1]}/files/${m[2]}/download?download_frd=1`, hint: null };
+      // Module item — File/Page/Quiz/... not distinguishable from the URL; the
+      // background follows the redirect and only proceeds if it lands on /files/.
+      // Auto-capture only (no button): most module items are not files.
+      m = href.match(/^https?:\/\/[^/]+\/courses\/\d+\/modules\/items\/\d+(?:$|[?#])/);
+      if (m) return { url: href, hint: "canvas-module-item" };
+    }
+
+    // ── Moodle family (Moodle / Open LMS / MoodleCloud / Totara) ─────────
+    // Resource launcher 302s to /pluginfile.php in the common display modes;
+    // embed-mode returns HTML wrapping the pluginfile link (background parses).
+    // /mod/url|page|forum|book|folder/ don't match — inherently excluded.
+    if (/\/mod\/resource\/view\.php\?(?:[^#]*&)?id=\d+/i.test(href))
+      return { url: href, hint: "moodle-resource" };
+
+    // ── Blackboard Original ──────────────────────────────────────────────
+    // WebDAV file (dt-content-rid marks a real file; bare /bbcswebdav/ dirs don't match).
+    if (/\/bbcswebdav\/pid-\d+-dt-content-rid-[\w.%-]+/i.test(href))
+      return { url: href, hint: null };
+    // Content-file launcher — 302s to the bbcswebdav file with session cookies.
+    if (/\/webapps\/blackboard\/execute\/content\/file\?[^#]*\bcontent_id=_\d+_\d+/i.test(href))
+      return { url: href, hint: null };
+
+    // ── Sakai — the access servlet streams the file directly ─────────────
+    if (/\/access\/content\/(?:group|user|public|attachment)\/[^?#]+\.[a-z0-9]{2,8}(?:$|\?)/i.test(href))
+      return { url: href, hint: null };
+
+    // ── itslearning — fs_folderfile streams bytes (may 302 to a CDN) ─────
+    if (/\/File\/fs_folderfile\.aspx\?FolderFileID=\d+/i.test(href))
+      return { url: href, hint: null };
+
+    // ── Firefly (hostname-gated: resource.aspx?id= is a generic shape) ───
+    if (/\.fireflycloud\.net$/i.test(location.hostname) && /\/resource\.aspx\?id=\d+/i.test(href))
+      return { url: href, hint: null };
+
+    return null;
+  }
+
+  // Shadow-DOM-aware anchor collection. Modern D2L renders content lists inside
+  // open d2l-* web components where document.querySelectorAll can't see them.
+  // The full-tree walk is gated to pages that actually need it.
+  // Memoized: sticky once detected (a D2L page doesn't stop being one); while
+  // false, re-probed at most every 30s so ordinary websites pay ~nothing.
+  let shadowWalkCheck = { t: 0, v: false };
+  function needsShadowWalk() {
+    if (shadowWalkCheck.v) return true;
+    const now = Date.now();
+    if (now - shadowWalkCheck.t < 30_000) return false;
+    let v = false;
+    try {
+      v = /\/d2l\//.test(location.pathname) || !!document.querySelector("[class*='d2l-'],d2l-navigation");
+    } catch { /* DOM not ready */ }
+    shadowWalkCheck = { t: now, v };
+    return v;
+  }
+
+  // One tree walk serves a whole scan cycle (button pass at t=0, auto-collect at
+  // t+2.5s) — the 3s TTL covers both without walking twice.
+  let anchorCache = { t: 0, anchors: null };
+  function collectAllAnchors() {
+    const now = Date.now();
+    if (anchorCache.anchors && now - anchorCache.t < 3000) return anchorCache.anchors;
     const out = [];
-    document.querySelectorAll("a[href]").forEach((a) => {
-      const href = a.href;
-      if (!href || autoSeen.has(href)) return;
-      if (!(AUTO_EXT.test(href) || (AUTO_URL_HINTS.test(href) && !/logout|login/i.test(href)))) return;
-      autoSeen.add(href);
-      out.push({ url: href, filename: guessFilename(href, a.textContent) });
-    });
+    document.querySelectorAll("a[href]").forEach((a) => out.push(a));
+    if (needsShadowWalk()) {
+      const walk = (root) => {
+        root.querySelectorAll("a[href]").forEach((a) => out.push(a));
+        root.querySelectorAll("*").forEach((el) => { if (el.shadowRoot) walk(el.shadowRoot); });
+      };
+      try {
+        document.querySelectorAll("*").forEach((el) => { if (el.shadowRoot) walk(el.shadowRoot); });
+      } catch { /* never break the host page */ }
+    }
+    anchorCache = { t: now, anchors: out };
     return out;
   }
+
+  // Collect up to `limit` candidates. Anchors are only marked seen when actually
+  // RETURNED — marking beyond-budget matches would silently drop them for the
+  // rest of the session (the next scan/route retries them instead).
+  function collectAutoCandidates(limit) {
+    const out = [];
+    if (limit <= 0) return out;
+    const anchors = collectAllAnchors();
+    // Pass A: direct file links (extension in URL / download hints) — certain, cheap.
+    for (const a of anchors) {
+      if (out.length >= limit) return out;
+      const href = a.href;
+      if (!href || autoSeen.has(href)) continue;
+      if (!(AUTO_EXT.test(href) || (AUTO_URL_HINTS.test(href) && !/logout|login/i.test(href)))) continue;
+      autoSeen.add(href);
+      out.push({ url: href, filename: guessFilename(href, a.textContent) });
+    }
+    // Pass B: platform viewer/launcher links — need background resolution.
+    for (const a of anchors) {
+      if (out.length >= limit) return out;
+      const href = a.href;
+      if (!href || autoSeen.has(href)) continue;
+      const rule = viewerRuleFor(href);
+      if (!rule) continue;
+      autoSeen.add(href);
+      out.push({ url: rule.url, filename: guessFilename(href, a.textContent), resolveHint: rule.hint ?? undefined });
+    }
+    return out;
+  }
+
+  // ── LMS context for the service worker ─────────────────────────────────────
+  // The SW does ALL authenticated fetching (enumerate + download): its
+  // credentials:"include" fetch sends the LMS session cookies AND can read the
+  // cross-origin inst-fs CDN that Canvas redirects to — a content-script/page
+  // fetch can do neither (CORS-blocked on that CDN hop). The page's only job is
+  // to hand the SW the two things it cannot read for itself: which LMS this is,
+  // and the page-scoped tokens (D2L's XSRF token in localStorage, Moodle's
+  // sesskey in the DOM). Canvas needs no token — the cookie authorizes.
+  function getLmsContext() {
+    let xsrf = "";
+    try { xsrf = localStorage.getItem("XSRF.Token") || ""; } catch { /* storage blocked */ }
+    let sesskey = "";
+    try {
+      const a = document.querySelector('a[href*="sesskey="]');
+      if (a) { try { sesskey = new URL(a.href).searchParams.get("sesskey") || ""; } catch {} }
+      if (!sesskey) { const inp = document.querySelector('input[name="sesskey"]'); if (inp) sesskey = inp.value || ""; }
+    } catch { /* DOM not ready */ }
+    let lms = null;
+    try {
+      if (document.querySelector("body.ic-app, #application.ic-app, #wrapper.ic-Layout-wrapper")) lms = "canvas";
+      else if (location.pathname.startsWith("/d2l/") || document.querySelector("d2l-navigation, #d2l_body") || (xsrf && /(^|\.)(brightspace|desire2learn)\.com$/i.test(location.hostname))) lms = "d2l";
+      else if (sesskey || document.querySelector("body[class*='moodle'], #page-mymoodle, meta[name='generator'][content*='Moodle']")) lms = "moodle";
+    } catch { /* DOM not ready */ }
+    return { lms, xsrf, sesskey };
+  }
+
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg?.type === "GET_LMS_CONTEXT") {
+      sendResponse(window !== window.top ? { lms: null } : getLmsContext());   // top frame only
+      return;   // synchronous
+    }
+    // other message types: ignore
+  });
 
   // Per-site consent: heuristics alone must never grant a random website the power
   // to silently push documents into the student's knowledge base (RAG poisoning).
   // First qualifying visit → one small prompt; the answer is remembered per host.
+  // Resolves "yes" | "no" | null. null = ignored/timed out → we DON'T persist a
+  // decision (so it re-asks next visit instead of locking the site off forever).
   function askSiteConsent() {
     return new Promise((resolve) => {
-      if (window !== window.top) return resolve(false);   // iframes never prompt
-      if (document.getElementById("fschoolai-consent")) return resolve(false);
+      if (window !== window.top) return resolve(null);   // iframes never prompt
+      if (document.getElementById("fschoolai-consent")) return resolve(null);
       const bar = document.createElement("div");
       bar.id = "fschoolai-consent";
       bar.style.cssText = "position:fixed;bottom:16px;right:16px;z-index:2147483647;background:#111;color:#eee;padding:12px 14px;border-radius:12px;font:13px -apple-system,BlinkMacSystemFont,sans-serif;box-shadow:0 4px 24px rgba(0,0,0,0.4);max-width:300px";
       const text = document.createElement("div");
-      text.textContent = "FschoolAI: auto-import course files from this site?";
+      // Honest scope: on a supported LMS this triggers a full course-library sync
+      // via the LMS API (all your courses), and re-syncs on later visits — not just
+      // the files on this one page.
+      text.textContent = "FschoolAI: import all your course files from this LMS, and keep them synced?";
       text.style.marginBottom = "8px";
       const yes = document.createElement("button");
-      yes.textContent = "Yes, auto-import";
+      yes.textContent = "Yes, sync my courses";
       yes.style.cssText = "background:#4285F4;color:#fff;border:none;border-radius:8px;padding:6px 12px;margin-right:8px;cursor:pointer;font:inherit";
       const no = document.createElement("button");
       no.textContent = "No";
       no.style.cssText = "background:rgba(255,255,255,0.1);color:#ccc;border:none;border-radius:8px;padding:6px 12px;cursor:pointer;font:inherit";
-      const done = (v) => { bar.remove(); resolve(v); };
-      yes.addEventListener("click", () => done(true));
-      no.addEventListener("click", () => done(false));
+      let settled = false;
+      // Always settle exactly once — even if the host page re-renders and removes
+      // our bar before the timeout, so ensureSiteConsent's finally always releases
+      // consentBusy (a stuck promise would lock consent for the whole page-load).
+      const done = (v) => { if (settled) return; settled = true; try { bar.remove(); } catch {} resolve(v); };
+      yes.addEventListener("click", () => done("yes"));
+      no.addEventListener("click", () => done("no"));
       bar.append(text, yes, no);
       document.body.appendChild(bar);
-      setTimeout(() => { if (bar.isConnected) done(false); }, 30_000);  // no answer = no
+      setTimeout(() => done(null), 30_000);  // ignored → re-ask next time
     });
+  }
+
+  function getSiteMode() {
+    return new Promise((r) =>
+      chrome.runtime.sendMessage({ type: "GET_SITE_MODE", payload: { host: location.hostname } },
+        (res) => r(chrome.runtime.lastError ? "off" : (res?.mode ?? "off"))));
+  }
+  function isAuthed() {
+    return new Promise((r) =>
+      chrome.runtime.sendMessage({ type: "GET_AUTH_STATUS" },
+        (res) => r(!chrome.runtime.lastError && !!res?.signedIn)));
+  }
+
+  // Single per-host consent gate for BOTH full-course sync and DOM auto-capture,
+  // so they never double-prompt. Returns the effective mode ("on"/"off").
+  let consentBusy = false;
+  async function ensureSiteConsent() {
+    const mode = await getSiteMode();
+    if (mode !== "unknown") return mode;
+    if (window !== window.top) return "off";        // only the top frame prompts
+    if (!(await isAuthed())) return "off";           // never prompt signed-out users
+    if (consentBusy) return "off";
+    consentBusy = true;
+    try {
+      const ans = await askSiteConsent();            // "yes" | "no" | null(ignored)
+      if (ans === null) return "off";                // ignored → don't persist; re-ask next visit
+      const decided = ans === "yes" ? "on" : "off";
+      await new Promise((r) =>
+        chrome.runtime.sendMessage({ type: "SET_SITE_MODE", payload: { host: location.hostname, mode: decided } },
+          () => { void chrome.runtime.lastError; r(); }));
+      return decided;
+    } finally { consentBusy = false; }
+  }
+
+  // Strong "this really is a supported (API-syncable) LMS with a live session"
+  // signal — used to offer the full-course sync even on pages with NO visible file
+  // links (dashboards, D2L home). Canvas/Moodle session globals live in the page's
+  // MAIN world (invisible to this isolated content script), so we detect via
+  // reliable DOM markers; D2L also exposes its session token in localStorage.
+  function isSupportedLmsPage() {
+    try {
+      if (location.pathname.startsWith("/d2l/")) return true;                  // strongest D2L signal
+      // Bare XSRF.Token is a weak signal (other apps use that key) — require a D2L host.
+      if (localStorage.getItem("XSRF.Token") && /(^|\.)(brightspace\.com|desire2learn\.com)$/i.test(location.hostname)) return true;
+    } catch { /* storage blocked */ }
+    try {
+      return !!document.querySelector(
+        "body.ic-app, #application.ic-app, #wrapper.ic-Layout-wrapper,"        // Canvas
+        + "d2l-navigation, d2l-navigation-main-header, #d2l_body,"             // D2L (specific custom elements, not [class*=d2l-])
+        + "body[class*='moodle'], #page-mymoodle, meta[name='generator'][content*='Moodle']");  // Moodle
+    } catch { return false; }
+  }
+
+  // Engage the full-course API sync: on a supported LMS, get consent (prompt once)
+  // and nudge the background to sync THIS tab's whole library — independent of any
+  // file links on the page, so it works from a dashboard/home. This is the fix for
+  // "signed in, opened my LMS, and nothing happened".
+  let engagedForHost = "";
+  async function maybeEngageLms() {
+    try {
+      if (!chrome?.runtime?.sendMessage) return;      // orphaned script
+      if (window !== window.top) return;              // top frame only
+      if (AUTO_EXCLUDED_HOSTS.test(location.hostname)) return;
+      if (!isSupportedLmsPage()) return;
+      if (engagedForHost === location.hostname) return;   // once per host per page-load
+      // Latch BEFORE the auth check so a signed-out user doesn't re-send
+      // GET_AUTH_STATUS (waking the SW) on every scan. Signing in resets this
+      // latch via the storage.onChanged(userId) listener below, which re-invokes us.
+      engagedForHost = location.hostname;
+      if (!(await isAuthed())) return;                    // wait until signed in
+      const mode = await ensureSiteConsent();
+      if (mode !== "on") return;   // declined/ignored: re-asked on next page load
+      // Consent just turned on → re-run the DOM scan so auto-capturable files on
+      // THIS page import now that we're allowed (structured files come via the nudge).
+      scheduleScan();
+      // Grant fires the sync in the background (SET_SITE_MODE force). This nudge
+      // also covers the already-consented case with no tab reload (e.g. signed
+      // into the extension while already sitting on the LMS). Throttled/guarded
+      // in the background, so a redundant nudge is a cheap no-op.
+      chrome.runtime.sendMessage({ type: "FULL_SYNC_NUDGE" }, () => void chrome.runtime.lastError);
+    } catch { /* never break the host page */ }
   }
 
   let autoTimer = null;
@@ -118,24 +394,20 @@
         if (!chrome?.runtime?.sendMessage) return;             // orphaned script
         if (AUTO_EXCLUDED_HOSTS.test(location.hostname)) return;
         if (!looksLikeLms()) return;
+        // On Canvas/D2L/Moodle the full-course API sync (maybeEngageLms → runFullSync)
+        // owns file import and fetches in-page (same-origin cookie). DOM auto-capture
+        // here would only duplicate that work AND fail with cross-site 403s in the
+        // background — so defer to full-sync on supported LMSs.
+        if (isSupportedLmsPage()) return;
+        // Consent FIRST — before collectAutoCandidates marks any hrefs into
+        // autoSeen. If a full-sync prompt is mid-flight (consentBusy), this
+        // returns "off" and we retry on the next scan, without permanently
+        // burning this page's file links out of the auto-capture budget.
+        if (await ensureSiteConsent() !== "on") return;
+        resetAutoBudgetOnRouteChange();
         if (autoSent >= AUTO_BUDGET) return;
-        const items = collectAutoCandidates().slice(0, AUTO_BUDGET - autoSent);
+        const items = collectAutoCandidates(AUTO_BUDGET - autoSent);
         if (!items.length) return;
-
-        // Per-host consent (remembered): "on" proceeds, "off" stops, unknown prompts once.
-        const mode = await new Promise((r) =>
-          chrome.runtime.sendMessage({ type: "GET_SITE_MODE", payload: { host: location.hostname } },
-            (res) => r(chrome.runtime.lastError ? "off" : (res?.mode ?? "off"))));
-        if (mode === "off") return;
-        if (mode === "unknown") {
-          const authed = await new Promise((r) =>
-            chrome.runtime.sendMessage({ type: "GET_AUTH_STATUS" }, (res) => r(!chrome.runtime.lastError && !!res?.signedIn)));
-          if (!authed) return;                                  // never prompt signed-out users
-          const yes = await askSiteConsent();
-          chrome.runtime.sendMessage({ type: "SET_SITE_MODE", payload: { host: location.hostname, mode: yes ? "on" : "off" } },
-            () => void chrome.runtime.lastError);
-          if (!yes) return;
-        }
 
         autoSent += items.length;
         // Background gates on signed-in + the autoCapture setting, dedups against
@@ -143,7 +415,16 @@
         chrome.runtime.sendMessage({
           type: "AUTO_IMPORT",
           payload: { items, pageUrl: location.href, platform },
-        }, () => void chrome.runtime.lastError);
+        }, (res) => {
+          if (chrome.runtime.lastError) return;
+          // Refund budget for items the background never worked on (already
+          // captured / failure-blocked / signed-out) — otherwise revisiting a
+          // mostly-captured page exhausts the budget on no-ops and any NEW
+          // file on it never gets a slot. (autoSeen still stops re-sending.)
+          if (res?.ok) autoSent -= Math.max(0, items.length - (res.considered ?? items.length));
+          else         autoSent -= items.length;
+          if (autoSent < 0) autoSent = 0;
+        });
       } catch { /* never break the host page */ }
     }, 2500);   // let SPA content settle; batches instead of per-link spam
   }
@@ -185,6 +466,7 @@
   const TEXT_FILE_RE = /\b(pdf|docx?|pptx?|xlsx?|csv)\b/i;
 
   const ATTR = "data-fschoolai-btn";
+  const ruleChecked = new WeakSet();   // anchors already tested against viewerRuleFor
 
   function guessFilename(href, linkText) {
     try {
@@ -210,7 +492,7 @@
     return btoa(binary);
   }
 
-  function makeButton(href, filename) {
+  function makeButton(href, filename, rule) {
     const btn = document.createElement("button");
     btn.textContent   = "⬆ Import to FschoolAI";
     btn.style.cssText = `
@@ -256,6 +538,29 @@
       btn.textContent   = "Downloading…";
       btn.disabled      = true;
       btn.style.opacity = "0.7";
+
+      // Step 2a — viewer/launcher links (D2L topics, Canvas files, Moodle resources…):
+      // the href itself carries no bytes. The background resolves it — rewritten
+      // direct URL, redirect-following, wrapper parsing — and verifies it's a real file.
+      if (rule) {
+        btn.textContent = "Importing…";
+        const result = await send({
+          type:    "IMPORT_FILE",
+          payload: { url: rule.url, fetchUrl: rule.url, filename, pageUrl: location.href, courseId: null, platform, resolveHint: rule.hint ?? undefined },
+        });
+        if (result?.ok) {
+          btn.textContent      = result.skipped ? "Already indexed ✓" : "Indexed ✓";
+          btn.style.background = "#30d158";
+          btn.style.opacity    = "1";
+        } else {
+          btn.textContent      = result?.error?.slice(0, 40) ?? "Failed";
+          btn.style.background = "#ff453a";
+          btn.style.opacity    = "1";
+          btn.disabled         = false;
+          setTimeout(() => { btn.textContent = "⬆ Import to FschoolAI"; btn.style.background = "#4285F4"; }, 3000);
+        }
+        return;
+      }
 
       // Step 2 — cloud storage links must be fetched from the background service worker
       // because CORS blocks cross-origin fetches from content scripts even with credentials.
@@ -349,12 +654,12 @@
     return btn;
   }
 
-  function tryInject(a) {
+  function tryInject(a, rule) {
     if (a.getAttribute(ATTR)) return;
     const href = a.href;
     if (!href || href.startsWith("javascript") || href === location.href) return;
     a.setAttribute(ATTR, "1");
-    const btn = makeButton(href, guessFilename(href, a.textContent));
+    const btn = makeButton(href, guessFilename(href, a.textContent), rule);
     a.parentNode?.insertBefore(btn, a.nextSibling);
   }
 
@@ -365,7 +670,26 @@
       if (IMPORTABLE_EXT.test(a.href) || CLOUD_STORAGE_RE.test(a.href)) tryInject(a);
     });
 
-    // Pass 2: text-based (e.g. links that say "(PDF - 1.1 MB)" but href is a redirect)
+    // Pass 2: platform viewer/launcher links (D2L topics, Canvas files, Blackboard
+    // content, Moodle resources, …) — shadow-DOM-aware so modern D2L lists work.
+    // MUST run before the text heuristic: a viewer link whose text says "PDF"
+    // would otherwise get a rule-less button whose direct fetch can't succeed.
+    // Canvas module items are excluded: most are Pages/Quizzes, and a button on
+    // every one would be noise (auto-capture still resolves the File ones).
+    // ruleChecked converges the pass: non-matching anchors are regex-tested once,
+    // not on every 4s tick. (SPA frameworks replace elements rather than mutate
+    // hrefs in place — and href-attribute mutations never trigger a re-scan
+    // anyway, since the observer watches childList only.)
+    collectAllAnchors().forEach((a) => {
+      if (ruleChecked.has(a) || a.getAttribute(ATTR)) return;
+      if (!a.href || a.href.startsWith("javascript")) return;
+      ruleChecked.add(a);
+      const rule = viewerRuleFor(a.href);
+      if (!rule || rule.hint === "canvas-module-item") return;
+      tryInject(a, rule);
+    });
+
+    // Pass 3: text-based (e.g. links that say "(PDF - 1.1 MB)" but href is a redirect)
     document.querySelectorAll("a[href]").forEach((a) => {
       if (a.getAttribute(ATTR)) return;
       const text = a.textContent?.trim() ?? "";
@@ -378,7 +702,20 @@
   function scan() {
     injectButtons();
     scheduleAutoCapture();
+    maybeEngageLms();     // offer/trigger full-course sync even with no file links on the page
   }
+
+  // If the user signs into the extension while ALREADY sitting on their LMS, no
+  // tab reload fires — re-engage the moment auth appears so the consent prompt /
+  // full sync starts immediately instead of waiting for a navigation.
+  try {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area === "local" && changes.userId && changes.userId.newValue) {
+        engagedForHost = "";
+        maybeEngageLms();
+      }
+    });
+  } catch { /* storage unavailable in this context */ }
 
   // Debounced: MutationObserver fires on every DOM batch, and injectButtons runs two
   // document-wide querySelectorAll passes — unthrottled it would burn CPU on busy
@@ -395,9 +732,25 @@
   // Re-scan when the DOM changes (SPA navigation, lazy-loaded content). SPA URL
   // changes always mutate the DOM, so the observer covers them too — a pushState
   // monkey-patch would be dead code in MV3's isolated world anyway.
+  // Track real DOM activity (observer/navigation, NOT our own interval ticks)
+  // so the shadow re-scan can back off when the page has gone quiet.
+  let lastDomActivity = Date.now();
   if (document.body) {
-    const observer = new MutationObserver(scheduleScan);
+    const observer = new MutationObserver(() => { lastDomActivity = Date.now(); scheduleScan(); });
     observer.observe(document.body, { childList: true, subtree: true });
   }
-  window.addEventListener("popstate", scheduleScan);
+  window.addEventListener("popstate", () => { lastDomActivity = Date.now(); scheduleScan(); });
+
+  // The body observer can't see mutations INSIDE shadow roots (D2L renders its
+  // content lists in d2l-* web components). A slow tick guarantees those pages
+  // are eventually re-scanned; scheduleScan debounces, and non-matching anchors
+  // are cheap Set lookups on re-scan. Gated to pages that actually use shadow
+  // DOM, and backed off 4x (~16s) once the page has been idle for a minute.
+  let shadowTick = 0;
+  setInterval(() => {
+    if (!needsShadowWalk() || !looksLikeLms()) return;
+    shadowTick++;
+    if (Date.now() - lastDomActivity > 60_000 && shadowTick % 4 !== 0) return;
+    scheduleScan();
+  }, 4000);
 })();

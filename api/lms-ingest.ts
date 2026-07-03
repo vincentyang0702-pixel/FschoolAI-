@@ -52,7 +52,15 @@ function sb() {
   return _sb;
 }
 
-function selfBaseUrl(): string {
+// Base URL for the internal /api/extract call. MUST be a PUBLIC host: the
+// deployment-specific VERCEL_URL is behind Vercel Deployment Protection and
+// returns an HTML auth page (so `extractRes.json()` throws "Unexpected token
+// '<' …"). Prefer the caller-supplied host (derived from the incoming request's
+// public domain, e.g. fschoolai.com) or PUBLIC_BASE_URL; only fall back to
+// VERCEL_URL as a last resort.
+function selfBaseUrl(explicit?: string | null): string {
+  if (explicit) return explicit.replace(/\/+$/, "");
+  if (process.env.PUBLIC_BASE_URL) return process.env.PUBLIC_BASE_URL.replace(/\/+$/, "");
   if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
   return "http://localhost:5173";
 }
@@ -133,8 +141,9 @@ function sanitize(raw: string): string {
 }
 
 // ── Core (exported — server-side callers import this directly, no HTTP hop) ──
-export async function ingestLmsFile({ userId, courseId = null, file }: {
+export async function ingestLmsFile({ userId, courseId = null, file, baseUrl = null }: {
   userId: string; courseId?: string | null;
+  baseUrl?: string | null;   // public origin for the internal /api/extract call
   file: {
     name: string; mimeType: string; sourceUrl: string; provider: string;
     bytes?: Buffer | string | null; storagePath?: string | null; bucket?: string | null;
@@ -150,6 +159,30 @@ export async function ingestLmsFile({ userId, courseId = null, file }: {
   const bucket    = file.bucket || DEFAULT_BUCKET;
   const canonical = canonicalizeSourceUrl(file.sourceUrl);
   const mimeType  = file.mimeType || "application/octet-stream";
+
+  // The extension/LMS sends the platform's NATIVE course id (e.g. Canvas "434720"),
+  // but the app's course_id columns are UUIDs referencing our own courses table.
+  // Passing a numeric id into a uuid column throws "invalid input syntax for type
+  // uuid". Map it to the app course when we can; otherwise ingest UNLINKED (null) —
+  // the file is still fully RAG-indexed and findable, just not tied to a course row.
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  let courseUuid: string | null = null;
+  if (courseId && UUID_RE.test(String(courseId))) {
+    courseUuid = String(courseId);
+  } else if (courseId) {
+    // Best-effort map: the app may have a course row keyed by the LMS's native id.
+    for (const col of ["canvas_course_id", "lms_course_id", "external_id"]) {
+      try {
+        const { data, error } = await supabase.from("courses")
+          .select("id").eq("user_id", userId).eq(col, String(courseId)).limit(1).maybeSingle();
+        if (!error && data?.id) { courseUuid = data.id; break; }
+      } catch { /* column doesn't exist — try the next */ }
+    }
+    // The matched course row's id must ITSELF be a uuid — some courses tables key
+    // rows by the native LMS id (so `id` could be "4552"). Only keep a real uuid.
+    if (courseUuid && !UUID_RE.test(String(courseUuid))) courseUuid = null;
+    if (!courseUuid) console.warn(`[lms-ingest] courseId "${courseId}" is not an app UUID and no uuid-keyed course row matched — ingesting unlinked`);
+  }
 
   // ── 1. Dedup (canonical AND raw form — older rows stored the raw URL) ────
   try {
@@ -188,7 +221,7 @@ export async function ingestLmsFile({ userId, courseId = null, file }: {
   const extractBody: any = storagePath
     ? { storagePath, bucket, keepFile: true, file_type: fileType, name: file.name }
     : { base64: buf!.toString("base64"), file_type: fileType, name: file.name };
-  const extractRes = await fetch(`${selfBaseUrl()}/api/extract`, {
+  const extractRes = await fetch(`${selfBaseUrl(baseUrl)}/api/extract`, {
     method:  "POST",
     headers: { "Content-Type": "application/json" },
     body:    JSON.stringify(extractBody),
@@ -197,6 +230,15 @@ export async function ingestLmsFile({ userId, courseId = null, file }: {
     const detail = await extractRes.text().catch(() => "");
     console.error("[lms-ingest] extract failed", extractRes.status, detail.slice(0, 200));
     return { status: 502, json: { error: `extract failed (${extractRes.status})` } };
+  }
+  // Defensive: if extract ever returns HTML (e.g. a deployment-protection auth
+  // page from a protected base URL), surface a clear error instead of throwing a
+  // raw "Unexpected token '<' …" JSON-parse error to the caller.
+  const extractCt = extractRes.headers.get("content-type") || "";
+  if (!extractCt.includes("application/json")) {
+    const snippet = (await extractRes.text().catch(() => "")).slice(0, 120).replace(/\s+/g, " ");
+    console.error("[lms-ingest] extract returned non-JSON", extractRes.status, extractCt, snippet);
+    return { status: 502, json: { error: `extract returned non-JSON (protected host?) — ${snippet}` } };
   }
   const { text: rawText } = await extractRes.json();
 
@@ -228,7 +270,7 @@ export async function ingestLmsFile({ userId, courseId = null, file }: {
   // ── 4. RAG ingest — direct call, no HTTP hop ──────────────────────────────
   const ragResult = await ingest({
     userId,
-    courseId:  courseId ?? null,
+    courseId:  courseUuid,
     title:     file.name,
     kind:      "lms",
     sourceUrl: canonical,
@@ -258,7 +300,7 @@ export async function ingestLmsFile({ userId, courseId = null, file }: {
   // ── 6. Record in files table (upsert — safe on re-ingest) ────────────────
   const fileRow: Record<string, any> = {
     user_id:      userId,
-    course_id:    courseId ?? null,
+    course_id:    courseUuid,
     lms_file_id:  `ing_${djb2(canonical)}`,
     name:         file.metadata?.originalFilename ?? file.name,
     file_type:    fileType,
@@ -274,7 +316,7 @@ export async function ingestLmsFile({ userId, courseId = null, file }: {
   if (upsertErr) {
     // Older schemas may lack columns (storage_path/provider) — retry minimal shape.
     const { error: retryErr } = await supabase.from("files").insert({
-      user_id: userId, course_id: courseId ?? null,
+      user_id: userId, course_id: courseUuid,
       name: fileRow.name, source_url: canonical, document_id: documentId,
     });
     if (retryErr) console.error("[lms-ingest] files upsert error (non-fatal):", upsertErr.message);
@@ -323,7 +365,13 @@ export default async function handler(req: any, res: any) {
   }
 
   try {
-    const result = await ingestLmsFile({ userId, courseId, file });
+    // Derive the PUBLIC origin this request came in on (e.g. https://fschoolai.com)
+    // so the internal /api/extract call hits the unprotected custom domain, not
+    // the deployment-protected VERCEL_URL.
+    const host  = req.headers["x-forwarded-host"] || req.headers.host;
+    const proto = req.headers["x-forwarded-proto"] || "https";
+    const baseUrl = host ? `${proto}://${host}` : null;
+    const result = await ingestLmsFile({ userId, courseId, file, baseUrl });
     return res.status(result.status).json(result.json);
   } catch (e: any) {
     console.error("[lms-ingest] error:", e.message);

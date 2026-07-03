@@ -611,7 +611,9 @@ export default defineConfig({
     handlerProxy("/api/lms-ingest",       () => import("./api/lms-ingest.js"),    [...HANDLER_ENV, "ANTHROPIC_MODEL_OCR"]),
     handlerProxy("/api/drive-auth",       () => import("./api/drive-auth.js"),    LMS_ENV),
     handlerProxy("/api/lms-microsoft",    () => import("./api/lms-microsoft.js"), LMS_ENV),
-    handlerProxy("/api/lms-proxy",        () => import("./api/lms-proxy.js"),     [...HANDLER_ENV, "EXTENSION_AUTH_SECRET"])],
+    handlerProxy("/api/lms-proxy",        () => import("./api/lms-proxy.js"),     [...HANDLER_ENV, "EXTENSION_AUTH_SECRET"]),
+    handlerProxy("/api/digest-lecture",   () => import("./api/digest-lecture.js"), [...HANDLER_ENV, "OPENAI_API_KEY", "ELEVENLABS_API_KEY"]),
+    handlerProxy("/api/office-hours",     () => import("./api/office-hours.js"),  HANDLER_ENV)],
   server:  { port: 5173, host: "0.0.0.0", allowedHosts: true },
   build: {
     // The default 500 kB threshold assumes no compression. Our heaviest chunk (the

@@ -3,7 +3,10 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useApp } from "../context/AppContext";
 import { groq }   from "../api/groq";
+import { supabase } from "../api/supabase";
 import WhatIfPanel from "../components/WhatIfPanel";
+import LectureUpload from "../components/LectureUpload";
+import DigestPanel, { Digest } from "../components/DigestPanel";
 import { Sparkles, Check, ArrowUp, Hourglass, ChevronUp, ChevronDown, Circle } from "lucide-react";
 
 // FALLBACK_NODES removed — real data or empty state only. No fake courses shown.
@@ -665,10 +668,97 @@ function SavedDraftsTab() {
   );
 }
 
+// ── Lecture Digest Tab ────────────────────────────────────────────────────────
+// Upload a lecture recording → api/digest-lecture.ts produces summary, key
+// points, emphasis markers, glossary, flashcards (saved to flashcards_v2) and
+// quiz questions. Past digests for the selected course are listed below.
+function LectureDigestTab() {
+  const { userId, courses, setPendingNav } = useApp();
+  const [courseId, setCourseId] = useState<string>("");
+  const [digests,   setDigests]  = useState<Digest[]>([]);
+  const [loading,   setLoading]  = useState(false);
+  const [expanded,  setExpanded] = useState<string | null>(null);
+
+  const loadDigests = useCallback(async () => {
+    if (!userId) return;
+    setLoading(true);
+    let query = supabase.from("lecture_digests")
+      .select("id, title, status, summary, key_points, glossary, emphasis, quiz_questions, created_at")
+      .eq("user_id", userId).eq("status", "done")
+      .order("created_at", { ascending: false }).limit(20);
+    if (courseId) query = query.eq("course_id", courseId);
+    const { data } = await query;
+    setDigests(data ?? []);
+    setLoading(false);
+  }, [userId, courseId]);
+
+  useEffect(() => { loadDigests(); }, [loadDigests]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
+      {courses && courses.length > 0 && (
+        <select
+          value={courseId}
+          onChange={e => setCourseId(e.target.value)}
+          style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "8px", padding: "10px 12px", color: "var(--text-primary)", fontSize: "13px", fontFamily: "inherit" }}
+        >
+          <option value="" style={{ background: "#1a1a1e", color: "#f5f5f5" }}>General (no course)</option>
+          {courses.map(c => (
+            <option key={c.id} value={c.id} style={{ background: "#1a1a1e", color: "#f5f5f5" }}>{c.courseCode ?? c.name}</option>
+          ))}
+        </select>
+      )}
+
+      <LectureUpload
+        userId={userId}
+        courseId={courseId || null}
+        onDone={digest => { setDigests(prev => [digest, ...prev]); }}
+      />
+
+      {loading && <p style={{ fontSize: "12px", color: "var(--text-dim)" }}>Loading past digests…</p>}
+
+      {!loading && digests.length === 0 && (
+        <div style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius-card)", padding: "32px 24px", textAlign: "center" }}>
+          <p style={{ color: "var(--text-secondary)", fontSize: "14px", fontWeight: "500", marginBottom: "6px" }}>No lecture digests yet</p>
+          <p style={{ color: "var(--text-dim)", fontSize: "12px" }}>Upload a lecture recording above to get a summary, flashcards, and a quiz</p>
+        </div>
+      )}
+
+      {digests.map(d => {
+        const id = d.id!;
+        const open = expanded === id;
+        return (
+          <div key={id} style={{ background: "var(--color-surface)", border: "1px solid var(--color-border)", borderRadius: "var(--radius-card)", overflow: "hidden" }}>
+            <div
+              style={{ padding: "14px 16px", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
+              onClick={() => setExpanded(open ? null : id)}
+            >
+              <p style={{ color: "var(--text-primary)", fontSize: "13px", fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", margin: 0 }}>{d.title ?? "Lecture"}</p>
+              <span style={{ color: "var(--text-dim)", display: "flex", flexShrink: 0 }}>{open ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
+            </div>
+            {open && (
+              <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)", padding: "14px 16px" }}>
+                <DigestPanel digest={d} />
+                <button
+                  onClick={() => setPendingNav({ page: "study" })}
+                  style={{ marginTop: "8px", background: "rgba(0,210,190,0.1)", border: "1px solid rgba(0,210,190,0.2)", borderRadius: "8px", color: "rgba(0,210,190,0.8)", fontSize: "11px", padding: "8px 14px", cursor: "pointer", fontFamily: "inherit" }}
+                >
+                  Study these flashcards →
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Main Toolkit ──────────────────────────────────────────────────────────────
 const TABS = [
   { id: "notes",      label: "Notes"      },
   { id: "recordings", label: "Recordings" },
+  { id: "digest",     label: "Lecture Digest" },
   { id: "grades",     label: "Grades"     },
   { id: "reminders",  label: "Reminders"  },
   { id: "previous",   label: "Submitted"  },
@@ -699,6 +789,7 @@ export default function Toolkit() {
 
       {activeTab === "notes"      && <ClassNotesTab />}
       {activeTab === "recordings" && <RecordingsTab />}
+      {activeTab === "digest"     && <LectureDigestTab />}
       {activeTab === "grades"     && <WhatIfPanel />}
       {activeTab === "reminders"  && <TwilioTab />}
       {activeTab === "previous"   && <PreviousWorkTab />}

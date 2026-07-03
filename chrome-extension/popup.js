@@ -17,6 +17,13 @@ const $ = id => document.getElementById(id);
 
 let inFlight = false;   // guards submit() against double-fire (Enter + click, key auto-repeat)
 
+// Live-activity view state (kept so a settings toggle can re-render the idle label
+// without another round-trip, and storage.onChanged can patch either half).
+let currentAutoCapture = true;
+let lastLive  = null;
+let lastStats = {};
+let signedIn  = false;   // gates the live storage.onChanged listener (signed-in UI only)
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 // GoTrue password grant → { access_token, refresh_token, user }.
 async function authToken(email, password) {
@@ -108,28 +115,101 @@ function getAuth() {
   return new Promise(resolve => chrome.runtime.sendMessage({ type: "GET_AUTH_STATUS" }, resolve));
 }
 
+// Stamp the running version so it's obvious whether a reload actually took effect.
+try {
+  const v = chrome.runtime.getManifest?.().version;
+  const hs = $("header-sub");
+  if (hs && v) hs.textContent = `LMS File Importer · v${v}`;
+} catch {}
+
 async function init() {
   const auth = await getAuth();
-  const signedIn = !!auth?.signedIn;
+  signedIn = !!auth?.signedIn;
   $("status-section").style.display     = signedIn ? "block" : "none";
   $("signed-out-section").style.display = signedIn ? "none"  : "block";
   if (signedIn) {
     $("uid-label").textContent = `User: ${auth.userId?.slice(0, 20)}…`;
     renderPending();
-    // Settings + stats
-    chrome.runtime.sendMessage({ type: "GET_SETTINGS" }, (res) => {
-      if (!res) return;
+    // One round-trip: live activity + settings + all-time stats. This also wakes
+    // the SW so a stale "scanning" mirror self-heals to the true (idle) state.
+    chrome.runtime.sendMessage({ type: "GET_STATUS" }, (res) => {
+      if (chrome.runtime.lastError || !res) return;
+      currentAutoCapture = !!res.settings?.autoCapture;
       const ac = $("toggle-auto-capture"), ad = $("toggle-auto-downloads");
       if (ac) ac.checked = !!res.settings?.autoCapture;
       if (ad) ad.checked = !!res.settings?.autoImportDownloads;
-      const n = res.stats?.autoImported ?? 0;
-      if ($("stats-label")) $("stats-label").textContent = n ? `${n} file${n === 1 ? "" : "s"} auto-captured` : "";
+      lastLive = res; lastStats = res.stats ?? {};
+      renderLive(lastLive, lastStats);
+      // Reflect a background sync's state/result even if the popup was closed during it.
+      const sm = $("sync-msg");
+      if (sm) {
+        if (res.fullSync) sm.textContent = "Syncing your courses in the background… (keep the LMS tab open)";
+        else chrome.storage.local.get(["lastSyncMsg"], ({ lastSyncMsg }) => {
+          if (lastSyncMsg?.text && !res.fullSync) sm.textContent = lastSyncMsg.text;
+        });
+      }
     });
   }
 }
 
+// ── Live activity rendering ────────────────────────────────────────────────
+const ACT_ICON = { done: "✓", skipped: "↷", failed: "✗" };
+
+function renderRecent(items) {
+  const box = $("live-recent");
+  if (!box) return;
+  box.innerHTML = "";
+  (items ?? []).slice(0, 6).forEach((it) => {
+    const row = document.createElement("div");
+    row.className = "live-item " + (it.status || "done");
+    const ic = document.createElement("span");
+    ic.className = "ic";
+    ic.textContent = ACT_ICON[it.status] ?? "•";
+    const nm = document.createElement("span");
+    nm.className = "nm";
+    nm.textContent = it.name || "file";
+    nm.title = it.error ? `${it.name}\n${it.error}` : (it.name || "");
+    row.append(ic, nm);
+    // Show WHY a file failed, so problems are diagnosable without the console.
+    if (it.status === "failed" && it.error) {
+      const err = document.createElement("span");
+      err.className = "err";
+      err.textContent = String(it.error);
+      err.title = String(it.error);
+      row.appendChild(err);
+    }
+    box.appendChild(row);
+  });
+}
+
+function renderLive(live, stats) {
+  if (!live) return;
+  const scanning = !!live.scanning;
+  const busy = scanning || !!live.fullSync;   // full course sync also = "working"
+  const dot = $("live-dot"), title = $("live-title"), spin = $("live-spinner");
+  if (dot)  dot.className = "live-dot " + (busy ? "scanning" : "idle");
+  if (spin) spin.style.display = busy ? "inline-block" : "none";
+  if (title) {
+    title.textContent = live.fullSync
+      ? (live.activeFile ? `Syncing courses — ${live.activeFile}…` : "Syncing all your courses…")
+      : scanning
+      ? (live.activeFile ? `Importing ${live.activeFile}…`
+         : live.queueDepth > 1 ? `Importing ${live.queueDepth} files…`
+         : "Scanning…")
+      : (currentAutoCapture ? "Watching for course files" : "Auto-capture is off");
+  }
+  if ($("live-session")) $("live-session").textContent = String(live.sessionImported ?? 0);
+  const total = stats?.autoImported ?? 0;
+  if ($("live-total")) $("live-total").textContent = total ? `${total} all-time` : "";
+  renderRecent(live.recent);
+}
+
+function refreshLive() { if (lastLive) renderLive(lastLive, lastStats); }
+
 $("toggle-auto-capture")?.addEventListener("change", (e) => {
+  currentAutoCapture = e.target.checked;
   chrome.runtime.sendMessage({ type: "SET_SETTINGS", payload: { autoCapture: e.target.checked } });
+  refreshLive();   // idle label reflects the toggle immediately
 });
 $("toggle-auto-downloads")?.addEventListener("change", (e) => {
   chrome.runtime.sendMessage({ type: "SET_SETTINGS", payload: { autoImportDownloads: e.target.checked } });
@@ -137,8 +217,9 @@ $("toggle-auto-downloads")?.addEventListener("change", (e) => {
 
 function renderPending() {
   chrome.storage.local.get(["pendingDownloads"], ({ pendingDownloads = [] }) => {
-    if (!pendingDownloads.length) return;
-    $("pending-section").style.display = "block";
+    const sec = $("pending-section");
+    if (!pendingDownloads.length) { if (sec) sec.style.display = "none"; return; }
+    if (sec) sec.style.display = "block";
     const list = $("pending-list");
     list.innerHTML = "";
     pendingDownloads.forEach(d => {
@@ -214,6 +295,18 @@ $("btn-signup")?.addEventListener("click", () => submit("signup"));
 $("login-password") ?.addEventListener("keydown", e => { if (e.key === "Enter") submit("login"); });
 $("signup-password")?.addEventListener("keydown", e => { if (e.key === "Enter") submit("signup"); });
 
+$("btn-sync-now")?.addEventListener("click", () => {
+  const btn = $("btn-sync-now"), orig = btn.textContent, msg = $("sync-msg");
+  btn.disabled = true; btn.textContent = "Syncing…";
+  // The sync runs in the background worker — the popup can close and it keeps going.
+  if (msg) msg.textContent = "Syncing… you can close this and keep browsing (just leave the LMS tab open).";
+  chrome.runtime.sendMessage({ type: "FORCE_SYNC" }, (res) => {
+    btn.disabled = false; btn.textContent = orig;
+    // Only overwrite the message if the popup is still open to receive the result.
+    if (msg && !chrome.runtime.lastError && res?.message) msg.textContent = res.message;
+  });
+});
+
 $("btn-open-app")?.addEventListener("click", () => { chrome.tabs.create({ url: FSCHOOLAI_URL }); window.close(); });
 $("btn-sign-out")?.addEventListener("click", async () => {
   await new Promise(resolve => chrome.runtime.sendMessage({ type: "SIGN_OUT" }, resolve));
@@ -226,6 +319,20 @@ $("btn-clear-pending")?.addEventListener("click", () => {
   chrome.runtime.sendMessage({ type: "CLEAR_PENDING" }, () => {
     if ($("pending-section")) $("pending-section").style.display = "none";
   });
+});
+
+// Live updates while the popup is open: the SW mirrors its queue/activity into
+// storage.liveState and its running totals into storage.stats — patch whichever
+// changed. pendingDownloads updates as downloads are captured/imported.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  // The pending panel + live card are signed-in-only UI (the pending list is a
+  // body-level sibling of the login form, so a download completing while signed
+  // out would otherwise surface it under the login screen).
+  if (!signedIn) return;
+  if (changes.liveState?.newValue) { lastLive  = changes.liveState.newValue; renderLive(lastLive, lastStats); }
+  if (changes.stats?.newValue)     { lastStats = changes.stats.newValue;     renderLive(lastLive, lastStats); }
+  if (changes.pendingDownloads)    renderPending();
 });
 
 init();

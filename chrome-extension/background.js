@@ -14,6 +14,8 @@
 const FSCHOOLAI_ORIGIN = "https://fschoolai.com";
 const API_BASE         = FSCHOOLAI_ORIGIN;
 
+const FULL_SYNC_TTL_MS = 6 * 60 * 60 * 1000;    // re-sync a given LMS host at most every 6h
+
 const INLINE_B64_LIMIT = 3_000_000;             // base64 chars (~2.2MB binary) — under Vercel's cap
 const MAX_FILE_BYTES   = 50 * 1024 * 1024;      // absolute cap, matches the server
 const CAPTURED_MAX     = 800;                    // LRU size of the "already imported" URL set
@@ -136,7 +138,10 @@ function keepaliveStart() {
   keepaliveTimer = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20_000);
 }
 function keepaliveStop() {
-  if (keepaliveTimer && queueDepth === 0) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+  // Keep the worker alive while EITHER a file is queued OR a full sync is running
+  // (its enumeration phase has queueDepth 0 but must survive the popup closing /
+  // tab switch — otherwise MV3 evicts the worker and the sync dies).
+  if (keepaliveTimer && queueDepth === 0 && !fullSyncActive) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
 }
 
 // ── Byte helpers ─────────────────────────────────────────────────────────────
@@ -271,18 +276,143 @@ async function fetchCloudFile(href) {
 
 // ── SW-side file fetch (CORS bypass; used when the content script can't) ────
 
-async function fetchFileBytes(url) {
-  const res = await fetch(url, { credentials: "include", redirect: "follow" });
+// Server-declared filename beats anything guessed from link text — viewer links
+// (D2L topics, Canvas files, Moodle resources) carry no filename in the URL at all.
+function filenameFromDisposition(cd) {
+  if (!cd) return null;
+  // RFC 5987: filename*=UTF-8'lang'encoded — the language tag is optional but
+  // legal (UTF-8'en'r%C3%A9sum%C3%A9.pdf); preferred when both forms are present.
+  let m = cd.match(/filename\*\s*=\s*utf-8'[^']*'([^;]+)/i);
+  if (m) { try { return decodeURIComponent(m[1].trim()); } catch { /* fall through */ } }
+  m = cd.match(/filename\s*=\s*"([^"]+)"/i) || cd.match(/filename\s*=\s*([^;]+)/i);
+  if (m) return m[1].trim().replace(/^"+|"+$/g, "") || null;
+  return null;
+}
+
+// Fallback: the final (post-redirect) URL often carries the real filename —
+// e.g. Moodle's /pluginfile.php/.../lecture1.pdf, D2L's signed CDN URLs.
+function filenameFromUrl(u) {
+  try {
+    const seg = new URL(u).pathname.split("/").filter(Boolean).pop() ?? "";
+    if (/\.[a-z0-9]{2,8}$/i.test(seg)) return decodeURIComponent(seg);
+  } catch {}
+  return null;
+}
+
+// Redirect chains that end on an SSO/login endpoint mean the LMS session is
+// stale — an environmental condition, not a property of the file. Detecting it
+// gives a precise error AND keeps it out of the permanent failure backoff.
+function looksLikeLoginUrl(u) {
+  try {
+    const { hostname, pathname } = new URL(u);
+    return /(^|\/)(login|signin|sign-in|sso|saml2?|cas|adfs|idp|oauth2?|authorize|authentication)(\/|$|\.)/i.test(pathname)
+        || /^(login|sso|auth|idp|cas|adfs)\./i.test(hostname);
+  } catch { return false; }
+}
+
+function transientError(message) {
+  const e = new Error(message);
+  e.transient = true;      // importFileWork surfaces this so backoff never strikes it
+  return e;
+}
+
+// Shared response→bytes pipeline: size caps, HTML/login-wall rejection, and
+// server-declared filename extraction (Content-Disposition, then final URL).
+async function bytesFromResponse(res) {
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  // Redirect chains can land anywhere — a public viewer URL 302ing to an internal
+  // host must not have its content ingested (same rationale as isPrivateTarget on
+  // the entry URL; this covers every resolver-derived and post-redirect fetch).
+  if (res.url && isPrivateTarget(res.url)) throw new Error("Refusing a private/internal address");
   const mimeType = res.headers.get("content-type")?.split(";")[0]?.trim() ?? "application/octet-stream";
   const buffer = await res.arrayBuffer();
   if (buffer.byteLength > MAX_FILE_BYTES) throw new Error("File too large (max 50 MB)");
   if (buffer.byteLength === 0) throw new Error("Empty response");
   const b64 = bufferToBase64(buffer);
   if (mimeType.includes("text/html") || base64LooksLikeHtml(b64)) {
+    if (looksLikeLoginUrl(res.url)) throw transientError("LMS session expired — log in to your LMS and retry");
     throw new Error("Got a login/HTML page instead of the file — are you signed in to the LMS?");
   }
-  return { bytes: b64, mimeType };
+  const filename = filenameFromDisposition(res.headers.get("content-disposition")) || filenameFromUrl(res.url);
+  return { bytes: b64, mimeType, filename, finalUrl: res.url };
+}
+
+async function fetchFileBytes(url) {
+  const res = await fetch(url, { credentials: "include", redirect: "follow" });
+  return bytesFromResponse(res);
+}
+
+// Diagnostic: fetch a URL the exact same way the download does, but report the
+// RAW result (status, where it redirected to, content-type, a body snippet)
+// instead of a cleaned-up error. This is how we see what the LMS actually returns
+// to the service worker, rather than guessing from a summarized message.
+async function diagnoseFetch(url) {
+  try {
+    const res = await fetch(url, { credentials: "include", redirect: "follow" });
+    let snippet = "";
+    try { snippet = (await res.clone().text()).slice(0, 180).replace(/\s+/g, " ").trim(); } catch {}
+    const diag = {
+      status: res.status,
+      ok: res.ok,
+      redirected: res.redirected,
+      finalUrl: res.url,
+      ctype: (res.headers.get("content-type") || "").split(";")[0].trim(),
+      snippet,
+    };
+    console.log("[FschoolAI] diagnose", url, "→", diag);
+    return diag;
+  } catch (e) {
+    const diag = { error: String((e && e.message) || e) };
+    console.log("[FschoolAI] diagnose", url, "→ threw", diag.error);
+    return diag;
+  }
+}
+
+// ── Viewer-link resolver ─────────────────────────────────────────────────────
+// Some LMS links need more than a straight fetch (see viewerRuleFor in content.js):
+//   canvas-module-item — /courses/{c}/modules/items/{i} 302s to the item; only
+//     File items land on /files/{id} (then rewritten to the raw-bytes URL).
+//     fetch() can't expose Location headers (opaqueredirect), so we follow the
+//     redirect chain and inspect the FINAL URL instead.
+//   moodle-resource — /mod/resource/view.php?id= 302s straight to /pluginfile.php
+//     in the common display modes (plain fetch works); embed/frame modes return
+//     an HTML wrapper whose pluginfile link we extract (same-origin only).
+// Everything else: plain fetch + HTML rejection is the verification.
+
+async function resolveViewerFile(url, hint) {
+  if (hint === "canvas-module-item") {
+    const res = await fetch(url, { credentials: "include", redirect: "follow" });
+    // A stale Canvas session redirects to SSO — that's not "not a file".
+    if (looksLikeLoginUrl(res.url)) throw transientError("LMS session expired — log in to your LMS and retry");
+    const m = (res.url ?? "").match(/\/files\/(\d+)/);
+    if (!m) throw new Error("Not a file (module item is a page/quiz/link)");
+    const origin = new URL(res.url).origin;
+    return fetchFileBytes(`${origin}/files/${m[1]}/download?download_frd=1`);
+  }
+
+  if (hint === "moodle-resource") {
+    const res = await fetch(url, { credentials: "include", redirect: "follow" });
+    const ct = res.headers.get("content-type") ?? "";
+    if (res.ok && !ct.includes("text/html")) return bytesFromResponse(res);  // 302'd straight to the file
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Embed/in-frame display mode: the wrapper HTML carries the pluginfile link.
+    // The FIRST match isn't necessarily the resource — intro/description images
+    // are served via pluginfile too. Score every candidate: the mod_resource
+    // content area is the actual file, and document extensions beat images.
+    const html = await res.text();
+    const candidates = [...html.matchAll(/(?:href|src)\s*=\s*"([^"]*\/pluginfile\.php\/[^"]+)"/gi)]
+      .map((m) => m[1].replace(/&amp;/g, "&"));
+    if (!candidates.length) throw new Error("No file found in Moodle resource page");
+    const score = (u) =>
+      (/\/mod_resource\/content\//i.test(u) ? 2 : 0) +
+      (/\.(pdf|docx?|pptx?|xlsx?|txt|csv)([?#]|$)/i.test(u) ? 1 : 0);
+    candidates.sort((a, b) => score(b) - score(a));
+    const target = new URL(candidates[0], res.url);
+    if (target.origin !== new URL(url).origin) throw new Error("Cross-origin file blocked");
+    return fetchFileBytes(target.toString());
+  }
+
+  return fetchFileBytes(url);
 }
 
 // ── Signed-upload path for big files (Vercel body limit) ────────────────────
@@ -316,13 +446,80 @@ let importChain = Promise.resolve();
 let queueDepth  = 0;
 const inFlight  = new Set();   // canonical URLs currently queued/downloading (cross-frame dedup)
 
+// ── Live activity (surfaced to the popup so it isn't a static screen) ────────
+// The popup is a throwaway context and can't read the SW's in-memory queue vars,
+// so we mirror a compact snapshot into chrome.storage.local. The popup renders it
+// on open (via GET_STATUS, which also wakes the SW for a fresh read) and then
+// updates live through chrome.storage.onChanged. The counter + recent feed are
+// restored from the last snapshot on SW (re)start (see the startup block) so an
+// open popup's number never jumps backward when MV3 recycles the worker; both
+// reset on sign-out.
+
+let activeFile       = null;   // filename currently importing, or null when idle
+let sessionImported  = 0;      // successful (non-skipped) imports, restored across SW recycles
+const recentActivity = [];     // [{ name, status: "done"|"skipped"|"failed", t }]
+const RECENT_MAX = 6;
+let fullSyncActive   = false;   // an LMS full-course API sync is in progress
+
+function buildLiveState() {
+  return {
+    scanning:        queueDepth > 0,
+    queueDepth,
+    inFlight:        inFlight.size,
+    activeFile,
+    sessionImported,
+    recent:          recentActivity.slice(),
+    fullSync:        fullSyncActive,
+    updatedAt:       Date.now(),
+  };
+}
+
+// Trailing-debounced mirror: a batch of auto-captured files fires many queue/
+// activity transitions in a burst — collapse them into one storage write per
+// ~120ms so the popup gets a steady stream, not a stampede of onChanged events.
+// Always converges to the latest state within the window.
+//
+// flush=true bypasses the debounce and writes synchronously — used for the queue
+// rising/falling edges so the "scanning" spinner turns on/off instantly and can't
+// be lost to an MV3 worker eviction inside the debounce window (a pending
+// setTimeout doesn't keep the worker alive; the eager set() is issued in the same
+// tick, before keepalive teardown can let the worker sleep).
+let liveTimer = null, liveDirty = false;
+function writeLiveState(flush = false) {
+  liveDirty = true;
+  if (flush) {
+    if (liveTimer) { clearTimeout(liveTimer); liveTimer = null; }
+    liveDirty = false;
+    chrome.storage.local.set({ liveState: buildLiveState() });
+    return;
+  }
+  if (liveTimer) return;
+  liveTimer = setTimeout(() => {
+    liveTimer = null;
+    if (!liveDirty) return;
+    liveDirty = false;
+    chrome.storage.local.set({ liveState: buildLiveState() });
+  }, 120);
+}
+
+function pushActivity(name, status, error) {
+  recentActivity.unshift({ name: name || "file", status, error: error || null, t: Date.now() });
+  if (recentActivity.length > RECENT_MAX) recentActivity.length = RECENT_MAX;
+  writeLiveState();
+}
+
 function enqueueImport(task) {
   if (queueDepth >= QUEUE_MAX) {
-    return Promise.resolve({ error: "Import queue is full — try again in a minute" });
+    // transient: queue pressure says nothing about the file — must not burn backoff strikes.
+    return Promise.resolve({ error: "Import queue is full — try again in a minute", transient: true });
   }
   queueDepth++;
   keepaliveStart();
-  const run = importChain.then(task).finally(() => { queueDepth--; keepaliveStop(); });
+  writeLiveState(queueDepth === 1);       // 0→1: flush so the spinner turns on instantly
+  const run = importChain.then(task).finally(() => {
+    queueDepth--; keepaliveStop();
+    writeLiveState(queueDepth === 0);     // →0: flush the idle edge before the worker can sleep
+  });
   // Keep the chain alive even when a task rejects.
   importChain = run.catch(() => {});
   return run;
@@ -351,9 +548,29 @@ function reconcileFilename(filename, mimeType) {
   return haveExt === wantExt ? filename : `${stem}.${wantExt}`;
 }
 
-async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeType, platform, fetchUrl }) {
+// Thin wrapper around the real import: tracks the active filename + records the
+// outcome so the popup can show live "Importing X…" and a ticking counter. Never
+// lets a thrown error leave activeFile stuck (which would spin the popup forever).
+async function importFileInner(payload) {
+  const displayName = String(payload.filename || "file").split(/[/\\]/).pop() || "file";
+  activeFile = displayName;
+  writeLiveState();
+  let result;
+  try {
+    result = await importFileWork(payload);
+  } catch (e) {
+    result = { error: e?.message ?? "Network error" };
+  }
+  activeFile = null;
+  if (result?.ok && !result.skipped) sessionImported++;
+  pushActivity(displayName, result?.ok ? (result.skipped ? "skipped" : "done") : "failed", result?.ok ? null : result?.error);
+  return result;
+}
+
+async function importFileWork({ url, filename, pageUrl, courseId, bytes, mimeType, platform, fetchUrl, resolveHint }) {
   const auth = await getAuth();
-  if (!auth) return { error: "Not signed in. Open the extension popup to sign in." };
+  // transient: signed-out is not a property of the file — must not burn backoff strikes.
+  if (!auth) return { error: "Not signed in. Open the extension popup to sign in.", transient: true };
 
   const canonicalKey = canonicalizeUrl(url ?? fetchUrl);
   try {
@@ -362,12 +579,15 @@ async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeTy
     if ((await getCaptured()).includes(canonicalKey)) return { ok: true, skipped: true };
 
     // Fetch here (SW bypasses CORS) when the content script couldn't, or for
-    // pending-download imports where only the URL is known.
+    // pending-download imports where only the URL is known. Viewer links carry a
+    // resolveHint and go through the platform resolver.
     if (!bytes && fetchUrl) {
       if (isPrivateTarget(fetchUrl)) return { error: "Refusing to fetch a private/internal address" };
-      const fetched = await fetchFileBytes(fetchUrl);
+      const fetched = await resolveViewerFile(fetchUrl, resolveHint);
       bytes    = fetched.bytes;
       mimeType = mimeType && mimeType !== "application/octet-stream" ? mimeType : fetched.mimeType;
+      // Server-declared name (Content-Disposition / final URL) beats link-text guesses.
+      if (fetched.filename) filename = fetched.filename;
     }
     if (!bytes) return { error: "No file data" };
     if (base64LooksLikeHtml(bytes)) {
@@ -413,7 +633,10 @@ async function importFileInner({ url, filename, pageUrl, courseId, bytes, mimeTy
     }
     return { ok: true, skipped: data.skipped, documentId: data.documentId };
   } catch (e) {
-    return { error: e.message ?? "Network error" };
+    // Environmental failures must not burn backoff strikes: fetch() throws
+    // TypeError on network-level failures (offline, DNS, blocked), and resolvers
+    // flag login-wall redirects with e.transient (see transientError()).
+    return { error: e.message ?? "Network error", transient: e instanceof TypeError || e?.transient === true };
   }
 }
 
@@ -443,17 +666,34 @@ async function autoImportBatch({ items, pageUrl, platform }) {
   }
 
   let imported = 0, skipped = 0, failed = 0;
+  const strikeKeys = [];
   try {
     for (const it of fresh) {
       const r = await importFile({
         url: it.url, fetchUrl: it.url, filename: it.filename,
-        pageUrl, courseId: null, platform,
+        pageUrl, courseId: null, platform, resolveHint: it.resolveHint,
       });
       if (r?.ok) { if (r.skipped) skipped++; else imported++; }
-      else { failed++; await recordFailure(it.key); }
+      else {
+        failed++;
+        // Only permanent failures count toward the 3-strike/7-day backoff.
+        // Queue-full, signed-out, and network errors are transient — striking
+        // them would silently blacklist perfectly good files for a week.
+        if (!r?.transient) strikeKeys.push(it.key);
+      }
     }
   } finally {
     for (const it of fresh) inFlight.delete(it.key);
+  }
+  // Login-wall heuristic: when EVERYTHING in a 3+ batch failed and nothing
+  // actually imported, the cause is almost certainly environmental (expired LMS
+  // session serving login pages) — don't strike, or good files get blacklisted
+  // while the user is merely logged out. Mixed batches strike normally: a
+  // failure next to real imports is file-specific (e.g. a D2L Link topic).
+  // Note `skipped` doesn't count as proof of life — dedup-skips never hit the
+  // network, so they say nothing about whether the LMS session works.
+  if (imported > 0 || strikeKeys.length < 3) {
+    for (const k of strikeKeys) await recordFailure(k);
   }
   if (imported > 0) bumpStat("autoImported", imported);
   return { ok: true, imported, skipped, failed, considered: fresh.length };
@@ -464,6 +704,404 @@ function bumpStat(key, by) {
     stats[key] = (stats[key] ?? 0) + by;
     chrome.storage.local.set({ stats });
   });
+}
+
+// ── Full-course API sync ─────────────────────────────────────────────────────
+// The zero-friction path: once the user has consented to a host, enumerate EVERY
+// course file via the LMS's own API (injected into the page's MAIN world) and
+// import them all — no tabs opened, no page-by-page clicking. Gated on consent
+// (mode "on"), throttled per host, and serialized through the same import queue
+// (with a small pool so we never overflow QUEUE_MAX or hammer the LMS).
+
+const fullSyncHosts = new Set();   // hosts with a sync in flight (re-entry guard)
+const SYNC_ERROR_COOLDOWN_MS = 5 * 60 * 1000;   // back off a host after a transient enum error
+const syncErrorAt = new Map();                   // host → last-error ts (in-memory)
+
+// In-memory cache of hosts the user consented to ("on"), so tabs.onUpdated can
+// pre-filter with a synchronous Set lookup instead of a storage read on EVERY
+// navigation the user makes anywhere. Repopulated on SW start; kept in sync by
+// SET_SITE_MODE and a storage.onChanged listener.
+const consentedHosts = new Set();
+async function refreshConsentedHosts() {
+  const autoSites = await new Promise((r) => chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) => r(autoSites)));
+  consentedHosts.clear();
+  for (const h in autoSites) if (autoSites[h] === "on") consentedHosts.add(h);
+}
+
+// eTLD+1 approximation (no public-suffix list in a service worker): the last two
+// labels. Defence-in-depth only — it over-allows within a shared ccTLD but never
+// under-allows a legitimate same-host file, and pairs with the CDN allowlist.
+function registrableDomain(host) {
+  const p = String(host || "").toLowerCase().split(".").filter(Boolean);
+  return p.slice(-2).join(".");
+}
+// LMS file CDNs that legitimately serve files off a different domain than the portal.
+const LMS_FILE_HOST_ALLOW = [
+  /(^|\.)inscloudgate\.net$/,        // Canvas inst-fs
+  /(^|\.)instructure-uploads[.-]/,   // Canvas S3 upload buckets
+  /(^|\.)brightspace\.com$/,         // D2L CDN
+  /(^|\.)brightspacecdn\.com$/,
+  /(^|\.)desire2learn\.com$/,
+];
+// The enumerated file URL comes from the page's MAIN world, which the site fully
+// controls (it can override window.fetch/ENV to return arbitrary URLs). Before
+// fetching it WITH CREDENTIALS, constrain it to the consented host's own org
+// domain or a known LMS CDN — otherwise a hostile consented page could drive
+// credentialed cross-origin GETs or poison the RAG with third-party content.
+function isAllowedSyncFileUrl(fileUrl, tabHost) {
+  try {
+    const h = new URL(fileUrl).hostname.toLowerCase();
+    const th = String(tabHost || "").toLowerCase();
+    if (!h) return false;
+    if (h === th || h.endsWith("." + th) || th.endsWith("." + h)) return true;
+    if (registrableDomain(h) && registrableDomain(h) === registrableDomain(th)) return true;
+    return LMS_FILE_HOST_ALLOW.some((re) => re.test(h));
+  } catch { return false; }
+}
+
+async function getSyncTimes() {
+  return new Promise((r) => chrome.storage.local.get(["syncTimes"], ({ syncTimes }) =>
+    r(syncTimes && typeof syncTimes === "object" ? syncTimes : {})));
+}
+async function markSynced(host) {
+  const m = await getSyncTimes();
+  m[host] = Date.now();
+  const keys = Object.keys(m);
+  if (keys.length > 100) delete m[keys[0]];   // bound the map
+  await new Promise((r) => chrome.storage.local.set({ syncTimes: m }, r));
+}
+
+// Bounded-concurrency runner: caps outstanding work so we neither overflow the
+// import queue nor stampede the LMS with parallel downloads.
+async function runPool(items, limit, fn) {
+  let i = 0;
+  const worker = async () => { while (i < items.length) { const idx = i++; try { await fn(items[idx]); } catch { /* isolate */ } } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+async function siteMode(host) {
+  return new Promise((r) => chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) =>
+    r(autoSites[host])));
+}
+
+// ── LMS enumeration IN THE SERVICE WORKER ────────────────────────────────────
+// Research-verified: an MV3 SW fetch with host_permissions + credentials:"include"
+// sends the LMS session cookies (SameSite Lax/Strict) AND bypasses CORS, so it can
+// read the cross-origin inst-fs/S3 CDN that Canvas 302-redirects downloads to. A
+// content-script/page fetch runs with the PAGE origin, ignores host_permissions,
+// and is CORS-blocked on that CDN hop — which is exactly the wall the in-page
+// approach hit. So ALL authenticated I/O (enumerate + download) happens HERE.
+// Canvas needs no token (cookie authorizes); D2L needs its XSRF token and Moodle
+// its sesskey, which only the page can read, so the content script passes them in.
+
+async function swGetJSON(url, headers) {
+  const r = await fetch(url, { credentials: "include", headers: { Accept: "application/json", ...(headers || {}) } });
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return { r, data: await r.json() };
+}
+
+async function enumCanvasSW(origin) {
+  const pageAll = async (path) => {
+    let url = origin + "/api/v1" + path + (path.includes("?") ? "&" : "?") + "per_page=100";
+    const out = [];
+    for (let i = 0; i < 40 && url; i++) {
+      const { r, data } = await swGetJSON(url);
+      if (Array.isArray(data)) out.push(...data); else break;
+      const m = (r.headers.get("Link") || "").match(/<([^>]+)>;\s*rel="next"/);
+      url = m ? m[1] : null;
+    }
+    return out;
+  };
+  let courses = await pageAll("/courses?enrollment_state=active&enrollment_type=student");
+  if (!courses.length) courses = await pageAll("/courses");
+  courses = courses.filter((c) => c.id && c.name && !c.access_restricted_by_date);
+  const files = [];
+  const seen = new Set();
+  const add = (cid, fid, name) => {
+    const k = "f:" + cid + ":" + fid;
+    if (!fid || seen.has(k)) return;
+    seen.add(k);
+    // The SW's credentials:"include" fetch lets the session cookie authorize this
+    // download and follow the 302 to the inst-fs CDN — no verifier needed. The real
+    // filename comes back via Content-Disposition, so a null name is fine here.
+    files.push({ url: `${origin}/courses/${cid}/files/${fid}/download?download_frd=1`, filename: name || ("file_" + fid), courseId: String(cid) });
+  };
+  const addUrl = (cid, url) => {
+    if (!url || seen.has("u:" + url)) return;
+    seen.add("u:" + url);
+    files.push({ url, filename: null, courseId: String(cid) });
+  };
+  // UNIVERSAL file extractor: given ANY page's HTML, pull out every downloadable
+  // file the user could see on it — however the LMS structures things:
+  //   (a) Canvas file ids anywhere (/files/{id}, incl. preview/embed/api forms)
+  //   (b) direct href/src links to a document, a /download, or a pluginfile.
+  // This is the general "if it's on a page the user can reach, we get it" rule.
+  const DOC_EXT_RE = /\.(pdf|docx?|pptx?|xlsx?|txt|csv|rtf|odt|odp)(\?|#|$)/i;
+  const addFromHtml = (cid, html) => {
+    if (!html || typeof html !== "string") return;
+    let m;
+    const idRe = /\/files\/(\d+)/g;
+    while ((m = idRe.exec(html))) add(cid, m[1], null);
+    const attrRe = /(?:href|src|data-api-endpoint|data-url)\s*=\s*["']([^"'\s>]+)["']/gi;
+    while ((m = attrRe.exec(html))) {
+      const raw = m[1].replace(/&amp;/g, "&");
+      if (/\/files\/\d+/.test(raw)) continue;   // Canvas file — handled by add() above
+      if (!DOC_EXT_RE.test(raw) && !/\/(pluginfile\.php|files\/download|download\?)/i.test(raw)) continue;
+      let abs; try { abs = new URL(raw, origin).toString(); } catch { continue; }
+      if (abs.startsWith(origin + "/")) addUrl(cid, abs);   // same-origin course resource only
+    }
+  };
+  // Fetch a Page's HTML and harvest its files. Reached via the module item the user
+  // actually clicks, so it works even when the Files/Pages TABS are disabled.
+  const scanPage = async (cid, slug) => {
+    try { const { data } = await swGetJSON(`${origin}/api/v1/courses/${cid}/pages/${encodeURIComponent(slug)}`); addFromHtml(cid, data && data.body); } catch { /* page blocked */ }
+  };
+  await Promise.all(courses.map(async (c) => {
+    // Walk EVERY module item the user can click — not just File items. Page items
+    // ("Class 3 slides", etc.) hold their PDFs in the page body, so fetch + extract.
+    try {
+      const mods = await pageAll(`/courses/${c.id}/modules?include[]=items&include[]=content_details`);
+      const pageSlugs = new Set();
+      for (const mod of mods) for (const it of (mod.items || [])) {
+        if (it.type === "File" && it.content_id) add(c.id, it.content_id, it.title || (it.content_details && it.content_details.display_name));
+        else if (it.type === "Page" && it.page_url) pageSlugs.add(it.page_url);
+      }
+      await Promise.all([...pageSlugs].map((slug) => scanPage(c.id, slug)));
+    } catch { /* modules off */ }
+    // Files tab (best effort; often 403 for students).
+    try { for (const f of await pageAll(`/courses/${c.id}/files`)) add(c.id, f.id, f.display_name || f.filename); } catch { /* files tab off */ }
+    // Syllabus body.
+    try { const { data } = await swGetJSON(`${origin}/api/v1/courses/${c.id}?include[]=syllabus_body`); addFromHtml(c.id, data && data.syllabus_body); } catch { /* no syllabus */ }
+    // Pages index (catches pages not linked from any module), bounded.
+    try {
+      const pages = await pageAll(`/courses/${c.id}/pages`);
+      await Promise.all(pages.slice(0, 80).map((pg) => pg.url ? scanPage(c.id, pg.url) : null));
+    } catch { /* pages tab off — module Page items above already covered the reachable ones */ }
+    // Assignment descriptions.
+    try { for (const a of await pageAll(`/courses/${c.id}/assignments`)) addFromHtml(c.id, a && a.description); } catch { /* assignments off */ }
+  }));
+  return { lms: "canvas", files, courses: courses.length };
+}
+
+async function enumD2LSW(origin, xsrf) {
+  const dget = async (p) => (await swGetJSON(origin + p, { "X-Csrf-Token": xsrf || "" })).data;
+  let lpV = "1.30", leV = "1.50";
+  try { const vers = await dget("/d2l/api/versions/"); const pick = (c) => (vers.find((v) => v.ProductCode === c) || {}).LatestVersion; lpV = pick("lp") || lpV; leV = pick("le") || leV; } catch { /* defaults */ }
+  const courses = []; let bm = "";
+  for (let i = 0; i < 25; i++) {
+    const ps = await dget(`/d2l/api/lp/${lpV}/enrollments/myenrollments/?orgUnitTypeId=3&isActive=true${bm ? `&bookmark=${encodeURIComponent(bm)}` : ""}`);
+    for (const it of (ps.Items || [])) { const o = it.OrgUnit || {}; if (o.Id) courses.push(String(o.Id)); }
+    if (ps.PagingInfo && ps.PagingInfo.HasMoreItems) bm = ps.PagingInfo.Bookmark; else break;
+  }
+  const files = [];
+  const seen = new Set();
+  const addUrl = (url, ou) => { if (!url || seen.has(url)) return; seen.add(url); files.push({ url, filename: null, courseId: String(ou) }); };
+  // Universal extractor for a D2L content page's HTML — pulls out embedded files
+  // however they're linked (same principle as Canvas): direct document links,
+  // /content/enforced/ course-file paths, and DirectFileTopicDownload links.
+  const DOC_EXT_RE = /\.(pdf|docx?|pptx?|xlsx?|txt|csv|rtf|odt|odp)(\?|#|$)/i;
+  const addFromHtml = (html, ou) => {
+    if (!html || typeof html !== "string") return;
+    let m; const re = /(?:href|src|data-url)\s*=\s*["']([^"'\s>]+)["']/gi;
+    while ((m = re.exec(html))) {
+      const raw = m[1].replace(/&amp;/g, "&");
+      if (!DOC_EXT_RE.test(raw) && !/DirectFileTopicDownload|\/content\/enforced\//i.test(raw)) continue;
+      let abs; try { abs = new URL(raw, origin).toString(); } catch { continue; }
+      if (abs.startsWith(origin + "/")) addUrl(abs, ou);   // same-origin course resource only
+    }
+  };
+  await Promise.all(courses.map(async (ou) => {
+    let toc; try { toc = await dget(`/d2l/api/le/${leV}/${ou}/content/toc`); } catch { return; }
+    // Walk the TOC. File topics → the direct download. Content/HTML topics (and any
+    // topic whose Url isn't an external Link) → fetch the page the user would see
+    // and extract embedded files — so a PDF linked inside an HTML content topic
+    // (D2L's equivalent of a Canvas "Class N slides" page) is no longer missed.
+    const htmlUrls = new Set();
+    const walk = (mod) => {
+      for (const t of (mod.Topics || [])) {
+        if (t.TypeIdentifier === "File" && t.TopicId) {
+          addUrl(`${origin}/d2l/le/content/${ou}/topics/files/download/${t.TopicId}/DirectFileTopicDownload`, ou);
+        }
+        // Skip external links (Url/Link topics point off-site).
+        if (t.Url && t.TypeIdentifier !== "Link" && t.TypeIdentifier !== "Url") {
+          let u; try { u = new URL(t.Url, origin); } catch { u = null; }
+          if (u && u.origin === origin) {
+            if (DOC_EXT_RE.test(u.pathname)) addUrl(u.toString(), ou);       // directly-linked document
+            else if (/\.html?$/i.test(u.pathname) || t.TypeIdentifier !== "File") htmlUrls.add(u.toString());
+          }
+        }
+      }
+      for (const s of (mod.Modules || [])) walk(s);
+    };
+    for (const m of ((toc && toc.Modules) || [])) walk(m);
+    // Fetch content-page HTML (bounded, concurrency-limited) and extract embedded files.
+    await runPool([...htmlUrls].slice(0, 120), 6, async (u) => {
+      try {
+        const r = await fetch(u, { credentials: "include", redirect: "follow" });
+        if (r.ok && (r.headers.get("content-type") || "").includes("text/html")) addFromHtml(await r.text(), ou);
+      } catch { /* page blocked */ }
+    });
+  }));
+  return { lms: "d2l", files, courses: courses.length };
+}
+
+async function enumMoodleSW(origin, sesskey) {
+  if (!sesskey) return { lms: "moodle", error: true, files: [], detail: "no sesskey (open a Moodle page while logged in)" };
+  const call = async (methodname, args) => {
+    const r = await fetch(`${origin}/lib/ajax/service.php?sesskey=${encodeURIComponent(sesskey)}&info=${methodname}`, { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" }, body: JSON.stringify([{ index: 0, methodname, args }]) });
+    if (!r.ok) throw new Error(`moodle ${methodname} -> ${r.status}`);
+    const data = await r.json();
+    if (Array.isArray(data) && data[0] && !data[0].error) return data[0].data;
+    throw new Error("moodle " + methodname);
+  };
+  const cres = await call("core_course_get_enrolled_courses_by_timeline_classification", { classification: "all", limit: 0, offset: 0, sort: "fullname" });
+  const mc = (cres && cres.courses) || [];
+  const files = [];
+  await Promise.all(mc.map(async (c) => {
+    try { const secs = await call("core_course_get_contents", { courseid: Number(c.id) }); for (const sec of (secs || [])) for (const mod of (sec.modules || [])) for (const ct of (mod.contents || [])) { if (ct.type === "file" && ct.fileurl) files.push({ url: ct.fileurl, filename: ct.filename || mod.name || "file", courseId: String(c.id) }); } } catch { /* skip */ }
+  }));
+  return { lms: "moodle", files, courses: mc.length };
+}
+
+// Dispatch to the right adapter. Throws → caller treats as a retryable enum error.
+async function enumerateSW(lms, origin, tokens = {}) {
+  if (lms === "canvas") return enumCanvasSW(origin);
+  if (lms === "d2l")    return enumD2LSW(origin, tokens.xsrf);
+  if (lms === "moodle") return enumMoodleSW(origin, tokens.sesskey);
+  return { lms: null, files: [] };
+}
+
+// Human-readable summary of a runFullSync result (shown by the popup's Sync button).
+function summarizeSync(r) {
+  if (!r) return "Sync failed.";
+  switch (r.reason) {
+    case "no-content-script": return "Couldn't reach the page — reload the LMS tab, then Sync.";
+    case "no-lms":            return "No supported LMS on this tab. Open your Canvas / D2L / Moodle course area and try again.";
+    case "enum-error":        return `Couldn't read your courses${r.detail ? ` (${String(r.detail).slice(0, 60)})` : ""}. Are you logged into the LMS?`;
+    case "signed-out":        return "Sign into the extension first.";
+    case "autocapture-off":   return "Auto-capture is turned off (see the toggle below).";
+    case "already-running":   return "A sync is already running…";
+    case "throttled":         return "Already synced recently — files are up to date.";
+    case "done": {
+      if (r.total === 0) return `${r.lms}: no files found in your courses.`;
+      const parts = [];
+      if (r.imported > 0) parts.push(`imported ${r.imported}`);
+      if (r.skipped > 0)  parts.push(`${r.skipped} already`);
+      if (r.failed > 0)   parts.push(`${r.failed} failed`);
+      let m = parts.join(", ") || "done";
+      // On ANY failure, show the RAW response of a FAILING file so the real cause
+      // is visible (login page? locked? redirect to a library system?).
+      if (r.failed > 0 && r.diag) {
+        m += r.diag.error
+          ? ` — [fetch threw: ${r.diag.error}]`
+          : ` — [HTTP ${r.diag.status}${r.diag.redirected ? " →redirected" : ""}, ${r.diag.ctype || "?"}; ${r.diag.finalUrl || ""}; body: ${r.diag.snippet || ""}]`;
+      } else if (r.failed > 0 && r.lastError) {
+        m += ` — ${String(r.lastError).slice(0, 80)}`;
+      }
+      return m;
+    }
+    default: return "Sync started.";
+  }
+}
+
+async function runFullSync(tabId, host, { force = false } = {}) {
+  // Atomic re-entry guard: claim the host SYNCHRONOUSLY before any await, so two
+  // near-simultaneous triggers (two tabs, or consent racing an onUpdated) can't
+  // both pass a check-then-act gate and double-enumerate the whole library.
+  if (!host || fullSyncHosts.has(host)) return { ok: false, reason: "already-running" };
+  fullSyncHosts.add(host);
+  let started = false;
+  try {
+    const auth = await getAuth();
+    if (!auth) return { ok: false, reason: "signed-out" };
+    if (await siteMode(host) !== "on") return { ok: false, reason: "no-consent" };
+    if (!(await getSettings()).autoCapture) return { ok: false, reason: "autocapture-off" };
+    if (!force) {
+      const times = await getSyncTimes();
+      if (times[host] && Date.now() - times[host] < FULL_SYNC_TTL_MS) return { ok: true, reason: "throttled" };
+      const eAt = syncErrorAt.get(host);
+      if (eAt && Date.now() - eAt < SYNC_ERROR_COOLDOWN_MS) return { ok: false, reason: "cooldown" };
+    }
+
+    started = true;
+    fullSyncActive = true;
+    keepaliveStart();   // survive the popup closing / tab switch for the WHOLE sync
+    writeLiveState();
+
+    // Ask the top frame ONLY for what the SW can't read itself: which LMS this is,
+    // plus D2L's XSRF token / Moodle's sesskey (page-scoped). Canvas needs neither.
+    const ctx = await new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, { type: "GET_LMS_CONTEXT" }, { frameId: 0 },
+        (r) => resolve(chrome.runtime.lastError ? null : r));
+    });
+    if (!ctx) return { ok: false, reason: "no-content-script" };
+    if (!ctx.lms) return { ok: false, reason: "no-lms" };
+
+    // Enumerate + download entirely in the SW (credentials:"include" → cookies
+    // sent + CORS bypassed, so the inst-fs CDN redirect is readable).
+    const origin = "https://" + host;
+    let res;
+    try {
+      res = await enumerateSW(ctx.lms, origin, { xsrf: ctx.xsrf, sesskey: ctx.sesskey });
+    } catch (e) {
+      syncErrorAt.set(host, Date.now());
+      return { ok: false, reason: "enum-error", lms: ctx.lms, detail: String((e && e.message) || e) };
+    }
+    if (res && res.error) { syncErrorAt.set(host, Date.now()); return { ok: false, reason: "enum-error", lms: ctx.lms, detail: res.detail }; }
+    if (!res || !res.lms) return { ok: false, reason: "no-lms" };
+    syncErrorAt.delete(host);
+
+    const files = Array.isArray(res.files) ? res.files : [];
+    let imported = 0, skipped = 0, failed = 0, blocked = 0, lastError = null, firstFailUrl = null;
+    await runPool(files, 6, async (f) => {
+      if (!f || !f.url) return;
+      // isPrivateTarget blocks internal hosts; isAllowedSyncFileUrl blocks
+      // third-party URLs (credentialed-fetch SSRF / RAG poison).
+      if (isPrivateTarget(f.url) || !isAllowedSyncFileUrl(f.url, host)) { blocked++; return; }
+      const key = canonicalizeUrl(f.url);
+      if (inFlight.has(key)) { skipped++; return; }   // always: concurrent-download dedup
+      // A forced/manual sync bypasses the per-browser capture history + failure
+      // backoff so it actually RE-imports under the current account (recovers from
+      // "35 already" after an account switch). The server still dedups per user.
+      if (!force) {
+        if ((await getCaptured()).includes(key)) { skipped++; return; }   // already imported (this browser)
+        if (await isBlockedByFailures(key)) { skipped++; return; }        // 3-strike backoff
+      }
+      inFlight.add(key);
+      try {
+        // Download in the SW (credentials:"include" → session cookie authorizes the
+        // download and follows the 302 to the CDN, which the SW can read).
+        const r = await importFile({ url: f.url, fetchUrl: f.url, filename: f.filename, courseId: f.courseId ?? null, platform: res.lms });
+        if (r?.ok) { if (r.skipped) skipped++; else imported++; }
+        else { failed++; lastError = r?.error || lastError; if (!firstFailUrl) firstFailUrl = f.url; if (!r?.transient) await recordFailure(key); }
+      } finally {
+        inFlight.delete(key);
+      }
+    });
+    if (blocked > 0) console.warn(`[FschoolAI] full-sync skipped ${blocked} off-domain file URL(s) on ${host}`);
+    if (imported > 0) bumpStat("autoImported", imported);
+    // Throttle only when something actually worked (or there was nothing to do).
+    // A non-empty enumeration that imported/skipped NOTHING (every file failed)
+    // smells transient — ingest down, expired session — so leave the host
+    // un-throttled and a refresh retries. Per-file 3-strike backoff still bounds it.
+    if (files.length === 0 || imported > 0 || skipped > 0) await markSynced(host);
+    console.log(`[FschoolAI] full-sync ${res.lms} on ${host}: ${files.length} files → ${imported} imported, ${skipped} skipped, ${failed} failed, ${blocked} blocked${lastError ? ` (last error: ${lastError})` : ""}`);
+    // Any failures → capture the RAW response of a FAILING file (status / redirect
+    // target / content-type / body snippet), so we can see exactly what the LMS
+    // returns for the files that don't work — not the ones that do.
+    let diag = null;
+    if (failed > 0) { try { diag = await diagnoseFetch(firstFailUrl || files[0].url); } catch {} }
+    return { ok: true, reason: "done", lms: res.lms, total: files.length, imported, skipped, failed, blocked, lastError, diag, sampleUrl: firstFailUrl };
+  } finally {
+    fullSyncHosts.delete(host);
+    // Only touch the live flag if we actually started work — gate-bail
+    // navigations (throttled revisits) must not churn storage.
+    if (started) {
+      fullSyncActive = fullSyncHosts.size > 0;
+      keepaliveStop();   // release the worker once no sync/queue needs it
+      writeLiveState();
+    }
+  }
 }
 
 // ── Message handlers ───────────────────────────────────────────────────────
@@ -502,6 +1140,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Live activity snapshot for the popup — one round-trip for live state + the
+  // current settings + all-time stats. Reading it also wakes the SW, so a stale
+  // "scanning" mirror from a previously-killed worker self-heals (queueDepth is 0
+  // on a fresh worker → scanning:false).
+  if (msg.type === "GET_STATUS") {
+    (async () => {
+      const settings = await getSettings();
+      const { stats = {} } = await new Promise(r => chrome.storage.local.get(["stats"], r));
+      return { ...buildLiveState(), settings, stats };
+    })().then(sendResponse);
+    return true;
+  }
+
   if (msg.type === "GET_SETTINGS") {
     (async () => {
       const settings = await getSettings();
@@ -522,6 +1173,49 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // Content script on a supported LMS asks us to sync this tab's whole library
+  // (e.g. it's already consented but no tab-load fired, or the user just signed
+  // in). Host is taken from the trusted sender tab; runFullSync re-checks consent
+  // + throttle, so this is safe and idempotent.
+  if (msg.type === "FULL_SYNC_NUDGE") {
+    const tabId = sender.tab?.id;
+    let host = "";
+    try { host = new URL(sender.tab?.url || "").hostname; } catch { /* no tab url */ }
+    if (tabId && host) runFullSync(tabId, host);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  // Manual "Sync my courses now" from the popup. Clicking it in the extension UI
+  // IS explicit consent for the active tab's host, so we set consent on and force
+  // past the 6h throttle. Gives the user a reliable retry when a sync failed.
+  if (msg.type === "FORCE_SYNC") {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      const tab = tabs && tabs[0];
+      let host = "";
+      try { host = new URL(tab?.url || "").hostname; } catch { /* no url */ }
+      if (!tab?.id || !host) { sendResponse({ ok: false, error: "Open your LMS in this tab, then click Sync." }); return; }
+      chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) => {
+        autoSites[host] = "on";
+        consentedHosts.add(host);
+        const keys = Object.keys(autoSites);
+        if (keys.length > 200) delete autoSites[keys[0]];
+        chrome.storage.local.set({ autoSites }, async () => {
+          // Clear the activity feed so the user sees ONLY this run's results,
+          // not stale entries from earlier extension versions.
+          recentActivity.length = 0; writeLiveState();
+          const r = await runFullSync(tab.id, host, { force: true });
+          const message = summarizeSync(r);
+          // Persist the result so it's shown even if the popup was closed during
+          // the sync (the whole point — it runs in the background).
+          chrome.storage.local.set({ lastSyncMsg: { text: message, at: Date.now() } });
+          sendResponse({ ok: !!r?.ok, host, message });
+        });
+      });
+    });
+    return true;
+  }
+
   if (msg.type === "GET_SITE_MODE") {
     chrome.storage.local.get(["autoSites"], ({ autoSites = {} }) => {
       const mode = autoSites[msg.payload?.host];
@@ -535,10 +1229,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const host = String(msg.payload?.host ?? "");
       const mode = msg.payload?.mode === "on" ? "on" : "off";
       if (host) autoSites[host] = mode;
+      if (host) { if (mode === "on") consentedHosts.add(host); else consentedHosts.delete(host); }
       // Bound the map.
       const keys = Object.keys(autoSites);
       if (keys.length > 200) delete autoSites[keys[0]];
-      chrome.storage.local.set({ autoSites }, () => sendResponse({ ok: true }));
+      chrome.storage.local.set({ autoSites }, () => {
+        sendResponse({ ok: true });
+        // Consent just granted → immediately pull the whole course library via
+        // the LMS API (force past the throttle: this is the user's first opt-in).
+        if (mode === "on" && sender.tab?.id) runFullSync(sender.tab.id, host, { force: true });
+      });
     });
     return true;
   }
@@ -558,7 +1258,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === "SIGN_OUT") {
-    chrome.storage.local.remove(["userId", "token", "expiresAt"], () => sendResponse({ ok: true }));
+    // Reset the live counters/feed so the next user doesn't inherit this session's numbers.
+    sessionImported = 0; activeFile = null; recentActivity.length = 0;
+    // Clear the per-browser capture memory too: capturedUrls / failedUrls / syncTimes
+    // are keyed by URL, NOT by account. Leaving them means a DIFFERENT user who
+    // signs in next gets every file skipped as "already captured" even though it
+    // was only ever indexed under the previous account (the "35 already" bug).
+    chrome.storage.local.remove(
+      ["userId", "token", "expiresAt", "capturedUrls", "failedUrls", "syncTimes"],
+      () => { writeLiveState(true); sendResponse({ ok: true }); });
     return true;
   }
 });
@@ -617,3 +1325,46 @@ chrome.downloads.onChanged.addListener(async (delta) => {
     chrome.action.setBadgeBackgroundColor({ color: "#4285F4" });
   });
 });
+
+// Subsequent visits to an already-consented LMS: re-run the full API sync on
+// page load (self-gates on consent "on" + the 6h throttle inside runFullSync).
+// Cheap when it no-ops — a couple of storage reads, no executeScript unless due.
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status !== "complete" || !tab.url) return;
+  let host;
+  try {
+    const u = new URL(tab.url);
+    if (!/^https?:$/.test(u.protocol)) return;
+    host = u.hostname;
+  } catch { return; }
+  // Cheap synchronous gate: only ever touch consented hosts. Non-LMS browsing
+  // (news, email, shopping) never wakes the sync path. runFullSync re-checks
+  // consent authoritatively from storage.
+  if (!consentedHosts.has(host)) return;
+  runFullSync(tabId, host);
+});
+
+// Keep the consented-host cache correct if autoSites is written anywhere.
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.autoSites) refreshConsentedHosts();
+});
+
+// On SW (re)start nothing is running yet. Restore the running counter + recent
+// feed from the last snapshot (so an open popup's counter doesn't jump backward
+// when MV3 recycles the worker), then publish a clean snapshot — queueDepth is 0
+// on a fresh worker, so this also forces scanning:false, healing any stale
+// "scanning" state a killed worker left behind. Counters are only restored while
+// signed in; a signed-out start clears them.
+(async () => {
+  const auth = await getAuth();
+  const { liveState } = await new Promise((r) => chrome.storage.local.get(["liveState"], r));
+  if (auth && liveState && typeof liveState === "object") {
+    sessionImported = Number(liveState.sessionImported) || 0;
+    if (Array.isArray(liveState.recent)) {
+      recentActivity.length = 0;
+      recentActivity.push(...liveState.recent.slice(0, RECENT_MAX));
+    }
+  }
+  writeLiveState(true);
+  await refreshConsentedHosts();   // repopulate the consented-host cache after an SW (re)start
+})();
