@@ -894,12 +894,53 @@ async function enumD2LSW(origin, xsrf) {
     if (ps.PagingInfo && ps.PagingInfo.HasMoreItems) bm = ps.PagingInfo.Bookmark; else break;
   }
   const files = [];
+  const seen = new Set();
+  const addUrl = (url, ou) => { if (!url || seen.has(url)) return; seen.add(url); files.push({ url, filename: null, courseId: String(ou) }); };
+  // Universal extractor for a D2L content page's HTML — pulls out embedded files
+  // however they're linked (same principle as Canvas): direct document links,
+  // /content/enforced/ course-file paths, and DirectFileTopicDownload links.
+  const DOC_EXT_RE = /\.(pdf|docx?|pptx?|xlsx?|txt|csv|rtf|odt|odp)(\?|#|$)/i;
+  const addFromHtml = (html, ou) => {
+    if (!html || typeof html !== "string") return;
+    let m; const re = /(?:href|src|data-url)\s*=\s*["']([^"'\s>]+)["']/gi;
+    while ((m = re.exec(html))) {
+      const raw = m[1].replace(/&amp;/g, "&");
+      if (!DOC_EXT_RE.test(raw) && !/DirectFileTopicDownload|\/content\/enforced\//i.test(raw)) continue;
+      let abs; try { abs = new URL(raw, origin).toString(); } catch { continue; }
+      if (abs.startsWith(origin + "/")) addUrl(abs, ou);   // same-origin course resource only
+    }
+  };
   await Promise.all(courses.map(async (ou) => {
-    try {
-      const toc = await dget(`/d2l/api/le/${leV}/${ou}/content/toc`);
-      const walk = (mod) => { for (const t of (mod.Topics || [])) { if (t.TypeIdentifier === "File" && t.TopicId) files.push({ url: `${origin}/d2l/le/content/${ou}/topics/files/download/${t.TopicId}/DirectFileTopicDownload`, filename: t.Title || ("topic_" + t.TopicId), courseId: String(ou) }); } for (const s of (mod.Modules || [])) walk(s); };
-      for (const m of ((toc && toc.Modules) || [])) walk(m);
-    } catch { /* skip course */ }
+    let toc; try { toc = await dget(`/d2l/api/le/${leV}/${ou}/content/toc`); } catch { return; }
+    // Walk the TOC. File topics → the direct download. Content/HTML topics (and any
+    // topic whose Url isn't an external Link) → fetch the page the user would see
+    // and extract embedded files — so a PDF linked inside an HTML content topic
+    // (D2L's equivalent of a Canvas "Class N slides" page) is no longer missed.
+    const htmlUrls = new Set();
+    const walk = (mod) => {
+      for (const t of (mod.Topics || [])) {
+        if (t.TypeIdentifier === "File" && t.TopicId) {
+          addUrl(`${origin}/d2l/le/content/${ou}/topics/files/download/${t.TopicId}/DirectFileTopicDownload`, ou);
+        }
+        // Skip external links (Url/Link topics point off-site).
+        if (t.Url && t.TypeIdentifier !== "Link" && t.TypeIdentifier !== "Url") {
+          let u; try { u = new URL(t.Url, origin); } catch { u = null; }
+          if (u && u.origin === origin) {
+            if (DOC_EXT_RE.test(u.pathname)) addUrl(u.toString(), ou);       // directly-linked document
+            else if (/\.html?$/i.test(u.pathname) || t.TypeIdentifier !== "File") htmlUrls.add(u.toString());
+          }
+        }
+      }
+      for (const s of (mod.Modules || [])) walk(s);
+    };
+    for (const m of ((toc && toc.Modules) || [])) walk(m);
+    // Fetch content-page HTML (bounded, concurrency-limited) and extract embedded files.
+    await runPool([...htmlUrls].slice(0, 120), 6, async (u) => {
+      try {
+        const r = await fetch(u, { credentials: "include", redirect: "follow" });
+        if (r.ok && (r.headers.get("content-type") || "").includes("text/html")) addFromHtml(await r.text(), ou);
+      } catch { /* page blocked */ }
+    });
   }));
   return { lms: "d2l", files, courses: courses.length };
 }
