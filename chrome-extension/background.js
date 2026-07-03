@@ -138,7 +138,10 @@ function keepaliveStart() {
   keepaliveTimer = setInterval(() => chrome.runtime.getPlatformInfo(() => {}), 20_000);
 }
 function keepaliveStop() {
-  if (keepaliveTimer && queueDepth === 0) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
+  // Keep the worker alive while EITHER a file is queued OR a full sync is running
+  // (its enumeration phase has queueDepth 0 but must survive the popup closing /
+  // tab switch — otherwise MV3 evicts the worker and the sync dies).
+  if (keepaliveTimer && queueDepth === 0 && !fullSyncActive) { clearInterval(keepaliveTimer); keepaliveTimer = null; }
 }
 
 // ── Byte helpers ─────────────────────────────────────────────────────────────
@@ -981,6 +984,7 @@ async function runFullSync(tabId, host, { force = false } = {}) {
 
     started = true;
     fullSyncActive = true;
+    keepaliveStart();   // survive the popup closing / tab switch for the WHOLE sync
     writeLiveState();
 
     // Ask the top frame ONLY for what the SW can't read itself: which LMS this is,
@@ -1053,6 +1057,7 @@ async function runFullSync(tabId, host, { force = false } = {}) {
     // navigations (throttled revisits) must not churn storage.
     if (started) {
       fullSyncActive = fullSyncHosts.size > 0;
+      keepaliveStop();   // release the worker once no sync/queue needs it
       writeLiveState();
     }
   }
@@ -1159,7 +1164,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           // not stale entries from earlier extension versions.
           recentActivity.length = 0; writeLiveState();
           const r = await runFullSync(tab.id, host, { force: true });
-          sendResponse({ ok: !!r?.ok, host, message: summarizeSync(r) });
+          const message = summarizeSync(r);
+          // Persist the result so it's shown even if the popup was closed during
+          // the sync (the whole point — it runs in the background).
+          chrome.storage.local.set({ lastSyncMsg: { text: message, at: Date.now() } });
+          sendResponse({ ok: !!r?.ok, host, message });
         });
       });
     });

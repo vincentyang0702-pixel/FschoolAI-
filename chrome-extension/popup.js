@@ -140,6 +140,14 @@ async function init() {
       if (ad) ad.checked = !!res.settings?.autoImportDownloads;
       lastLive = res; lastStats = res.stats ?? {};
       renderLive(lastLive, lastStats);
+      // Reflect a background sync's state/result even if the popup was closed during it.
+      const sm = $("sync-msg");
+      if (sm) {
+        if (res.fullSync) sm.textContent = "Syncing your courses in the background… (keep the LMS tab open)";
+        else chrome.storage.local.get(["lastSyncMsg"], ({ lastSyncMsg }) => {
+          if (lastSyncMsg?.text && !res.fullSync) sm.textContent = lastSyncMsg.text;
+        });
+      }
     });
   }
 }
@@ -289,12 +297,13 @@ $("signup-password")?.addEventListener("keydown", e => { if (e.key === "Enter") 
 
 $("btn-sync-now")?.addEventListener("click", () => {
   const btn = $("btn-sync-now"), orig = btn.textContent, msg = $("sync-msg");
-  btn.disabled = true; btn.textContent = "Syncing…"; if (msg) msg.textContent = "Reading your courses…";
+  btn.disabled = true; btn.textContent = "Syncing…";
+  // The sync runs in the background worker — the popup can close and it keeps going.
+  if (msg) msg.textContent = "Syncing… you can close this and keep browsing (just leave the LMS tab open).";
   chrome.runtime.sendMessage({ type: "FORCE_SYNC" }, (res) => {
     btn.disabled = false; btn.textContent = orig;
-    // Always show a concrete outcome — never leave the user staring at a static screen.
-    if (msg) msg.textContent = chrome.runtime.lastError ? "Extension restarted — click Sync again."
-                             : (res?.message || "Done.");
+    // Only overwrite the message if the popup is still open to receive the result.
+    if (msg && !chrome.runtime.lastError && res?.message) msg.textContent = res.message;
   });
 });
 
