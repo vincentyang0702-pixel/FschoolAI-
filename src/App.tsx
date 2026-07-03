@@ -390,6 +390,11 @@ export default function App() {
   // ── Onboarding complete ────────────────────────────────────────────────────
   const handleOnboardingComplete = useCallback(async ({
     preferredName, schoolName, schoolCity, schoolCountry, schoolContinent, token, baseUrl,
+    intake, intakeSkipped,
+  }: {
+    preferredName?: string; schoolName?: string; schoolCity?: string; schoolCountry?: string;
+    schoolContinent?: string; token?: string; baseUrl?: string;
+    intake?: Record<string, string>; intakeSkipped?: string[];
   }) => {
     if (preferredName) localStorage.setItem("fschool_name", preferredName);
     try {
@@ -404,6 +409,22 @@ export default function App() {
       if (schoolContinent) patch.school_continent = schoolContinent;
       await updateUserField(patch);
     } catch {}
+    // Intake answers go in a SEPARATE upsert: until the intake-columns
+    // migration runs, unknown columns fail the whole patch (PGRST204) and
+    // would take name/school down with them. localStorage draft still holds
+    // the answers either way.
+    if ((intake && Object.keys(intake).length > 0) || intakeSkipped?.length) {
+      try {
+        await updateUserField({
+          ...intake,
+          intake_meta: {
+            version: "onboarding-v2.1",
+            skipped: intakeSkipped ?? [],
+            completed_at: new Date().toISOString(),
+          },
+        });
+      } catch { /* column may be absent until the migration runs */ }
+    }
     if (token && baseUrl) {
       try { await saveCanvasCredentials(token, baseUrl); } catch {}
     }
