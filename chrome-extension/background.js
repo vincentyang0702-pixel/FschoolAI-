@@ -815,7 +815,7 @@ async function enumCanvasSW(origin) {
   const files = [];
   const seen = new Set();
   const add = (cid, fid, name) => {
-    const k = cid + ":" + fid;
+    const k = "f:" + cid + ":" + fid;
     if (!fid || seen.has(k)) return;
     seen.add(k);
     // The SW's credentials:"include" fetch lets the session cookie authorize this
@@ -823,38 +823,58 @@ async function enumCanvasSW(origin) {
     // filename comes back via Content-Disposition, so a null name is fine here.
     files.push({ url: `${origin}/courses/${cid}/files/${fid}/download?download_frd=1`, filename: name || ("file_" + fid), courseId: String(cid) });
   };
-  // Pull /files/{id} ids embedded in an HTML body (page/syllabus/assignment). This
-  // catches files that live in NO module — e.g. a syllabus PDF linked from a Page,
-  // whose on-page link points at the file PREVIEW (returns HTML), not the download.
-  const HTML_FILE_RE = /\/files\/(\d+)/g;
+  const addUrl = (cid, url) => {
+    if (!url || seen.has("u:" + url)) return;
+    seen.add("u:" + url);
+    files.push({ url, filename: null, courseId: String(cid) });
+  };
+  // UNIVERSAL file extractor: given ANY page's HTML, pull out every downloadable
+  // file the user could see on it — however the LMS structures things:
+  //   (a) Canvas file ids anywhere (/files/{id}, incl. preview/embed/api forms)
+  //   (b) direct href/src links to a document, a /download, or a pluginfile.
+  // This is the general "if it's on a page the user can reach, we get it" rule.
+  const DOC_EXT_RE = /\.(pdf|docx?|pptx?|xlsx?|txt|csv|rtf|odt|odp)(\?|#|$)/i;
   const addFromHtml = (cid, html) => {
     if (!html || typeof html !== "string") return;
-    let m; HTML_FILE_RE.lastIndex = 0;
-    while ((m = HTML_FILE_RE.exec(html))) add(cid, m[1], null);
+    let m;
+    const idRe = /\/files\/(\d+)/g;
+    while ((m = idRe.exec(html))) add(cid, m[1], null);
+    const attrRe = /(?:href|src|data-api-endpoint|data-url)\s*=\s*["']([^"'\s>]+)["']/gi;
+    while ((m = attrRe.exec(html))) {
+      const raw = m[1].replace(/&amp;/g, "&");
+      if (/\/files\/\d+/.test(raw)) continue;   // Canvas file — handled by add() above
+      if (!DOC_EXT_RE.test(raw) && !/\/(pluginfile\.php|files\/download|download\?)/i.test(raw)) continue;
+      let abs; try { abs = new URL(raw, origin).toString(); } catch { continue; }
+      if (abs.startsWith(origin + "/")) addUrl(cid, abs);   // same-origin course resource only
+    }
+  };
+  // Fetch a Page's HTML and harvest its files. Reached via the module item the user
+  // actually clicks, so it works even when the Files/Pages TABS are disabled.
+  const scanPage = async (cid, slug) => {
+    try { const { data } = await swGetJSON(`${origin}/api/v1/courses/${cid}/pages/${encodeURIComponent(slug)}`); addFromHtml(cid, data && data.body); } catch { /* page blocked */ }
   };
   await Promise.all(courses.map(async (c) => {
-    // Modules survive a disabled Files tab (where /courses/{id}/files 403s) — this
-    // is where the "Lecture N.pdf" materials live for most students (e.g. Quercus).
+    // Walk EVERY module item the user can click — not just File items. Page items
+    // ("Class 3 slides", etc.) hold their PDFs in the page body, so fetch + extract.
     try {
       const mods = await pageAll(`/courses/${c.id}/modules?include[]=items&include[]=content_details`);
-      for (const m of mods) for (const it of (m.items || [])) {
+      const pageSlugs = new Set();
+      for (const mod of mods) for (const it of (mod.items || [])) {
         if (it.type === "File" && it.content_id) add(c.id, it.content_id, it.title || (it.content_details && it.content_details.display_name));
+        else if (it.type === "Page" && it.page_url) pageSlugs.add(it.page_url);
       }
+      await Promise.all([...pageSlugs].map((slug) => scanPage(c.id, slug)));
     } catch { /* modules off */ }
     // Files tab (best effort; often 403 for students).
     try { for (const f of await pageAll(`/courses/${c.id}/files`)) add(c.id, f.id, f.display_name || f.filename); } catch { /* files tab off */ }
-    // Files embedded in the syllabus body.
+    // Syllabus body.
     try { const { data } = await swGetJSON(`${origin}/api/v1/courses/${c.id}?include[]=syllabus_body`); addFromHtml(c.id, data && data.syllabus_body); } catch { /* no syllabus */ }
-    // Files embedded in Pages (e.g. a "Syllabus" page with a PDF). Bounded to keep
-    // the call count sane on courses with many pages.
+    // Pages index (catches pages not linked from any module), bounded.
     try {
       const pages = await pageAll(`/courses/${c.id}/pages`);
-      await Promise.all(pages.slice(0, 60).map(async (pg) => {
-        if (!pg.url) return;
-        try { const { data } = await swGetJSON(`${origin}/api/v1/courses/${c.id}/pages/${encodeURIComponent(pg.url)}`); addFromHtml(c.id, data && data.body); } catch { /* page blocked */ }
-      }));
-    } catch { /* pages off */ }
-    // Files attached inside assignment descriptions.
+      await Promise.all(pages.slice(0, 80).map((pg) => pg.url ? scanPage(c.id, pg.url) : null));
+    } catch { /* pages tab off — module Page items above already covered the reachable ones */ }
+    // Assignment descriptions.
     try { for (const a of await pageAll(`/courses/${c.id}/assignments`)) addFromHtml(c.id, a && a.description); } catch { /* assignments off */ }
   }));
   return { lms: "canvas", files, courses: courses.length };
