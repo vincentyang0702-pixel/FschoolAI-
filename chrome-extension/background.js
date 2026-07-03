@@ -971,8 +971,14 @@ async function runFullSync(tabId, host, { force = false } = {}) {
       // third-party URLs (credentialed-fetch SSRF / RAG poison).
       if (isPrivateTarget(f.url) || !isAllowedSyncFileUrl(f.url, host)) { blocked++; return; }
       const key = canonicalizeUrl(f.url);
-      if ((await getCaptured()).includes(key) || inFlight.has(key)) { skipped++; return; }  // dedup vs history + concurrent captures
-      if (await isBlockedByFailures(key)) { skipped++; return; }                            // respect the 3-strike backoff
+      if (inFlight.has(key)) { skipped++; return; }   // always: concurrent-download dedup
+      // A forced/manual sync bypasses the per-browser capture history + failure
+      // backoff so it actually RE-imports under the current account (recovers from
+      // "35 already" after an account switch). The server still dedups per user.
+      if (!force) {
+        if ((await getCaptured()).includes(key)) { skipped++; return; }   // already imported (this browser)
+        if (await isBlockedByFailures(key)) { skipped++; return; }        // 3-strike backoff
+      }
       inFlight.add(key);
       try {
         // Download in the SW (credentials:"include" → session cookie authorizes the
@@ -1161,10 +1167,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === "SIGN_OUT") {
     // Reset the live counters/feed so the next user doesn't inherit this session's numbers.
     sessionImported = 0; activeFile = null; recentActivity.length = 0;
-    chrome.storage.local.remove(["userId", "token", "expiresAt"], () => {
-      writeLiveState(true);
-      sendResponse({ ok: true });
-    });
+    // Clear the per-browser capture memory too: capturedUrls / failedUrls / syncTimes
+    // are keyed by URL, NOT by account. Leaving them means a DIFFERENT user who
+    // signs in next gets every file skipped as "already captured" even though it
+    // was only ever indexed under the previous account (the "35 already" bug).
+    chrome.storage.local.remove(
+      ["userId", "token", "expiresAt", "capturedUrls", "failedUrls", "syncTimes"],
+      () => { writeLiveState(true); sendResponse({ ok: true }); });
     return true;
   }
 });
